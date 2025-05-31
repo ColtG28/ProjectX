@@ -1,3 +1,6 @@
+mod gui;
+
 fn main() {
-    println!("Hello, world!");
+    println!("Hello, World!");
+    gui::gui();
 }
