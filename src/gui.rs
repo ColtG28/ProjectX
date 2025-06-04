@@ -1,22 +1,22 @@
 use eframe::*;
-use egui:: CentralPanel;
+use egui::{CentralPanel, Ui};
 
-struct MyApp{}
+struct MyApp {}
 
-impl eframe:: App for MyApp {
+impl eframe::App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
-        CentralPanel::default().show(ctx, add_contents: |ui: &mut Ui| {
-            ui. label(text: "Hello, World!");
+        CentralPanel::default().show(ctx, |ui: &mut Ui| {
+            ui.label("Hello, World!");
         });
     }
 }
 
-pub fn gui() -> eframe::Result<(), eframe::Error> {
-    run_native(
-        app_name: "My App",
-        NativeOptions::default(),
-        app_creator: Box::new(|_cc: &CreationContext<'_>| {
-            Box::new(MyApp {})
-        }),
+pub fn gui() -> eframe::Result<()> {
+    let native_options = eframe::NativeOptions::default();
+
+    eframe::run_native(
+        "ProjectX Security System",
+        native_options,
+        Box::new(|_cc: &CreationContext<'_>| Ok(Box::new(MyApp {}))),
     )
 }
