@@ -8,3 +8,4 @@ MESSAGE=${1:-"Auto commit"}
 git add .
 git commit -m "$MESSAGE"
 git push
+
