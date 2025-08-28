@@ -2,6 +2,6 @@ mod gui;
 
 fn main() {
     println!("Hello, World!");
-    println!("Does this actually work like it's supposed to?");
+    println!("Ok maybe this works");
     gui::gui();
 }
