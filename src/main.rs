@@ -4,6 +4,7 @@ fn main() {
     println!("Hello, World!");
     println!("Ok maybe this works");
     gui::gui();
+    // Run the info collect and the analysis here...
 }
 
 // The following function will run through each area of the file collecting the data to fill out the struct essentially. 
