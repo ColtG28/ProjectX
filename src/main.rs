@@ -7,7 +7,7 @@ fn main() {
 }
 
 // The following function will run through each area of the file collecting the data to fill out the struct essentially. 
-fn collect_file_info(new_file: &File) -> File{
+fn collect_file_info(new_file: File) -> File{
     println!("Collecting information for file: {}", new_file.name);
     println!("File size: {} bytes", new_file.size);
     println!("File type: {}", new_file.file_type);
