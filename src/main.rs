@@ -6,3 +6,4 @@ fn main() {
     let _ = gui::gui();
     // Run the info collect and the analysis here...
 }
+
