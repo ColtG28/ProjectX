@@ -1,5 +1,5 @@
 use eframe::egui;
-use eframe::egui::{CentralPanel, Ui};
+use eframe::egui::{CentralPanel};
 
 pub fn gui() -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions::default();
