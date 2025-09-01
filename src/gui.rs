@@ -68,7 +68,7 @@ impl eframe::App for MyApp {
 
             ui.separator();
 
-            ui.image((self.my_image, egui::Vec2::new(640.0, 480.0)));
+            ui.image((self.my_image, egui::Vec2::new(640.0, 280.0)));
 
             ui.collapsing("Click to see what is hidden!", |ui| {
                 ui.label("Not much, as it turns out");
