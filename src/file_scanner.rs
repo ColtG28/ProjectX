@@ -1,17 +1,20 @@
-fn scan_file(){
-    // Call functions below.
+use std::fs;
+
+pub fn scan_file(file_name: &str) -> bool {
+    // Use the below struct initialization to create the file ojbect and collect the metadata.
+    let new_file =  File {
+        name: String::from("example.txt"),
+        size: 1024,
+        file_type: String::from("txt"),
+        hash: String::from("abc123"),
+        header: String::from("header_info"),
+        contents: vec![0; 1024], // Placeholder for file contents
+    };
+    let result = analyze_file(&new_file);
+
+    result
 }
 
-// The following function will run through each area of the file collecting the data to fill out the struct essentially. 
-fn collect_file_info(new_file: File) {
-    println!("Collecting information for file: {}", new_file.name);
-    println!("File size: {} bytes", new_file.size);
-    println!("File type: {}", new_file.file_type);
-    println!("File hash: {}", new_file.hash);
-    println!("File header: {}", new_file.header);
-    println!("File contents: {:?}", new_file.contents);
-    // new_file.clone()
-}
 struct File {
     name: String,
     size: u64,
@@ -22,8 +25,8 @@ struct File {
 }
 
 // The following will be used to run through the tests on each separate area of the file, returning a boolean of the file's safety.
-fn analyze_file(new_file: &File) -> bool {
-    println!("Analyzing file: {}", new_file.name);
+fn analyze_file(file: &File) -> bool {
+    println!("Analyzing file: {}", file.name);
     // Perform analysis on the file contents
     // Will return false if the file isn't safe. 
     /* 
