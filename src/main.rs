@@ -1,5 +1,5 @@
 mod gui;
-use std::fs;
+mod file_scanner;
 
 fn main() {
     println!("Hello, World!");
