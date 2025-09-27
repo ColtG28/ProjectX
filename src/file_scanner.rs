@@ -57,7 +57,6 @@ struct File<'a> {
 
 // The following will be used to run through the tests on each separate area of the file, returning a boolean of the file's safety.
 fn analyze_file(file: &File) -> bool {
-    println!("Analyzing file: {}", file.name);
     println!("File name: {}", file.name);
     println!("File size: {} bytes", file.size);
     println!("File type: {:#?}", file.file_type);
