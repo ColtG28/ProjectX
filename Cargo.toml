@@ -6,4 +6,6 @@ edition = "2021"
 [dependencies]
 eframe = "0.31.1"
 image = "0.25"
-moxcms = "0.7.4"
+moxcms = "0.7.5"
+sha2 = "0.10.9"
+hex = "0.4.3"

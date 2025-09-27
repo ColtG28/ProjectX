@@ -1,32 +1,57 @@
 use std::fs;
-use std::fs::FileType;
+use sha2::{Sha256, Digest};
+use hex;
+use std::path::Path;
 
+/*
+    This function will be used to scan a file given its path. It will collect the necessary information about the file
+    and then pass it to the analyze_file function for further analysis.    
+ */
 pub fn scan_file(file_path: &str) -> bool {
-    // Collect the metadata.
     let metadata = fs::metadata(file_path).unwrap();
-    let name = String::from(file_path);
+    
+    // File name
+    let name = Path::new(file_path).file_name().unwrap_or_default().to_string_lossy().to_string();
+    
+    // File size
     let size = metadata.len();
-    let file_type = metadata.file_type();
+    
+    // File type
+    let n1 = file_path.find(".").unwrap_or(file_path.len());
+    let file_type = &file_path[n1..];
+
+    // Hash
+    let mut sha256 = Sha256::new();
+    sha256.update(file_path);
+    let hash = format!("{:x}", sha256.finalize());
+
+    // Collect file hex
+    let hex = hex::encode(file_path);
+
+    // Collect file contents
+    let contents = fs::read_to_string(file_path).unwrap_or(String::from("Could not read file contents"));
+
     let new_file =  File {
         name: name,
         size: size,
         file_type: file_type,
-        hash: String::from("abc123"), // Need to collect.
-        header: String::from("header_info"), // Need to collect.
-        contents: vec![0; 1024], // Placeholder for file contents
+        hash: hash,
+        hex: hex,
+        contents: contents,
     };
+
     let result = analyze_file(&new_file);
 
     result
 }
 
-struct File {
+struct File<'a> {
     name: String,
     size: u64,
-    file_type: FileType,
+    file_type: &'a str,
     hash: String,
-    header: String,
-    contents: Vec<u8>, // Might want to switch this to something else in order to store the remaining file contents.
+    hex: String,
+    contents: String, 
 }
 
 
@@ -34,8 +59,11 @@ struct File {
 fn analyze_file(file: &File) -> bool {
     println!("Analyzing file: {}", file.name);
     println!("File name: {}", file.name);
-    println!("File size: {}", file.size);
+    println!("File size: {} bytes", file.size);
     println!("File type: {:#?}", file.file_type);
+    println!("File hash: {}", file.hash);
+    println!("File hex: {}", file.hex);
+    println!("File contents: {}", file.contents);
     
     // Perform analysis on the file contents
     // Will return false if the file isn't safe. 
