@@ -2,6 +2,7 @@ use std::fs;
 use sha2::{Sha256, Digest};
 use hex;
 use std::path::Path;
+use reqwest_wasm;
 
 /*
     This function will be used to scan a file given its path. It will collect the necessary information about the file
@@ -63,6 +64,14 @@ fn analyze_file(file: &File) -> bool {
     println!("File hash: {}", file.hash);
     println!("File hex: {}", file.hex);
     println!("File contents: {}", file.contents);
+
+    let mut rating = 10; 
+
+    if file.size < 1024 {
+        rating -= 2;
+    }
+
+    let hash_result: bool = reqwest_wasm::get("https://bazaar.abuse.ch/browse/").text();
     
     // Perform analysis on the file contents
     // Will return false if the file isn't safe. 
