@@ -72,10 +72,11 @@ fn analyze_file(file: &File) -> bool {
         rating -= 2;
     }
 
-    if check_query(file.hash) == true {
-        rating -= 5;
-    } 
-    
+    match check_query(file.hash) {
+        Ok(true) => return false,
+        Ok(false) => {},
+        Err(e) => eprintln!("Failed to query hash: {}", e),
+    }
     // Perform analysis on the file contents
     // Will return false if the file isn't safe. 
     /* 
@@ -86,11 +87,9 @@ fn analyze_file(file: &File) -> bool {
 }
 
 fn check_query(sha256: &str) -> Result<bool, Box<dyn std::error::Error>> {
-    let url = String::from("https://bazaar.abuse.ch/browse/");
+    let url = "https://bazaar.abuse.ch/browse/";
     let client = Client::builder().build()?;
-    let mut form = std::collections::HashMap::new();
-    form.insert("query", "get_info");
-    form.insert("sha256",sha256);
+    let form = [("query", "get_info"), ("sha256", sha256)];
 
     let resp = client.post(url)
         .header(USER_AGENT, "my-malware-checker/1.0")
@@ -101,12 +100,14 @@ fn check_query(sha256: &str) -> Result<bool, Box<dyn std::error::Error>> {
     let text = resp.text()?;
     let mb_resp: MBResponse = serde_json::from_str(&text)?;
 
-    if mb_resp.query_status.to_lowercase() == "ok" && !mb_resp.data.is_empty() {
-        Ok(true)
-    } else {
-        Ok(false)
+    // Helper function to check if the response status is "ok" and data is not empty
+    fn is_response_ok(resp: &MBResponse) -> bool {
+        resp.query_status.to_lowercase() == "ok" && !resp.data.is_empty()
     }
+
+    Ok(is_response_ok(&mb_resp))
 }
+
 
 #[derive(Deserialize, Debug)]
 struct MBResponse {
