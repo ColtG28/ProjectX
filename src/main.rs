@@ -15,3 +15,9 @@ fn main() {
 
     // Run the info collect and the analysis here...
 }
+
+
+/*
+For firewall include bit scanning, DNS testing, basically check where everything comes/goes, also make it to approve scripts to ignore captcha tests (hidden ones)
+
+*/
