@@ -92,7 +92,7 @@ fn analyze_file(file: &File) -> bool {
     for h in header_list[0] {
         if h == file.hex {
             let i = header_list.get(h);
-            if 
+            if .
         }
     }
     true
