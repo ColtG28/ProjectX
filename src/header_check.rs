@@ -4,33 +4,13 @@ use std::io::Read;
 
 const MAX_SIG_BYTES: usize = 32;
 
-pub fn find_header(hex_path: &str, extension: &str) -> bool {
-// hex string into file path
-    let path_bytes = match (0..hex_path.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&hex_path[i..i + 2], 16))
-        .collect::<Result<Vec<u8>, _>>()
-    {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            eprintln!("Failed to decode hex path");
-            return false;
-        }
-    };
-
-    let path = match std::str::from_utf8(&path_bytes) {
-        Ok(p) => p,
-        Err(_) => {
-            eprintln!("Decoded path is not valid UTF-8");
-            return false;
-        }
-    };
-
-    // Read first MAX_SIG_BYTES bytes of the file
-    let mut file = match File::open(path) {
+pub fn find_header(file_path: &str, extension: &str) -> bool {
+    let quarantine_path = format!("quarantine/{}", file_path);
+    
+    let mut file = match File::open(&quarantine_path) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("Failed to open file '{}': {}", path, e);
+            eprintln!("Failed to open file '{}': {}", quarantine_path, e);
             return false;
         }
     };
@@ -45,21 +25,14 @@ pub fn find_header(hex_path: &str, extension: &str) -> bool {
     };
     buffer.truncate(bytes_read);
 
-    let hex_preview: String = buffer.iter()
-    .map(|b| format!("{:02X} ", b))
-    .collect();
-    println!("File header bytes: {}", hex_preview.trim_end());
-
-    // Try all prefix lengths (longest first) to find the best match
     let ext_upper = extension
-    .trim_start_matches('.')
-    .trim_start_matches('"')
-    .trim_end_matches('"')
-    .to_uppercase();
+        .trim_start_matches('.')
+        .trim_start_matches('"')
+        .trim_end_matches('"')
+        .to_uppercase();
 
     let mut best_match: Option<&[&str]> = None;
 
-    // Each hex byte is "XX " (3 chars), last one is "XX" (2 chars).
     for sig_len in (1..=buffer.len()).rev() {
         let hex_sig: String = buffer[..sig_len]
             .iter()
@@ -79,7 +52,6 @@ pub fn find_header(hex_path: &str, extension: &str) -> bool {
         }
     }
 
-    // Check if the given extension is in the matched signature's list
     match best_match {
         Some(exts) => exts
             .iter()
@@ -90,7 +62,7 @@ pub fn find_header(hex_path: &str, extension: &str) -> bool {
                 println!("No signature found, file appears to be plain text.");
                 ext_upper == "TXT" || ext_upper == "CSV" || ext_upper == "LOG" || ext_upper == "MD"
             } else {
-                println!("No matching signature found for file: {}", path);
+                println!("No matching signature found for file: {}", quarantine_path);
                 false
             }
         }

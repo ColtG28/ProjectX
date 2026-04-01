@@ -6,6 +6,7 @@ mod content_check;
 
 fn main() {
     dotenvy::dotenv().ok();
+    init_quarantine();
     println!("Hello, World!");
     let file_path = "/Users/coltongorman/Desktop/TestFile.txt";
     file_scanner::scan_file(file_path);
@@ -17,6 +18,13 @@ fn main() {
     */
     
     // Run the info collect and the analysis here...
+}
+
+fn init_quarantine() {
+    let path = std::path::Path::new("quarantine");
+    if !path.exists() {
+        std::fs::create_dir(path).expect("Failed to create quarantine folder");
+    }
 }
 
 /*
