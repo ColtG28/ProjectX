@@ -1,12 +1,10 @@
+use core::hash;
 use std::fs;
 use sha2::{Sha256, Digest};
 use hex;
 use std::path::Path;
-use reqwest::blocking::Client;
-use serde::Deserialize;
-use crate::header_list::find_header;
-
-
+use crate::header_check::find_header;
+use crate::hash_check::check_malware_hash;
 
 /*
     This function will be used to scan a file given its path. It will collect the necessary information about the file
@@ -64,66 +62,50 @@ struct File<'a> {
 fn analyze_file(file: &File) -> bool {
     println!("File name: {}", file.name);
     println!("File size: {} bytes", file.size);
-    println!("File type: {:#?}", file.file_type);
+    println!("File type: {}", file.file_type);
     println!("File hash: {}", file.hash);
     println!("File hex: {}", file.hex);
     println!("File contents: {}", file.contents);
 
     let mut rating = 10; 
 
-    if file.size < 1024 {
+    // File size checks
+
+    if file.size == 0 {
+        return false;
+    } else if file.size < 512 {
+        rating -= 2;
+    } else if file.size < 1024 {
+        rating -= 1;
+    } else if file.size < 52_428_800 {
+        rating += 0;
+    } else if file.size <= 2_147_483_648 {
+        rating -= 1;
+    } else {
         rating -= 2;
     }
 
-    match check_query(file.hash, "cffbefaf6178b38f75902a99ee5463f8604a3b8bb26422e5") {
-        Ok(true) => return false,
-        Ok(false) => {},
-        Err(e) => eprintln!("Failed to query hash: {}", e),
+    // File hash check 
+
+    let hash_check = check_malware_hash(&file.hash);
+
+    if hash_check == true {
+        println!("File hash matches known malware hash.");
+        return false;
+    } else {
+        println!("File hash does not match any known malware hashes.");
     }
 
-    let is_valid = find_header(&file.hex, &file.file_type);
+    // File header Check
+
+    let header_check = find_header(&file.hex, &file.file_type);
 
     /*
         THINGS TO DO:
-        - Add more to file size checks
-        - Fix file hash check
         - Create list for file content checks (like for scripts, macros, etc.)
         - Create algorithm to search contents for items in list
         - Create file quarentine system
-     */
+    */
   
     true
-}
-
-fn check_query(sha256: &str, api_key: &str) -> Result<bool, Box<dyn std::error::Error>> {
-    let url = "https://mb-api.abuse.ch/api/v1/";
-    let client = Client::builder().build()?;
-    let form = [
-        ("query", "sha256_hash"),
-        ("hash", sha256),
-    ];
-
-    let resp = client.post(url)
-        .header(api_key, "my-malware-checker/1.0",)
-        .form(&form)
-        .send()?
-        .error_for_status()?;
-
-
-    let text = resp.text()?;
-    let mb_resp: MBResponse = serde_json::from_str(&text)?;
-
-    // Helper function to check if the response status is "ok" and data is not empty, might need to be double checked
-    fn is_response_ok(resp: &MBResponse) -> bool {
-        resp.query_status.to_lowercase() == "ok" && !resp.data.is_empty()
-    }
-
-    Ok(is_response_ok(&mb_resp))
-}
-
-#[derive(Deserialize, Debug)]
-struct MBResponse {
-    query_status: String,
-    #[serde(default)]
-    data: Vec<serde_json::Value>,
 }

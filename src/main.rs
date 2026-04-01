@@ -1,8 +1,10 @@
 mod gui;
 mod file_scanner;
-mod header_list;
+mod header_check;
+mod hash_check;
 
 fn main() {
+    dotenvy::dotenv().ok();
     println!("Hello, World!");
     let file_path = "/Users/coltongorman/Desktop/TestFile.txt";
     file_scanner::scan_file(file_path);
