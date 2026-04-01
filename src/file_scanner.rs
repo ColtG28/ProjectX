@@ -5,6 +5,7 @@ use hex;
 use std::path::Path;
 use crate::header_check::find_header;
 use crate::hash_check::check_malware_hash;
+use crate::content_check::check_file_contents;
 
 /*
     This function will be used to scan a file given its path. It will collect the necessary information about the file
@@ -100,12 +101,9 @@ fn analyze_file(file: &File) -> bool {
 
     let header_check = find_header(&file.hex, &file.file_type);
 
-    /*
-        THINGS TO DO:
-        - Create list for file content checks (like for scripts, macros, etc.)
-        - Create algorithm to search contents for items in list
-        - Create file quarentine system
-    */
-  
+    // File content checks
+
+    let content_check = check_file_contents(&file.contents);
+
     true
 }
