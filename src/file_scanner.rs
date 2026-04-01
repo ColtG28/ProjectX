@@ -10,7 +10,7 @@ use crate::content_check::check_file_contents;
 /*
     This function will be used to scan a file given its path. It will collect the necessary information about the file
     and then pass it to the analyze_file function for further analysis.    
- */
+*/
 pub fn scan_file(file_path: &str) -> bool {
     let metadata = fs::metadata(file_path).unwrap();
     
@@ -58,8 +58,9 @@ struct File<'a> {
     contents: String, 
 }
 
-
-// The following will be used to run through the tests on each separate area of the file, returning a boolean of the file's safety.
+/*
+    The following will be used to run through the tests on each separate area of the file, returning a boolean of the file's safety.
+*/
 fn analyze_file(file: &File) -> bool {
     println!("File name: {}", file.name);
     println!("File size: {} bytes", file.size);
