@@ -20,5 +20,13 @@ fn main() {
 }
 
 /*
+    Current Plan:
+    - Add file quarentine system
+    - Work out rating logic
+    - Work out and test downloading setup
+    - Add GUI
+    
+    
+    Note:
     For firewall include bit scanning, DNS testing, basically check where everything comes/goes, also make it to approve scripts to ignore captcha tests (hidden ones)
 */
