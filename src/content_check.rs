@@ -11,17 +11,7 @@ pub fn check_file_contents(contents: &str) -> bool {
 }
 
 fn fetch_yara_keywords() -> Vec<String> {
-    let urls = vec![
-    "https://raw.githubusercontent.com/Yara-Rules/rules/master/malware/MALW_Backdoor.yar",
-    "https://raw.githubusercontent.com/Yara-Rules/rules/master/malware/MALW_Ransomware.yar",
-    "https://raw.githubusercontent.com/Yara-Rules/rules/master/malware/MALW_Trojan.yar",
-    "https://raw.githubusercontent.com/Yara-Rules/rules/master/antidebug_antivm/antidebug_antivm.yar",
-    "https://raw.githubusercontent.com/Yara-Rules/rules/master/capabilities/capabilities.yar",
-    "https://raw.githubusercontent.com/Yara-Rules/rules/master/webshells/Webshells_index.yar",
-    "https://raw.githubusercontent.com/Yara-Rules/rules/master/exploit_kits/exploit_kits.yar",
-    "https://raw.githubusercontent.com/Yara-Rules/rules/master/maldocs/maldocs_index.yar",
-];
-
+    let urls = fetch_yara_file_urls();
     let client = reqwest::blocking::Client::new();
     let keyword_re = regex::Regex::new(r#""([^"]{4,50})""#).unwrap();
     let mut keywords = Vec::new();
@@ -40,4 +30,44 @@ fn fetch_yara_keywords() -> Vec<String> {
 
     println!("Loaded {} keywords from YARA rules", keywords.len());
     keywords
+}
+
+fn fetch_yara_file_urls() -> Vec<String> {
+    let client = reqwest::blocking::Client::new();
+    let mut urls = Vec::new();
+    
+    let dirs = vec![
+        "malware",
+        "webshells",
+        "antidebug_antivm",
+        "exploit_kits",
+        "email"
+    ];
+
+    for dir in dirs {
+        let api_url = format!(
+            "https://api.github.com/repos/Yara-Rules/rules/contents/{}",
+            dir
+        );
+
+        let Ok(response) = client
+            .get(&api_url)
+            .header("User-Agent", "ProjectX")
+            .send() else { continue };
+
+        let Ok(json) = response.json::<serde_json::Value>() else { continue };
+
+        if let Some(files) = json.as_array() {
+            for file in files {
+                if let Some(name) = file["name"].as_str() {
+                    if name.ends_with(".yar") || name.ends_with(".yara") {
+                        if let Some(url) = file["download_url"].as_str() {
+                            urls.push(url.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    urls
 }
