@@ -3,10 +3,13 @@ mod file_scanner;
 mod header_check;
 mod hash_check;
 mod content_check;
+mod setup;
 
 fn main() {
     dotenvy::dotenv().ok();
-    init_quarantine();
+    setup::ensure_docker();
+    setup::ensure_ubuntu_image();
+    file_scanner::init_quarantine();
     println!("Hello, World!");
     let file_path = "/Users/coltongorman/Desktop/TestFile.txt";
     file_scanner::scan_file(file_path);
@@ -29,7 +32,6 @@ fn init_quarantine() {
 
 /*
     Current Plan:
-    - Add file quarentine system
     - Work out rating logic
     - Work out and test downloading setup
     - Add GUI

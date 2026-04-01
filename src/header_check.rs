@@ -5,12 +5,10 @@ use std::io::Read;
 const MAX_SIG_BYTES: usize = 32;
 
 pub fn find_header(file_path: &str, extension: &str) -> bool {
-    let quarantine_path = format!("quarantine/{}", file_path);
-    
-    let mut file = match File::open(&quarantine_path) {
+    let mut file = match File::open(file_path) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("Failed to open file '{}': {}", quarantine_path, e);
+            eprintln!("Failed to open file '{}': {}", file_path, e);
             return false;
         }
     };
@@ -62,7 +60,7 @@ pub fn find_header(file_path: &str, extension: &str) -> bool {
                 println!("No signature found, file appears to be plain text.");
                 ext_upper == "TXT" || ext_upper == "CSV" || ext_upper == "LOG" || ext_upper == "MD"
             } else {
-                println!("No matching signature found for file: {}", quarantine_path);
+                println!("No matching signature found for file: {}", file_path);
                 false
             }
         }
