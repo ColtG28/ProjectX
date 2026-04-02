@@ -1,3 +1,6 @@
 /target
 /Planning
 /.env
+/quarantine
+**/.DS_Store
+*.tmp

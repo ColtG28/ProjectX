@@ -1,14 +1,15 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use eframe::egui;
 use egui::{
-    Align, Align2, CentralPanel, FontFamily, FontId, Layout, ProgressBar, SidePanel, TextEdit,
-    TextStyle, TopBottomPanel,
+    Align, Align2, CentralPanel, Color32, FontFamily, FontId, Layout, ProgressBar, RichText,
+    Sense, SidePanel, Stroke, TextEdit, TextStyle, TopBottomPanel, Vec2,
 };
 use serde::{Deserialize, Serialize};
 
@@ -108,6 +109,8 @@ struct ScanRecord {
     #[serde(default)]
     quarantine_path: Option<String>,
     #[serde(default)]
+    report_path: Option<String>,
+    #[serde(default)]
     storage_state: RecordStorageState,
     last_modified_epoch: u64,
     scanned_at_epoch: u64,
@@ -121,6 +124,10 @@ struct ScanRecord {
 }
 
 impl ScanRecord {
+    fn record_id(&self) -> String {
+        format!("{}::{}", self.scanned_at_epoch, self.path)
+    }
+
     fn resolved_storage_state(&self) -> RecordStorageState {
         if let Some(path) = self.quarantine_path.as_deref() {
             if Path::new(path).is_file() {
@@ -218,6 +225,11 @@ struct SettingsState {
     enable_script_parsing: bool,
     enable_format_analysis: bool,
     enable_yara: bool,
+    enable_emulation: bool,
+    enable_runtime_yara: bool,
+    enable_ml_scoring: bool,
+    enable_dynamic_sandbox: bool,
+    enable_download_monitoring: bool,
 }
 
 impl Default for SettingsState {
@@ -225,7 +237,7 @@ impl Default for SettingsState {
         Self {
             include_entire_filesystem: false,
             check_cached_scans: true,
-            max_files_per_bulk_scan: 50_000,
+            max_files_per_bulk_scan: 100,
             enable_file_checks: true,
             enable_string_extraction: true,
             enable_normalization: true,
@@ -233,6 +245,11 @@ impl Default for SettingsState {
             enable_script_parsing: true,
             enable_format_analysis: true,
             enable_yara: true,
+            enable_emulation: true,
+            enable_runtime_yara: true,
+            enable_ml_scoring: true,
+            enable_dynamic_sandbox: false,
+            enable_download_monitoring: false,
         }
     }
 }
@@ -242,6 +259,7 @@ enum RecordAction {
     Restore,
     Delete,
     Leave,
+    DeleteReport,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -267,6 +285,72 @@ impl Default for UiMetrics {
 struct TimingProfile {
     average_file_ms: u64,
     average_bytes_per_ms: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReportVerdictFilter {
+    All,
+    Good,
+    Malicious,
+    Unsure,
+}
+
+impl ReportVerdictFilter {
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "All verdicts",
+            Self::Good => "Good",
+            Self::Malicious => "Malicious",
+            Self::Unsure => "Unsure",
+        }
+    }
+
+    fn matches(self, verdict: Verdict) -> bool {
+        match self {
+            Self::All => true,
+            Self::Good => verdict == Verdict::Good,
+            Self::Malicious => verdict == Verdict::Malicious,
+            Self::Unsure => verdict == Verdict::Unsure,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReportStorageFilter {
+    All,
+    InQuarantine,
+    Restored,
+    Deleted,
+    Unknown,
+}
+
+impl ReportStorageFilter {
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "All storage",
+            Self::InQuarantine => "In quarantine",
+            Self::Restored => "Restored",
+            Self::Deleted => "Deleted",
+            Self::Unknown => "Unknown",
+        }
+    }
+
+    fn matches(self, state: RecordStorageState) -> bool {
+        match self {
+            Self::All => true,
+            Self::InQuarantine => state == RecordStorageState::InQuarantine,
+            Self::Restored => state == RecordStorageState::Restored,
+            Self::Deleted => state == RecordStorageState::Deleted,
+            Self::Unknown => state == RecordStorageState::Unknown,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct DownloadWatchEntry {
+    last_size: u64,
+    last_seen_epoch: u64,
+    last_scanned_size: u64,
 }
 
 impl TimingProfile {
@@ -326,10 +410,16 @@ struct MyApp {
     settings: SettingsState,
     single_file_path: String,
     report_search: String,
+    report_verdict_filter: ReportVerdictFilter,
+    report_storage_filter: ReportStorageFilter,
+    selected_report_ids: HashSet<String>,
     status_message: String,
     base_pixels_per_point: Option<f32>,
     last_applied_scale: Option<f32>,
     ui_metrics: UiMetrics,
+    last_download_poll: Instant,
+    download_watch: HashMap<String, DownloadWatchEntry>,
+    download_status: String,
 }
 
 impl MyApp {
@@ -346,10 +436,16 @@ impl MyApp {
             settings: SettingsState::default(),
             single_file_path: String::new(),
             report_search: String::new(),
+            report_verdict_filter: ReportVerdictFilter::All,
+            report_storage_filter: ReportStorageFilter::All,
+            selected_report_ids: HashSet::new(),
             status_message: String::new(),
             base_pixels_per_point: None,
             last_applied_scale: None,
             ui_metrics: UiMetrics::default(),
+            last_download_poll: Instant::now(),
+            download_watch: HashMap::new(),
+            download_status: String::new(),
         }
     }
 
@@ -376,7 +472,55 @@ impl MyApp {
             self.settings.enable_string_extraction && self.settings.enable_script_parsing;
         config.features.enable_format_analysis = self.settings.enable_format_analysis;
         config.features.enable_yara = self.settings.enable_yara;
+        config.features.enable_emulation = self.settings.enable_emulation;
+        config.features.enable_runtime_yara = self.settings.enable_runtime_yara;
+        config.features.enable_ml_scoring = self.settings.enable_ml_scoring;
+        config.features.enable_dynamic_sandbox = self.settings.enable_dynamic_sandbox;
         config
+    }
+
+    fn apply_theme(&self, ctx: &egui::Context, scale: f32) {
+        let mut style = (*ctx.style()).clone();
+        style.visuals = egui::Visuals::dark();
+        style.visuals.override_text_color = Some(Color32::from_rgb(220, 224, 230));
+        style.visuals.panel_fill = Color32::from_rgb(30, 30, 30);
+        style.visuals.faint_bg_color = Color32::from_rgb(37, 37, 38);
+        style.visuals.extreme_bg_color = Color32::from_rgb(24, 24, 24);
+        style.visuals.code_bg_color = Color32::from_rgb(29, 37, 44);
+        style.visuals.window_fill = Color32::from_rgb(37, 37, 38);
+        style.visuals.window_stroke = Stroke::new(1.0, Color32::from_rgb(52, 52, 54));
+        style.visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(45, 45, 48);
+        style.visuals.widgets.inactive.bg_fill = Color32::from_rgb(45, 45, 48);
+        style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(41, 55, 66);
+        style.visuals.widgets.active.bg_fill = Color32::from_rgb(56, 88, 112);
+        style.visuals.widgets.open.bg_fill = Color32::from_rgb(36, 52, 64);
+        style.visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, Color32::from_rgb(215, 221, 228));
+        style.visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, Color32::from_rgb(235, 242, 248));
+        style.visuals.widgets.active.fg_stroke = Stroke::new(1.0, Color32::from_rgb(247, 251, 255));
+        style.visuals.selection.bg_fill = Color32::from_rgb(44, 82, 120);
+        style.visuals.selection.stroke = Stroke::new(1.0, Color32::from_rgb(176, 221, 255));
+        style.visuals.hyperlink_color = Color32::from_rgb(176, 221, 255);
+        style.visuals.widgets.hovered.expansion = 1.0;
+        style.visuals.widgets.active.expansion = 0.0;
+        style.spacing.item_spacing = egui::vec2(10.0 * scale, 10.0 * scale);
+        style.spacing.button_padding = egui::vec2(10.0 * scale, 7.0 * scale);
+        style.text_styles.insert(
+            TextStyle::Body,
+            FontId::new((14.0 * scale).clamp(13.0, 17.0), FontFamily::Proportional),
+        );
+        style.text_styles.insert(
+            TextStyle::Button,
+            FontId::new((14.0 * scale).clamp(13.0, 17.0), FontFamily::Proportional),
+        );
+        style.text_styles.insert(
+            TextStyle::Heading,
+            FontId::new((22.0 * scale).clamp(20.0, 28.0), FontFamily::Proportional),
+        );
+        style.text_styles.insert(
+            TextStyle::Monospace,
+            FontId::new((13.0 * scale).clamp(12.0, 16.0), FontFamily::Monospace),
+        );
+        ctx.set_style(style);
     }
 
     fn apply_responsive_scaling(&mut self, ctx: &egui::Context) {
@@ -411,37 +555,18 @@ impl MyApp {
             .map(|previous| (previous - scale).abs() > 0.01)
             .unwrap_or(true)
         {
-            let mut style = (*ctx.style()).clone();
-            style.spacing.item_spacing = egui::vec2(10.0 * scale, 10.0 * scale);
-            style.spacing.button_padding = egui::vec2(10.0 * scale, 7.0 * scale);
-            style.text_styles.insert(
-                TextStyle::Body,
-                FontId::new((14.0 * scale).clamp(13.0, 17.0), FontFamily::Proportional),
-            );
-            style.text_styles.insert(
-                TextStyle::Button,
-                FontId::new((14.0 * scale).clamp(13.0, 17.0), FontFamily::Proportional),
-            );
-            style.text_styles.insert(
-                TextStyle::Heading,
-                FontId::new((22.0 * scale).clamp(20.0, 28.0), FontFamily::Proportional),
-            );
-            style.text_styles.insert(
-                TextStyle::Monospace,
-                FontId::new((13.0 * scale).clamp(12.0, 16.0), FontFamily::Monospace),
-            );
-            ctx.set_style(style);
+            self.apply_theme(ctx, scale);
             self.last_applied_scale = Some(scale);
         }
 
         self.ui_metrics = UiMetrics {
             scale_factor: scale,
             menu_width: if compact {
-                (width_points * 0.22).clamp(132.0, 168.0)
+                (width_points * 0.2).clamp(126.0, 160.0)
             } else if physical_width < 1600.0 {
-                172.0 * scale
+                162.0 * scale
             } else {
-                192.0 * scale
+                182.0 * scale
             },
             compact,
             content_max_width: if compact {
@@ -469,14 +594,27 @@ impl MyApp {
     }
 
     fn render_top_bar(&mut self, ctx: &egui::Context) {
-        TopBottomPanel::top("top_bar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                if ui.button("☰").clicked() {
+        TopBottomPanel::top("top_bar")
+            .exact_height(48.0 * self.ui_metrics.scale_factor)
+            .show(ctx, |ui| {
+            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                if ui
+                    .button(RichText::new("☰").size(18.0 * self.ui_metrics.scale_factor))
+                    .clicked()
+                {
                     self.menu_open = !self.menu_open;
                 }
-                ui.heading("ProjectX Security");
+                ui.add_space(4.0 * self.ui_metrics.scale_factor);
+                ui.label(
+                    RichText::new("ProjectX Security")
+                        .strong()
+                        .size(22.0 * self.ui_metrics.scale_factor),
+                );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.button("⚙").clicked() {
+                    if ui
+                        .button(RichText::new("⚙").size(19.0 * self.ui_metrics.scale_factor))
+                        .clicked()
+                    {
                         self.current_page = Page::Settings;
                     }
                 });
@@ -492,7 +630,10 @@ impl MyApp {
             .default_width(self.ui_metrics.menu_width)
             .resizable(!self.ui_metrics.compact)
             .show(ctx, |ui| {
-                ui.heading("Menu");
+                ui.vertical_centered(|ui| {
+                    ui.add_space(2.0 * self.ui_metrics.scale_factor);
+                    ui.heading("Menu");
+                });
                 ui.separator();
                 self.page_button(ui, Page::Analytics, "Analytics");
                 self.page_button(ui, Page::Scanner, "File Scanner");
@@ -509,21 +650,7 @@ impl MyApp {
     }
 
     fn render_analytics(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.heading("Analytics");
-            egui::ComboBox::from_label("Time period")
-                .selected_text(self.period.label())
-                .show_ui(ui, |ui| {
-                    for period in [
-                        TimePeriod::Last24Hours,
-                        TimePeriod::Last7Days,
-                        TimePeriod::Last30Days,
-                        TimePeriod::AllTime,
-                    ] {
-                        ui.selectable_value(&mut self.period, period, period.label());
-                    }
-                });
-        });
+        ui.heading("Analytics");
         ui.separator();
 
         let now = now_epoch();
@@ -543,16 +670,72 @@ impl MyApp {
             .iter()
             .filter(|record| record.verdict == Verdict::Unsure)
             .count();
+        let safe_found = files_scanned.saturating_sub(malicious_found + unsure_found);
+        let in_quarantine = filtered
+            .iter()
+            .filter(|record| record.resolved_storage_state() == RecordStorageState::InQuarantine)
+            .count();
+        let restored = filtered
+            .iter()
+            .filter(|record| record.resolved_storage_state() == RecordStorageState::Restored)
+            .count();
+        let deleted = filtered
+            .iter()
+            .filter(|record| record.resolved_storage_state() == RecordStorageState::Deleted)
+            .count();
 
-        ui.group(|ui| {
-            ui.label(format!("Files scanned: {}", files_scanned));
-            ui.label(format!("Malicious files found: {}", malicious_found));
-            ui.label(format!("Unsure files: {}", unsure_found));
+        ui.horizontal_wrapped(|ui| {
+            stat_chip(ui, "Files scanned", files_scanned.to_string(), Color32::from_rgb(176, 221, 255));
+            stat_chip(ui, "Safe", safe_found.to_string(), Color32::from_rgb(127, 191, 127));
+            stat_chip(ui, "Malicious", malicious_found.to_string(), Color32::from_rgb(216, 100, 100));
+            stat_chip(ui, "Unsure", unsure_found.to_string(), Color32::from_rgb(224, 185, 105));
         });
 
         ui.separator();
-        ui.heading("Latest 2 scanned files");
-        let recent = filtered.iter().rev().take(2).collect::<Vec<_>>();
+        ui.columns(2, |columns| {
+            columns[0].group(|ui| {
+                ui.label(RichText::new("Verdict distribution").strong());
+                ui.add_space(8.0);
+                let segments = [
+                    ("Safe", safe_found, Color32::from_rgb(127, 191, 127)),
+                    ("Malicious", malicious_found, Color32::from_rgb(216, 100, 100)),
+                    ("Unsure", unsure_found, Color32::from_rgb(224, 185, 105)),
+                ];
+                draw_pie_chart(ui, "verdict_pie", &segments);
+                ui.add_space(8.0);
+                render_chart_legend(ui, &segments);
+            });
+            columns[1].group(|ui| {
+                ui.label(RichText::new("Storage status").strong());
+                ui.add_space(8.0);
+                let segments = [
+                    ("In quarantine", in_quarantine, Color32::from_rgb(132, 170, 214)),
+                    ("Restored", restored, Color32::from_rgb(127, 191, 127)),
+                    ("Deleted", deleted, Color32::from_rgb(160, 160, 165)),
+                ];
+                draw_segment_bar(ui, &segments);
+                ui.add_space(10.0);
+                render_chart_legend(ui, &segments);
+                ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                    egui::ComboBox::from_id_source("analytics_period")
+                        .selected_text(self.period.label())
+                        .show_ui(ui, |ui| {
+                            for period in [
+                                TimePeriod::Last24Hours,
+                                TimePeriod::Last7Days,
+                                TimePeriod::Last30Days,
+                                TimePeriod::AllTime,
+                            ] {
+                                ui.selectable_value(&mut self.period, period, period.label());
+                            }
+                        });
+                });
+            });
+        });
+
+        ui.separator();
+        ui.heading("Most recent scan");
+        let recent = filtered.iter().rev().take(1).collect::<Vec<_>>();
         if recent.is_empty() {
             ui.label("No scans recorded in this time period.");
         } else {
@@ -573,6 +756,10 @@ impl MyApp {
     fn render_scanner(&mut self, ui: &mut egui::Ui) {
         ui.heading("File Scanner");
         ui.label("Scan a single file or folder, queue more work while scanning, and watch live stage-by-stage progress.");
+        if self.settings.enable_download_monitoring && !self.download_status.is_empty() {
+            ui.add_space(4.0);
+            ui.label(format!("Download monitor: {}", self.download_status));
+        }
         ui.separator();
 
         let path_button_label = if self.is_loading() {
@@ -707,17 +894,14 @@ impl MyApp {
         }
 
         ui.separator();
-        ui.heading("Recent scan results");
-        egui::ScrollArea::vertical()
-            .max_height(if self.ui_metrics.compact {
-                220.0
-            } else {
-                280.0
-            })
-            .show(ui, |ui| {
-                let indices = self.filtered_record_indices(15, "");
-                self.render_record_list(ui, &indices);
-            });
+        ui.heading("Most recent scan result");
+        let indices = self.filtered_record_indices(1, "");
+        if indices.is_empty() {
+            ui.label("No scans have completed yet.");
+        } else {
+            self.render_record_list(ui, &indices, false);
+        }
+        ui.add_space(14.0 * self.ui_metrics.scale_factor);
     }
 
     fn render_reports(&mut self, ui: &mut egui::Ui) {
@@ -733,27 +917,96 @@ impl MyApp {
                 0.0,
             ],
             TextEdit::singleline(&mut self.report_search)
-                .hint_text("Search by path, note, verdict, storage, or quarantine path"),
+                .hint_text("Search by path, report path, note, verdict, storage, or quarantine path"),
         );
+        ui.horizontal_wrapped(|ui| {
+            egui::ComboBox::from_id_source("report_verdict_filter")
+                .selected_text(self.report_verdict_filter.label())
+                .show_ui(ui, |ui| {
+                    for filter in [
+                        ReportVerdictFilter::All,
+                        ReportVerdictFilter::Good,
+                        ReportVerdictFilter::Malicious,
+                        ReportVerdictFilter::Unsure,
+                    ] {
+                        ui.selectable_value(&mut self.report_verdict_filter, filter, filter.label());
+                    }
+                });
+            egui::ComboBox::from_id_source("report_storage_filter")
+                .selected_text(self.report_storage_filter.label())
+                .show_ui(ui, |ui| {
+                    for filter in [
+                        ReportStorageFilter::All,
+                        ReportStorageFilter::InQuarantine,
+                        ReportStorageFilter::Restored,
+                        ReportStorageFilter::Deleted,
+                        ReportStorageFilter::Unknown,
+                    ] {
+                        ui.selectable_value(&mut self.report_storage_filter, filter, filter.label());
+                    }
+                });
+        });
         let indices = self.filtered_record_indices(300, self.report_search.trim());
-        ui.label(format!("Showing {} result(s)", indices.len()));
+        let displayed_ids = indices
+            .iter()
+            .map(|&index| self.records[index].record_id())
+            .collect::<HashSet<_>>();
+        let selected_visible = self
+            .selected_report_ids
+            .iter()
+            .filter(|id| displayed_ids.contains(*id))
+            .count();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!("Showing {} result(s)", indices.len()));
+            ui.label(format!("Selected visible: {}", selected_visible));
+            if ui.button("Select all shown").clicked() {
+                self.selected_report_ids.extend(displayed_ids.iter().cloned());
+            }
+            if ui.button("Clear shown").clicked() {
+                for id in &displayed_ids {
+                    self.selected_report_ids.remove(id);
+                }
+            }
+            if ui
+                .add_enabled(selected_visible > 0, egui::Button::new("Delete selected reports"))
+                .clicked()
+            {
+                self.delete_selected_reports(&displayed_ids);
+            }
+        });
         ui.separator();
 
-        egui::ScrollArea::vertical().show(ui, |ui| self.render_record_list(ui, &indices));
+        egui::ScrollArea::vertical().show(ui, |ui| self.render_record_list(ui, &indices, true));
     }
 
-    fn render_record_list(&mut self, ui: &mut egui::Ui, indices: &[usize]) {
+    fn render_record_list(&mut self, ui: &mut egui::Ui, indices: &[usize], allow_selection: bool) {
         let mut pending_action = None;
+        let mut pending_reveal = None;
+        let mut pending_report_reveal = None;
 
         for &index in indices {
             let record = self.records[index].clone();
             let storage_state = record.resolved_storage_state();
             let note = record.display_note();
+            let record_id = record.record_id();
 
             ui.group(|ui| {
+                if allow_selection {
+                    let mut selected = self.selected_report_ids.contains(&record_id);
+                    if ui.checkbox(&mut selected, "Select").changed() {
+                        if selected {
+                            self.selected_report_ids.insert(record_id.clone());
+                        } else {
+                            self.selected_report_ids.remove(&record_id);
+                        }
+                    }
+                }
                 ui.label(format!("Original path: {}", record.path));
                 if let Some(quarantine_path) = record.quarantine_path.as_deref() {
                     ui.label(format!("Quarantine path: {}", quarantine_path));
+                }
+                if let Some(report_path) = record.report_path.as_deref() {
+                    ui.label(format!("Report path: {}", report_path));
                 }
                 ui.label(format!(
                     "Verdict: {} | Stored: {} | Duration: {} | Size: {} | Last modified: {}",
@@ -772,6 +1025,14 @@ impl MyApp {
 
                 if self.ui_metrics.compact {
                     ui.vertical(|ui| {
+                        if ui.button("Reveal file").clicked() {
+                            pending_reveal = Some(record.path.clone());
+                        }
+                        if let Some(report_path) = record.report_path.as_deref() {
+                            if ui.button("Reveal report").clicked() {
+                                pending_report_reveal = Some(report_path.to_string());
+                            }
+                        }
                         if ui
                             .add_enabled(in_quarantine, egui::Button::new("Put back"))
                             .clicked()
@@ -789,10 +1050,21 @@ impl MyApp {
                             .clicked()
                         {
                             pending_action = Some((index, RecordAction::Leave));
+                        }
+                        if ui.button("Delete report").clicked() {
+                            pending_action = Some((index, RecordAction::DeleteReport));
                         }
                     });
                 } else {
                     ui.horizontal_wrapped(|ui| {
+                        if ui.button("Reveal file").clicked() {
+                            pending_reveal = Some(record.path.clone());
+                        }
+                        if let Some(report_path) = record.report_path.as_deref() {
+                            if ui.button("Reveal report").clicked() {
+                                pending_report_reveal = Some(report_path.to_string());
+                            }
+                        }
                         if ui
                             .add_enabled(in_quarantine, egui::Button::new("Put back"))
                             .clicked()
@@ -810,6 +1082,9 @@ impl MyApp {
                             .clicked()
                         {
                             pending_action = Some((index, RecordAction::Leave));
+                        }
+                        if ui.button("Delete report").clicked() {
+                            pending_action = Some((index, RecordAction::DeleteReport));
                         }
                     });
                 }
@@ -819,9 +1094,37 @@ impl MyApp {
         if let Some((index, action)) = pending_action {
             self.apply_record_action(index, action);
         }
+        if let Some(path) = pending_reveal {
+            self.status_message = match reveal_in_file_manager(Path::new(&path)) {
+                Ok(()) => "Opened the file in the OS file manager.".to_string(),
+                Err(error) => format!("Reveal failed: {error}"),
+            };
+        }
+        if let Some(path) = pending_report_reveal {
+            self.status_message = match reveal_in_file_manager(Path::new(&path)) {
+                Ok(()) => "Opened the report in the OS file manager.".to_string(),
+                Err(error) => format!("Reveal failed: {error}"),
+            };
+        }
     }
 
     fn apply_record_action(&mut self, index: usize, action: RecordAction) {
+        if matches!(action, RecordAction::DeleteReport) {
+            let Some(record) = self.records.get(index).cloned() else {
+                return;
+            };
+            let removed = self.remove_report_files(record.report_path.as_deref());
+            self.selected_report_ids.remove(&record.record_id());
+            self.records.remove(index);
+            self.status_message = if removed {
+                "Report deleted from disk and removed from the GUI.".to_string()
+            } else {
+                "Report entry removed from the GUI.".to_string()
+            };
+            save_history(&self.records, &self.timing_samples);
+            return;
+        }
+
         let Some(record) = self.records.get_mut(index) else {
             return;
         };
@@ -863,6 +1166,7 @@ impl MyApp {
                     "That file is no longer present in quarantine.".to_string()
                 }
             }
+            RecordAction::DeleteReport => unreachable!(),
         };
 
         self.status_message = message;
@@ -886,10 +1190,11 @@ impl MyApp {
             ui.label("Max files per bulk scan");
             ui.add(egui::DragValue::new(&mut self.settings.max_files_per_bulk_scan).speed(500.0));
         });
+        self.settings.max_files_per_bulk_scan = self.settings.max_files_per_bulk_scan.clamp(1, 50_000);
 
         ui.separator();
         ui.heading("Scanning stages");
-        ui.label("Turn off broader generic stages if you want a lighter or narrower scan.");
+        ui.label("Turn every scan stage on or off from here.");
         ui.checkbox(
             &mut self.settings.enable_file_checks,
             "File profiling and generic metadata checks",
@@ -915,6 +1220,32 @@ impl MyApp {
             &mut self.settings.enable_yara,
             "YARA-style keyword matching",
         );
+        ui.checkbox(
+            &mut self.settings.enable_emulation,
+            "Lightweight emulation",
+        );
+        ui.checkbox(
+            &mut self.settings.enable_runtime_yara,
+            "Runtime IOC enrichment",
+        );
+        ui.checkbox(
+            &mut self.settings.enable_ml_scoring,
+            "ML scoring",
+        );
+        ui.checkbox(
+            &mut self.settings.enable_dynamic_sandbox,
+            "Dynamic sandbox detonation",
+        );
+
+        ui.separator();
+        ui.heading("Download monitoring");
+        ui.checkbox(
+            &mut self.settings.enable_download_monitoring,
+            "Monitor Downloads and scan quarantined snapshots while files are still downloading",
+        );
+        if self.settings.enable_download_monitoring {
+            ui.label("Active downloads are snapshotted into quarantine for scanning without interrupting the download stream.");
+        }
 
         ui.separator();
         ui.label(format!(
@@ -947,7 +1278,14 @@ impl MyApp {
     fn filtered_record_indices(&self, limit: usize, query: &str) -> Vec<usize> {
         (0..self.records.len())
             .rev()
-            .filter(|&index| record_matches_query(&self.records[index], query))
+            .filter(|&index| {
+                let record = &self.records[index];
+                record_matches_query(record, query)
+                    && self.report_verdict_filter.matches(record.verdict)
+                    && self
+                        .report_storage_filter
+                        .matches(record.resolved_storage_state())
+            })
             .take(limit)
             .collect()
     }
@@ -970,6 +1308,113 @@ impl MyApp {
             trim_timing_samples(&mut self.timing_samples);
             save_history(&self.records, &self.timing_samples);
         }
+    }
+
+    fn poll_download_monitor(&mut self) {
+        if !self.settings.enable_download_monitoring {
+            self.download_watch.clear();
+            self.download_status.clear();
+            return;
+        }
+
+        if self.last_download_poll.elapsed() < Duration::from_millis(1500) {
+            return;
+        }
+        self.last_download_poll = Instant::now();
+
+        let Some(downloads_dir) = home_dir().map(|home| home.join("Downloads")) else {
+            self.download_status = "Downloads folder not available.".to_string();
+            return;
+        };
+        if !downloads_dir.exists() {
+            self.download_status = "Downloads folder not found.".to_string();
+            return;
+        }
+
+        let mut seen = HashSet::new();
+        let mut queued = 0usize;
+        let now = now_epoch();
+        let active_candidates = collect_active_downloads(&downloads_dir);
+        for path in active_candidates {
+            let Ok(metadata) = fs::metadata(&path) else {
+                continue;
+            };
+            let path_string = path.to_string_lossy().to_string();
+            let size = metadata.len();
+            seen.insert(path_string.clone());
+
+            let entry = self.download_watch.entry(path_string.clone()).or_default();
+            let grew = size > entry.last_scanned_size;
+            let changed_recently = entry.last_seen_epoch == 0 || now.saturating_sub(entry.last_seen_epoch) <= 5;
+            entry.last_seen_epoch = now;
+            entry.last_size = size;
+
+            if grew && changed_recently {
+                if let Some(target) = build_download_snapshot_target(&path, size) {
+                    queued += 1;
+                    entry.last_scanned_size = size;
+                    self.start_scan(vec![target]);
+                }
+            }
+        }
+
+        self.download_watch.retain(|path, _| seen.contains(path));
+        self.download_status = if queued > 0 {
+            format!("Queued {} download snapshot(s) from {}.", queued, downloads_dir.display())
+        } else if seen.is_empty() {
+            "No active downloads detected.".to_string()
+        } else {
+            format!("Watching {} active download(s).", seen.len())
+        };
+    }
+
+    fn remove_report_files(&self, report_path: Option<&str>) -> bool {
+        let Some(report_path) = report_path else {
+            return false;
+        };
+        let path = Path::new(report_path);
+        if path.is_file() {
+            fs::remove_file(path).is_ok()
+        } else {
+            false
+        }
+    }
+
+    fn delete_selected_reports(&mut self, visible_ids: &HashSet<String>) {
+        let selected_visible = self
+            .selected_report_ids
+            .iter()
+            .filter(|id| visible_ids.contains(*id))
+            .cloned()
+            .collect::<HashSet<_>>();
+        if selected_visible.is_empty() {
+            return;
+        }
+
+        let mut removed_files = 0usize;
+        let removed_entries = selected_visible.len();
+        let report_paths_to_remove = self
+            .records
+            .iter()
+            .filter(|record| selected_visible.contains(&record.record_id()))
+            .filter_map(|record| record.report_path.clone())
+            .collect::<Vec<_>>();
+        for report_path in report_paths_to_remove {
+            if self.remove_report_files(Some(&report_path)) {
+                removed_files += 1;
+            }
+        }
+        self.records
+            .retain(|record| !selected_visible.contains(&record.record_id()));
+        for id in selected_visible {
+            self.selected_report_ids.remove(&id);
+        }
+        self.status_message = format!(
+            "Deleted {} selected report entrie(s) and removed {} report file(s).",
+            removed_entries,
+            removed_files
+        );
+        save_history(&self.records, &self.timing_samples);
     }
 
     fn start_scan_from_roots(&mut self, roots: Vec<PathBuf>) {
@@ -1060,6 +1505,7 @@ impl eframe::App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.apply_responsive_scaling(ctx);
         self.poll_finished_job();
+        self.poll_download_monitor();
 
         if self.is_booting() {
             self.render_boot_screen(ctx);
@@ -1083,7 +1529,7 @@ impl eframe::App for MyApp {
 
         self.render_loading_indicator(ctx);
 
-        if self.is_loading() {
+        if self.is_loading() || self.settings.enable_download_monitoring {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
     }
@@ -1458,6 +1904,7 @@ where
         return ScanRecord {
             path: path_string,
             quarantine_path: None,
+            report_path: None,
             storage_state: RecordStorageState::Unknown,
             last_modified_epoch: target.last_modified_epoch,
             scanned_at_epoch: now_epoch(),
@@ -1473,6 +1920,7 @@ where
         return ScanRecord {
             path: path_string,
             quarantine_path: None,
+            report_path: None,
             storage_state: RecordStorageState::Unknown,
             last_modified_epoch: target.last_modified_epoch,
             scanned_at_epoch: now_epoch(),
@@ -1509,6 +1957,7 @@ where
                 path: path_string,
                 quarantine_path: (!outcome.restored_to_original_path)
                     .then(|| outcome.quarantine_path.to_string_lossy().to_string()),
+                report_path: Some(outcome.report_path.to_string_lossy().to_string()),
                 storage_state: if outcome.restored_to_original_path {
                     RecordStorageState::Restored
                 } else {
@@ -1526,6 +1975,7 @@ where
         Err(error) => ScanRecord {
             path: path_string,
             quarantine_path: None,
+            report_path: None,
             storage_state: RecordStorageState::Unknown,
             last_modified_epoch: target.last_modified_epoch,
             scanned_at_epoch: now_epoch(),
@@ -1595,6 +2045,11 @@ fn record_matches_query(record: &ScanRecord, query: &str) -> bool {
             .as_deref()
             .unwrap_or_default()
             .to_ascii_lowercase(),
+        record
+            .report_path
+            .as_deref()
+            .unwrap_or_default()
+            .to_ascii_lowercase(),
         record.note.to_ascii_lowercase(),
         record.action_note.to_ascii_lowercase(),
         record.verdict.label().to_ascii_lowercase(),
@@ -1606,6 +2061,34 @@ fn record_matches_query(record: &ScanRecord, query: &str) -> bool {
 
 fn home_dir() -> Option<PathBuf> {
     std::env::var("HOME").ok().map(PathBuf::from)
+}
+
+fn reveal_in_file_manager(path: &Path) -> Result<(), String> {
+    let status = if cfg!(target_os = "macos") {
+        Command::new("open")
+            .arg("-R")
+            .arg(path)
+            .status()
+            .map_err(|error| format!("Failed to run open: {error}"))?
+    } else if cfg!(target_os = "windows") {
+        Command::new("explorer")
+            .arg("/select,")
+            .arg(path)
+            .status()
+            .map_err(|error| format!("Failed to run explorer: {error}"))?
+    } else {
+        let directory = path.parent().unwrap_or(path);
+        Command::new("xdg-open")
+            .arg(directory)
+            .status()
+            .map_err(|error| format!("Failed to run xdg-open: {error}"))?
+    };
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err("The OS file manager command did not succeed.".to_string())
+    }
 }
 
 fn dedupe_targets(targets: Vec<ScanTarget>) -> Vec<ScanTarget> {
@@ -1673,6 +2156,159 @@ fn collect_scan_targets(roots: &[PathBuf], max_files: usize) -> Vec<ScanTarget> 
     }
 
     files
+}
+
+fn collect_active_downloads(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+
+    while let Some(path) = stack.pop() {
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if metadata.is_file() {
+            if looks_like_active_download(&path) {
+                files.push(path);
+            }
+            continue;
+        }
+        if metadata.is_dir() {
+            let Ok(entries) = fs::read_dir(&path) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                stack.push(entry.path());
+            }
+        }
+    }
+
+    files
+}
+
+fn looks_like_active_download(path: &Path) -> bool {
+    let lower = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    lower.ends_with(".crdownload")
+        || lower.ends_with(".download")
+        || lower.ends_with(".part")
+        || lower.ends_with(".tmp")
+        || lower.ends_with(".partial")
+}
+
+fn build_download_snapshot_target(path: &Path, size: u64) -> Option<ScanTarget> {
+    if size == 0 {
+        return None;
+    }
+
+    let snapshot = write_download_snapshot(path)?;
+    let metadata = fs::metadata(&snapshot).ok()?;
+    Some(ScanTarget {
+        path: snapshot,
+        last_modified_epoch: metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs())
+            .unwrap_or_else(now_epoch),
+        size_bytes: metadata.len(),
+    })
+}
+
+fn write_download_snapshot(path: &Path) -> Option<PathBuf> {
+    let file_name = path.file_name()?.to_string_lossy();
+    let safe_name = sanitize_file_name(&file_name);
+    let output_dir = Path::new("quarantine").join("download_monitor");
+    fs::create_dir_all(&output_dir).ok()?;
+    let snapshot = output_dir.join(format!("{}_{}", now_epoch(), safe_name));
+    fs::copy(path, &snapshot).ok()?;
+    Some(snapshot)
+}
+
+fn sanitize_file_name(name: &str) -> String {
+    name.chars()
+        .map(|ch| match ch {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            _ => ch,
+        })
+        .collect()
+}
+
+fn stat_chip(ui: &mut egui::Ui, label: &str, value: String, color: Color32) {
+    egui::Frame::group(ui.style())
+        .fill(Color32::from_rgb(37, 37, 38))
+        .stroke(Stroke::new(1.0, Color32::from_rgb(52, 52, 54)))
+        .show(ui, |ui| {
+            ui.vertical(|ui| {
+                ui.label(RichText::new(label).color(Color32::from_rgb(190, 196, 201)));
+                ui.label(RichText::new(value).strong().color(color).size(21.0));
+            });
+        });
+}
+
+fn draw_pie_chart(ui: &mut egui::Ui, id_source: &str, segments: &[(&str, usize, Color32)]) {
+    let total = segments.iter().map(|(_, value, _)| *value).sum::<usize>().max(1) as f32;
+    let desired_size = Vec2::new(220.0, 220.0);
+    let (rect, _) = ui.allocate_at_least(desired_size, Sense::hover());
+    let painter = ui.painter_at(rect);
+    let center = rect.center();
+    let radius = rect.width().min(rect.height()) * 0.42;
+    let mut start_angle = -std::f32::consts::FRAC_PI_2;
+
+    for (idx, (_, value, color)) in segments.iter().enumerate() {
+        let sweep = (*value as f32 / total) * std::f32::consts::TAU;
+        let end_angle = start_angle + sweep.max(0.001);
+        let mut points = vec![center];
+        let steps = ((sweep / std::f32::consts::TAU) * 48.0).ceil() as usize + 2;
+        for step in 0..=steps {
+            let t = step as f32 / steps as f32;
+            let angle = start_angle + (end_angle - start_angle) * t;
+            points.push(center + Vec2::angled(angle) * radius);
+        }
+        painter.add(egui::Shape::convex_polygon(points, *color, Stroke::NONE));
+        start_angle = end_angle;
+
+        if idx == segments.len() - 1 {
+            painter.circle_stroke(center, radius, Stroke::new(1.0, Color32::from_rgb(52, 52, 54)));
+        }
+    }
+    let _ = id_source;
+}
+
+fn draw_segment_bar(ui: &mut egui::Ui, segments: &[(&str, usize, Color32)]) {
+    let total = segments.iter().map(|(_, value, _)| *value).sum::<usize>().max(1) as f32;
+    let desired_size = Vec2::new(ui.available_width().max(220.0), 28.0);
+    let (rect, _) = ui.allocate_at_least(desired_size, Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 6.0, Color32::from_rgb(27, 27, 29));
+
+    let mut x = rect.left();
+    for (_, value, color) in segments {
+        if *value == 0 {
+            continue;
+        }
+        let width = rect.width() * (*value as f32 / total);
+        let segment_rect = egui::Rect::from_min_size(egui::pos2(x, rect.top()), Vec2::new(width, rect.height()));
+        painter.rect_filled(segment_rect, 6.0, *color);
+        x += width;
+    }
+
+    painter.rect_stroke(rect, 6.0, Stroke::new(1.0, Color32::from_rgb(52, 52, 54)));
+}
+
+fn render_chart_legend(ui: &mut egui::Ui, segments: &[(&str, usize, Color32)]) {
+    for (label, value, color) in segments {
+        ui.horizontal(|ui| {
+            let (rect, _) = ui.allocate_at_least(Vec2::new(12.0, 12.0), Sense::hover());
+            ui.painter().rect_filled(rect, 2.0, *color);
+            ui.label(format!("{label}: {value}"));
+        });
+    }
 }
 
 fn format_bytes(bytes: u64) -> String {
