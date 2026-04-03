@@ -4,7 +4,15 @@ use std::path::Path;
 
 const STRING_MIN_LEN: usize = 4;
 const BYTE_HISTOGRAM_BINS: usize = 32;
-pub const FEATURE_COUNT: usize = 74;
+pub const FEATURE_COUNT: usize = 386;
+
+const PATTERNS: [&str; 50] = [
+    "http", "https", "exe", "dll", "bat", "cmd", "powershell", "net", "web", "download",
+    "upload", "connect", "server", "client", "file", "path", "url", "ip", "address", "port",
+    "tcp", "udp", "socket", "bind", "listen", "accept", "send", "recv", "read", "write",
+    "open", "close", "create", "delete", "copy", "move", "run", "exec", "system", "shell",
+    "bash", "sh", "python", "perl", "ruby", "java", "c#", "vb", "macro", "vba"
+];
 
 pub const FEATURE_NAMES: [&str; FEATURE_COUNT] = [
     "size_log2",
@@ -34,12 +42,18 @@ pub const FEATURE_NAMES: [&str; FEATURE_COUNT] = [
     "pe_suspicious_section_name_hits",
     "pe_import_descriptor_count",
     "pe_import_function_count_log2",
+    "pe_suspicious_import_count",
+    "pe_network_import_modules",
+    "pe_process_import_modules",
+    "pe_has_cert",
+    "pe_is_probably_packed",
     "pe_has_exports",
     "pe_has_resources",
     "pe_has_tls",
     "pe_has_debug",
     "pe_section_entropy_mean",
     "pe_section_entropy_max",
+    "pe_high_entropy_sections",
     "pe_entrypoint_ratio",
     "pe_image_size_log2",
     "pe_overlay_ratio",
@@ -81,6 +95,312 @@ pub const FEATURE_NAMES: [&str; FEATURE_COUNT] = [
     "byte_hist_29",
     "byte_hist_30",
     "byte_hist_31",
+    "string_pattern_00",
+    "string_pattern_01",
+    "string_pattern_02",
+    "string_pattern_03",
+    "string_pattern_04",
+    "string_pattern_05",
+    "string_pattern_06",
+    "string_pattern_07",
+    "string_pattern_08",
+    "string_pattern_09",
+    "string_pattern_10",
+    "string_pattern_11",
+    "string_pattern_12",
+    "string_pattern_13",
+    "string_pattern_14",
+    "string_pattern_15",
+    "string_pattern_16",
+    "string_pattern_17",
+    "string_pattern_18",
+    "string_pattern_19",
+    "string_pattern_20",
+    "string_pattern_21",
+    "string_pattern_22",
+    "string_pattern_23",
+    "string_pattern_24",
+    "string_pattern_25",
+    "string_pattern_26",
+    "string_pattern_27",
+    "string_pattern_28",
+    "string_pattern_29",
+    "string_pattern_30",
+    "string_pattern_31",
+    "string_pattern_32",
+    "string_pattern_33",
+    "string_pattern_34",
+    "string_pattern_35",
+    "string_pattern_36",
+    "string_pattern_37",
+    "string_pattern_38",
+    "string_pattern_39",
+    "string_pattern_40",
+    "string_pattern_41",
+    "string_pattern_42",
+    "string_pattern_43",
+    "string_pattern_44",
+    "string_pattern_45",
+    "string_pattern_46",
+    "string_pattern_47",
+    "string_pattern_48",
+    "string_pattern_49",
+    "byte_entropy_00",
+    "byte_entropy_01",
+    "byte_entropy_02",
+    "byte_entropy_03",
+    "byte_entropy_04",
+    "byte_entropy_05",
+    "byte_entropy_06",
+    "byte_entropy_07",
+    "byte_entropy_08",
+    "byte_entropy_09",
+    "byte_entropy_0a",
+    "byte_entropy_0b",
+    "byte_entropy_0c",
+    "byte_entropy_0d",
+    "byte_entropy_0e",
+    "byte_entropy_0f",
+    "byte_entropy_10",
+    "byte_entropy_11",
+    "byte_entropy_12",
+    "byte_entropy_13",
+    "byte_entropy_14",
+    "byte_entropy_15",
+    "byte_entropy_16",
+    "byte_entropy_17",
+    "byte_entropy_18",
+    "byte_entropy_19",
+    "byte_entropy_1a",
+    "byte_entropy_1b",
+    "byte_entropy_1c",
+    "byte_entropy_1d",
+    "byte_entropy_1e",
+    "byte_entropy_1f",
+    "byte_entropy_20",
+    "byte_entropy_21",
+    "byte_entropy_22",
+    "byte_entropy_23",
+    "byte_entropy_24",
+    "byte_entropy_25",
+    "byte_entropy_26",
+    "byte_entropy_27",
+    "byte_entropy_28",
+    "byte_entropy_29",
+    "byte_entropy_2a",
+    "byte_entropy_2b",
+    "byte_entropy_2c",
+    "byte_entropy_2d",
+    "byte_entropy_2e",
+    "byte_entropy_2f",
+    "byte_entropy_30",
+    "byte_entropy_31",
+    "byte_entropy_32",
+    "byte_entropy_33",
+    "byte_entropy_34",
+    "byte_entropy_35",
+    "byte_entropy_36",
+    "byte_entropy_37",
+    "byte_entropy_38",
+    "byte_entropy_39",
+    "byte_entropy_3a",
+    "byte_entropy_3b",
+    "byte_entropy_3c",
+    "byte_entropy_3d",
+    "byte_entropy_3e",
+    "byte_entropy_3f",
+    "byte_entropy_40",
+    "byte_entropy_41",
+    "byte_entropy_42",
+    "byte_entropy_43",
+    "byte_entropy_44",
+    "byte_entropy_45",
+    "byte_entropy_46",
+    "byte_entropy_47",
+    "byte_entropy_48",
+    "byte_entropy_49",
+    "byte_entropy_4a",
+    "byte_entropy_4b",
+    "byte_entropy_4c",
+    "byte_entropy_4d",
+    "byte_entropy_4e",
+    "byte_entropy_4f",
+    "byte_entropy_50",
+    "byte_entropy_51",
+    "byte_entropy_52",
+    "byte_entropy_53",
+    "byte_entropy_54",
+    "byte_entropy_55",
+    "byte_entropy_56",
+    "byte_entropy_57",
+    "byte_entropy_58",
+    "byte_entropy_59",
+    "byte_entropy_5a",
+    "byte_entropy_5b",
+    "byte_entropy_5c",
+    "byte_entropy_5d",
+    "byte_entropy_5e",
+    "byte_entropy_5f",
+    "byte_entropy_60",
+    "byte_entropy_61",
+    "byte_entropy_62",
+    "byte_entropy_63",
+    "byte_entropy_64",
+    "byte_entropy_65",
+    "byte_entropy_66",
+    "byte_entropy_67",
+    "byte_entropy_68",
+    "byte_entropy_69",
+    "byte_entropy_6a",
+    "byte_entropy_6b",
+    "byte_entropy_6c",
+    "byte_entropy_6d",
+    "byte_entropy_6e",
+    "byte_entropy_6f",
+    "byte_entropy_70",
+    "byte_entropy_71",
+    "byte_entropy_72",
+    "byte_entropy_73",
+    "byte_entropy_74",
+    "byte_entropy_75",
+    "byte_entropy_76",
+    "byte_entropy_77",
+    "byte_entropy_78",
+    "byte_entropy_79",
+    "byte_entropy_7a",
+    "byte_entropy_7b",
+    "byte_entropy_7c",
+    "byte_entropy_7d",
+    "byte_entropy_7e",
+    "byte_entropy_7f",
+    "byte_entropy_80",
+    "byte_entropy_81",
+    "byte_entropy_82",
+    "byte_entropy_83",
+    "byte_entropy_84",
+    "byte_entropy_85",
+    "byte_entropy_86",
+    "byte_entropy_87",
+    "byte_entropy_88",
+    "byte_entropy_89",
+    "byte_entropy_8a",
+    "byte_entropy_8b",
+    "byte_entropy_8c",
+    "byte_entropy_8d",
+    "byte_entropy_8e",
+    "byte_entropy_8f",
+    "byte_entropy_90",
+    "byte_entropy_91",
+    "byte_entropy_92",
+    "byte_entropy_93",
+    "byte_entropy_94",
+    "byte_entropy_95",
+    "byte_entropy_96",
+    "byte_entropy_97",
+    "byte_entropy_98",
+    "byte_entropy_99",
+    "byte_entropy_9a",
+    "byte_entropy_9b",
+    "byte_entropy_9c",
+    "byte_entropy_9d",
+    "byte_entropy_9e",
+    "byte_entropy_9f",
+    "byte_entropy_a0",
+    "byte_entropy_a1",
+    "byte_entropy_a2",
+    "byte_entropy_a3",
+    "byte_entropy_a4",
+    "byte_entropy_a5",
+    "byte_entropy_a6",
+    "byte_entropy_a7",
+    "byte_entropy_a8",
+    "byte_entropy_a9",
+    "byte_entropy_aa",
+    "byte_entropy_ab",
+    "byte_entropy_ac",
+    "byte_entropy_ad",
+    "byte_entropy_ae",
+    "byte_entropy_af",
+    "byte_entropy_b0",
+    "byte_entropy_b1",
+    "byte_entropy_b2",
+    "byte_entropy_b3",
+    "byte_entropy_b4",
+    "byte_entropy_b5",
+    "byte_entropy_b6",
+    "byte_entropy_b7",
+    "byte_entropy_b8",
+    "byte_entropy_b9",
+    "byte_entropy_ba",
+    "byte_entropy_bb",
+    "byte_entropy_bc",
+    "byte_entropy_bd",
+    "byte_entropy_be",
+    "byte_entropy_bf",
+    "byte_entropy_c0",
+    "byte_entropy_c1",
+    "byte_entropy_c2",
+    "byte_entropy_c3",
+    "byte_entropy_c4",
+    "byte_entropy_c5",
+    "byte_entropy_c6",
+    "byte_entropy_c7",
+    "byte_entropy_c8",
+    "byte_entropy_c9",
+    "byte_entropy_ca",
+    "byte_entropy_cb",
+    "byte_entropy_cc",
+    "byte_entropy_cd",
+    "byte_entropy_ce",
+    "byte_entropy_cf",
+    "byte_entropy_d0",
+    "byte_entropy_d1",
+    "byte_entropy_d2",
+    "byte_entropy_d3",
+    "byte_entropy_d4",
+    "byte_entropy_d5",
+    "byte_entropy_d6",
+    "byte_entropy_d7",
+    "byte_entropy_d8",
+    "byte_entropy_d9",
+    "byte_entropy_da",
+    "byte_entropy_db",
+    "byte_entropy_dc",
+    "byte_entropy_dd",
+    "byte_entropy_de",
+    "byte_entropy_df",
+    "byte_entropy_e0",
+    "byte_entropy_e1",
+    "byte_entropy_e2",
+    "byte_entropy_e3",
+    "byte_entropy_e4",
+    "byte_entropy_e5",
+    "byte_entropy_e6",
+    "byte_entropy_e7",
+    "byte_entropy_e8",
+    "byte_entropy_e9",
+    "byte_entropy_ea",
+    "byte_entropy_eb",
+    "byte_entropy_ec",
+    "byte_entropy_ed",
+    "byte_entropy_ee",
+    "byte_entropy_ef",
+    "byte_entropy_f0",
+    "byte_entropy_f1",
+    "byte_entropy_f2",
+    "byte_entropy_f3",
+    "byte_entropy_f4",
+    "byte_entropy_f5",
+    "byte_entropy_f6",
+    "byte_entropy_f7",
+    "byte_entropy_f8",
+    "byte_entropy_f9",
+    "byte_entropy_fa",
+    "byte_entropy_fb",
+    "byte_entropy_fc",
+    "byte_entropy_fd",
+    "byte_entropy_fe",
+    "byte_entropy_ff",
 ];
 
 #[derive(Debug, Clone)]
@@ -93,7 +413,7 @@ pub struct ExtractedFeatures {
     pub warning: Option<String>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 struct StringMetrics {
     count: usize,
     avg_len: f32,
@@ -102,9 +422,25 @@ struct StringMetrics {
     path_ratio: f32,
     suspicious_ratio: f32,
     longest_printable_run: usize,
+    pattern_ratios: [f32; 50],
 }
 
-#[derive(Debug, Default)]
+impl Default for StringMetrics {
+    fn default() -> Self {
+        StringMetrics {
+            count: 0,
+            avg_len: 0.0,
+            max_len: 0,
+            url_ratio: 0.0,
+            path_ratio: 0.0,
+            suspicious_ratio: 0.0,
+            longest_printable_run: 0,
+            pattern_ratios: [0.0; 50],
+        }
+    }
+}
+
+#[derive(Debug)]
 struct StringScanState {
     count: usize,
     total_len: usize,
@@ -112,6 +448,7 @@ struct StringScanState {
     url_hits: usize,
     path_hits: usize,
     suspicious_hits: usize,
+    pattern_hits: [usize; 50],
 }
 
 #[derive(Debug, Clone, Default)]
@@ -130,12 +467,18 @@ struct PeMetrics {
     has_resources: bool,
     has_tls: bool,
     has_debug: bool,
+    has_cert: bool,
+    suspicious_imports: usize,
+    network_import_modules: usize,
+    process_import_modules: usize,
+    is_probably_packed: bool,
     section_entropy_mean: f32,
     section_entropy_max: f32,
     entrypoint_ratio: f32,
     image_size_log2: f32,
     overlay_ratio: f32,
     header_anomaly_score: f32,
+    high_entropy_sections: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -250,6 +593,11 @@ pub fn extract_path(path: &Path, max_input_bytes: usize) -> Result<ExtractedFeat
         pe.suspicious_section_names as f32,
         pe.import_descriptors as f32,
         log2ish(pe.import_functions as f64),
+        pe.suspicious_imports as f32,
+        pe.network_import_modules as f32,
+        pe.process_import_modules as f32,
+        f32::from(pe.has_cert),
+        f32::from(pe.is_probably_packed),
         f32::from(pe.has_exports),
         f32::from(pe.has_resources),
         f32::from(pe.has_tls),
@@ -260,6 +608,7 @@ pub fn extract_path(path: &Path, max_input_bytes: usize) -> Result<ExtractedFeat
         pe.image_size_log2,
         pe.overlay_ratio,
         pe.header_anomaly_score,
+        pe.high_entropy_sections as f32,
         f32::from(effective_buffer.starts_with(b"\x7FELF")),
         f32::from(effective_buffer.starts_with(b"%PDF")),
         f32::from(effective_buffer.starts_with(b"PK\x03\x04")),
@@ -267,7 +616,14 @@ pub fn extract_path(path: &Path, max_input_bytes: usize) -> Result<ExtractedFeat
         f32::from(slice_contains(&effective_buffer, b"This program cannot be run")),
     ];
     values[..head.len()].copy_from_slice(&head);
-    values[head.len()..].copy_from_slice(&byte_stats.histogram);
+    values[head.len()..head.len() + byte_stats.histogram.len()].copy_from_slice(&byte_stats.histogram);
+
+    let patterns_start = head.len() + byte_stats.histogram.len();
+    values[patterns_start..patterns_start + string_metrics.pattern_ratios.len()].copy_from_slice(&string_metrics.pattern_ratios);
+
+    let entropy_hist = compute_byte_entropy_histogram(&effective_buffer);
+    let entropy_start = patterns_start + string_metrics.pattern_ratios.len();
+    values[entropy_start..].copy_from_slice(&entropy_hist);
 
     Ok(ExtractedFeatures {
         values,
@@ -393,6 +749,56 @@ fn compute_byte_stats(bytes: &[u8]) -> ByteStats {
     }
 }
 
+fn compute_byte_entropy_histogram(bytes: &[u8]) -> [f32; 256] {
+    let window = 2048;
+    let step = 1024;
+    let mut output = [0i32; 256];
+    if bytes.len() < window {
+        let (hbin, counts) = entropy_bin_counts(bytes, window);
+        for (i, &c) in counts.iter().enumerate() {
+            output[hbin * 16 + i] += c;
+        }
+    } else {
+        let mut start = 0;
+        while start + window <= bytes.len() {
+            let block = &bytes[start..start + window];
+            let (hbin, counts) = entropy_bin_counts(block, window);
+            for (i, &c) in counts.iter().enumerate() {
+                output[hbin * 16 + i] += c;
+            }
+            start += step;
+        }
+    }
+    let mut normalized = [0.0f32; 256];
+    let sum: i32 = output.iter().sum();
+    if sum > 0 {
+        for (i, &c) in output.iter().enumerate() {
+            normalized[i] = c as f32 / sum as f32;
+        }
+    }
+    normalized
+}
+
+fn entropy_bin_counts(block: &[u8], window: usize) -> (usize, [i32; 16]) {
+    let mut counts = [0i32; 16];
+    for &b in block {
+        counts[(b >> 4) as usize] += 1;
+    }
+    let mut p = [0.0f32; 16];
+    for i in 0..16 {
+        p[i] = counts[i] as f32 / window as f32;
+    }
+    let mut h = 0.0f32;
+    for &prob in &p {
+        if prob > 0.0 {
+            h -= prob * prob.log2();
+        }
+    }
+    h *= 2.0; // *2 because reduced to 4 bits
+    let hbin = if h >= 8.0 { 15 } else { (h * 2.0) as usize };
+    (hbin, counts)
+}
+
 fn shannon_entropy(bytes: &[u8]) -> f32 {
     if bytes.is_empty() {
         return 0.0;
@@ -402,7 +808,7 @@ fn shannon_entropy(bytes: &[u8]) -> f32 {
 }
 
 fn extract_string_metrics(bytes: &[u8]) -> StringMetrics {
-    let mut state = StringScanState::default();
+    let mut state = StringScanState { count: 0, total_len: 0, max_len: 0, url_hits: 0, path_hits: 0, suspicious_hits: 0, pattern_hits: [0; 50] };
     let mut longest_printable_run = 0usize;
     let mut current_start = 0usize;
     let mut current_len = 0usize;
@@ -425,8 +831,16 @@ fn extract_string_metrics(bytes: &[u8]) -> StringMetrics {
     if state.count == 0 {
         return StringMetrics {
             longest_printable_run,
+            pattern_ratios: [0.0; 50],
             ..StringMetrics::default()
         };
+    }
+
+    let mut pattern_ratios = [0.0; 50];
+    if state.count > 0 {
+        for (i, ratio) in pattern_ratios.iter_mut().enumerate() {
+            *ratio = state.pattern_hits[i] as f32 / state.count as f32;
+        }
     }
 
     StringMetrics {
@@ -437,6 +851,7 @@ fn extract_string_metrics(bytes: &[u8]) -> StringMetrics {
         path_ratio: ratio(state.path_hits, state.count),
         suspicious_ratio: ratio(state.suspicious_hits, state.count),
         longest_printable_run,
+        pattern_ratios,
     }
 }
 
@@ -475,6 +890,12 @@ fn apply_string_run(bytes: &[u8], start: usize, len: usize, state: &mut StringSc
         || ascii_contains_ignore_case(value, b"new-object")
     {
         state.suspicious_hits += 1;
+    }
+
+    for (i, &pattern) in PATTERNS.iter().enumerate() {
+        if ascii_contains_ignore_case(value, pattern.as_bytes()) {
+            state.pattern_hits[i] += 1;
+        }
     }
 }
 
@@ -536,6 +957,7 @@ fn extract_pe_metrics(bytes: &[u8]) -> Result<PeMetrics, String> {
     let mut suspicious_section_names = 0usize;
     let mut section_entropy_sum = 0.0f32;
     let mut section_entropy_max = 0.0f32;
+    let mut high_entropy_sections = 0usize;
 
     for index in 0..number_of_sections {
         let offset = section_table + (index * 40);
@@ -576,6 +998,9 @@ fn extract_pe_metrics(bytes: &[u8]) -> Result<PeMetrics, String> {
             let entropy = shannon_entropy(&bytes[raw_start..raw_end]);
             section_entropy_sum += entropy;
             section_entropy_max = section_entropy_max.max(entropy);
+            if entropy > 0.8 {
+                high_entropy_sections += 1;
+            }
         }
 
         sections.push(SectionInfo {
@@ -597,6 +1022,7 @@ fn extract_pe_metrics(bytes: &[u8]) -> Result<PeMetrics, String> {
     let (export_rva, export_size) = data_directory(0).unwrap_or((0, 0));
     let (import_rva, import_size) = data_directory(1).unwrap_or((0, 0));
     let (resource_rva, resource_size) = data_directory(2).unwrap_or((0, 0));
+    let (_cert_rva, cert_size) = data_directory(4).unwrap_or((0, 0));
     let (debug_rva, debug_size) = data_directory(6).unwrap_or((0, 0));
     let (tls_rva, tls_size) = data_directory(9).unwrap_or((0, 0));
 
@@ -610,6 +1036,12 @@ fn extract_pe_metrics(bytes: &[u8]) -> Result<PeMetrics, String> {
     } else {
         0
     };
+    let (suspicious_imports, network_import_modules, process_import_modules) = if import_rva > 0 && import_size > 0 {
+        count_suspicious_imports(bytes, &sections, import_rva)
+    } else {
+        (0, 0, 0)
+    };
+    let has_cert = cert_size > 0;
 
     let overlay_ratio = sections
         .iter()
@@ -639,6 +1071,11 @@ fn extract_pe_metrics(bytes: &[u8]) -> Result<PeMetrics, String> {
         has_resources: resource_rva > 0 && resource_size > 0,
         has_tls: tls_rva > 0 && tls_size > 0,
         has_debug: debug_rva > 0 && debug_size > 0,
+        has_cert,
+        suspicious_imports,
+        network_import_modules,
+        process_import_modules,
+        is_probably_packed: suspicious_section_names > 0 && import_descriptors < 3,
         section_entropy_mean: if sections.is_empty() {
             0.0
         } else {
@@ -654,6 +1091,7 @@ fn extract_pe_metrics(bytes: &[u8]) -> Result<PeMetrics, String> {
         image_size_log2: log2ish(size_of_image as f64),
         overlay_ratio,
         header_anomaly_score: (anomaly_points as f32 / 4.0).clamp(0.0, 1.0),
+        high_entropy_sections,
     })
 }
 
@@ -737,6 +1175,87 @@ fn count_thunks(bytes: &[u8], sections: &[SectionInfo], thunk_rva: u32) -> usize
     }
 
     count
+}
+
+fn read_rva_string<'a>(bytes: &'a [u8], sections: &[SectionInfo], rva: u32) -> Option<&'a [u8]> {
+    let start = rva_to_offset(sections, rva)?;
+    let end = bytes[start..]
+        .iter()
+        .position(|&b| b == 0)
+        .map(|pos| start + pos)?;
+    Some(&bytes[start..end])
+}
+
+fn count_suspicious_imports(bytes: &[u8], sections: &[SectionInfo], import_rva: u32) -> (usize, usize, usize) {
+    let Some(mut offset) = rva_to_offset(sections, import_rva) else {
+        return (0, 0, 0);
+    };
+
+    let mut count = 0;
+    let mut network_count = 0;
+    let mut process_count = 0;
+    let suspicious_modules: &[&[u8]] = &[
+        b"kernel32",
+        b"advapi32",
+        b"ntdll",
+        b"shell32",
+        b"user32",
+        b"ws2_32",
+        b"urlmon",
+        b"wininet",
+        b"msvcrt",
+        b"ole32",
+        b"crypt32",
+    ];
+    let network_modules: &[&[u8]] = &[
+        b"ws2_32",
+        b"wsock32",
+        b"urlmon",
+        b"wininet",
+        b"iphlpapi",
+        b"dnsapi",
+    ];
+    let process_modules: &[&[u8]] = &[
+        b"kernel32",
+        b"advapi32",
+        b"ntdll",
+        b"psapi",
+        b"user32",
+    ];
+
+    while offset + 20 <= bytes.len() {
+        let original_first_thunk = read_u32(bytes, offset).unwrap_or(0);
+        let name_rva = read_u32(bytes, offset + 12).unwrap_or(0);
+        let first_thunk = read_u32(bytes, offset + 16).unwrap_or(0);
+        if original_first_thunk == 0 && name_rva == 0 && first_thunk == 0 {
+            break;
+        }
+
+        if let Some(name_bytes) = read_rva_string(bytes, sections, name_rva) {
+            for module in suspicious_modules {
+                if ascii_contains_ignore_case(name_bytes, module) {
+                    count += 1;
+                    break;
+                }
+            }
+            for module in network_modules {
+                if ascii_contains_ignore_case(name_bytes, module) {
+                    network_count += 1;
+                    break;
+                }
+            }
+            for module in process_modules {
+                if ascii_contains_ignore_case(name_bytes, module) {
+                    process_count += 1;
+                    break;
+                }
+            }
+        }
+
+        offset += 20;
+    }
+
+    (count, network_count, process_count)
 }
 
 fn rva_to_offset(sections: &[SectionInfo], rva: u32) -> Option<usize> {
