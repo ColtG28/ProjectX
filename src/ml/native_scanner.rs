@@ -643,7 +643,7 @@ fn current_memory_bytes() -> Option<u64> {
 
 impl EvaluationAccumulator {
     fn observe(&mut self, expected: u8, label: &str) {
-        let predicted = u8::from(label == "malicious");
+        let predicted = u8::from(label == "malicious" || label == "suspicious");
         self.matched_rows += 1;
         match (expected, predicted) {
             (1, 1) => self.true_positive += 1,

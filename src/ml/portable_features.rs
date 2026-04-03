@@ -179,12 +179,41 @@ pub fn extract_path(path: &Path, max_input_bytes: usize) -> Result<ExtractedFeat
         });
     }
 
-    let byte_stats = compute_byte_stats(&buffer);
-    let string_metrics = extract_string_metrics(&buffer);
-    let file_kind = detect_kind(&buffer);
+    // Try to decode if it looks like base64 or hex
+    let effective_buffer = if buffer.len() <= 200 {
+        if looks_like_base64(&buffer) {
+            if let Some(decoded) = try_base64_decode(&buffer) {
+                if decoded.len() > 10 && decoded.iter().any(|&b| is_printable_ascii(b)) {
+                    decoded
+                } else {
+                    buffer
+                }
+            } else {
+                buffer
+            }
+        } else if looks_like_hex(&buffer) {
+            if let Some(decoded) = try_hex_decode(&buffer) {
+                if decoded.len() > 10 && decoded.iter().any(|&b| is_printable_ascii(b)) {
+                    decoded
+                } else {
+                    buffer
+                }
+            } else {
+                buffer
+            }
+        } else {
+            buffer
+        }
+    } else {
+        buffer
+    };
 
-    let (pe, warning) = if looks_like_pe(&buffer) {
-        match extract_pe_metrics(&buffer) {
+    let byte_stats = compute_byte_stats(&effective_buffer);
+    let string_metrics = extract_string_metrics(&effective_buffer);
+    let file_kind = detect_kind(&effective_buffer);
+
+    let (pe, warning) = if looks_like_pe(&effective_buffer) {
+        match extract_pe_metrics(&effective_buffer) {
             Ok(metrics) => (metrics, None),
             Err(error) => (PeMetrics::default(), Some(error)),
         }
@@ -210,7 +239,7 @@ pub fn extract_path(path: &Path, max_input_bytes: usize) -> Result<ExtractedFeat
         string_metrics.url_ratio,
         string_metrics.path_ratio,
         string_metrics.suspicious_ratio,
-        f32::from(buffer.starts_with(b"MZ")),
+        f32::from(effective_buffer.starts_with(b"MZ")),
         f32::from(pe.valid),
         f32::from(pe.is_64),
         f32::from(pe.is_dll),
@@ -231,11 +260,11 @@ pub fn extract_path(path: &Path, max_input_bytes: usize) -> Result<ExtractedFeat
         pe.image_size_log2,
         pe.overlay_ratio,
         pe.header_anomaly_score,
-        f32::from(buffer.starts_with(b"\x7FELF")),
-        f32::from(buffer.starts_with(b"%PDF")),
-        f32::from(buffer.starts_with(b"PK\x03\x04")),
-        f32::from(buffer.starts_with(b"#!")),
-        f32::from(slice_contains(&buffer, b"This program cannot be run")),
+        f32::from(effective_buffer.starts_with(b"\x7FELF")),
+        f32::from(effective_buffer.starts_with(b"%PDF")),
+        f32::from(effective_buffer.starts_with(b"PK\x03\x04")),
+        f32::from(effective_buffer.starts_with(b"#!")),
+        f32::from(slice_contains(&effective_buffer, b"This program cannot be run")),
     ];
     values[..head.len()].copy_from_slice(&head);
     values[head.len()..].copy_from_slice(&byte_stats.histogram);
@@ -248,6 +277,48 @@ pub fn extract_path(path: &Path, max_input_bytes: usize) -> Result<ExtractedFeat
         truncated_input,
         warning,
     })
+}
+
+fn looks_like_base64(bytes: &[u8]) -> bool {
+    if bytes.len() < 4 || bytes.len() % 4 != 0 {
+        return false;
+    }
+    for &byte in bytes {
+        if !byte.is_ascii_alphanumeric() && !matches!(byte, b'+' | b'/' | b'=' | b'\n' | b'\r') {
+            return false;
+        }
+    }
+    true
+}
+
+fn looks_like_hex(bytes: &[u8]) -> bool {
+    if bytes.len() < 4 || bytes.len() % 2 != 0 {
+        return false;
+    }
+    for &byte in bytes {
+        if !byte.is_ascii_hexdigit() {
+            return false;
+        }
+    }
+    true
+}
+
+fn try_base64_decode(bytes: &[u8]) -> Option<Vec<u8>> {
+    use base64::{Engine as _, engine::general_purpose};
+    general_purpose::STANDARD.decode(bytes).ok()
+}
+
+fn try_hex_decode(bytes: &[u8]) -> Option<Vec<u8>> {
+    if bytes.len() % 2 != 0 {
+        return None;
+    }
+    let mut result = Vec::with_capacity(bytes.len() / 2);
+    for chunk in bytes.chunks(2) {
+        let hex = std::str::from_utf8(chunk).ok()?;
+        let byte = u8::from_str_radix(hex, 16).ok()?;
+        result.push(byte);
+    }
+    Some(result)
 }
 
 fn detect_kind(bytes: &[u8]) -> &'static str {
@@ -398,6 +469,10 @@ fn apply_string_run(bytes: &[u8], start: usize, len: usize, state: &mut StringSc
         || ascii_contains_ignore_case(value, b"invoke-")
         || ascii_contains_ignore_case(value, b"virtualalloc")
         || ascii_contains_ignore_case(value, b"loadlibrary")
+        || ascii_contains_ignore_case(value, b"iex")
+        || ascii_contains_ignore_case(value, b"downloadstring")
+        || ascii_contains_ignore_case(value, b"webclient")
+        || ascii_contains_ignore_case(value, b"new-object")
     {
         state.suspicious_hits += 1;
     }
