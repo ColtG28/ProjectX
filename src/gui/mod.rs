@@ -8,9 +8,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use eframe::egui;
 use egui::{
-    Align, Align2, CentralPanel, Color32, FontFamily, FontId, Layout, ProgressBar, RichText,
-    Sense, SidePanel, Stroke, TextEdit, TextStyle, TopBottomPanel, Vec2,
+    Align, Align2, CentralPanel, Color32, FontFamily, FontId, Layout, ProgressBar, RichText, Sense,
+    SidePanel, Stroke, TextEdit, TextStyle, TopBottomPanel, Vec2,
 };
+use rfd::FileDialog;
 use serde::{Deserialize, Serialize};
 
 const HISTORY_PATH: &str = "quarantine/gui_scan_history.json";
@@ -494,8 +495,10 @@ impl MyApp {
         style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(41, 55, 66);
         style.visuals.widgets.active.bg_fill = Color32::from_rgb(56, 88, 112);
         style.visuals.widgets.open.bg_fill = Color32::from_rgb(36, 52, 64);
-        style.visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, Color32::from_rgb(215, 221, 228));
-        style.visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, Color32::from_rgb(235, 242, 248));
+        style.visuals.widgets.inactive.fg_stroke =
+            Stroke::new(1.0, Color32::from_rgb(215, 221, 228));
+        style.visuals.widgets.hovered.fg_stroke =
+            Stroke::new(1.0, Color32::from_rgb(235, 242, 248));
         style.visuals.widgets.active.fg_stroke = Stroke::new(1.0, Color32::from_rgb(247, 251, 255));
         style.visuals.selection.bg_fill = Color32::from_rgb(44, 82, 120);
         style.visuals.selection.stroke = Stroke::new(1.0, Color32::from_rgb(176, 221, 255));
@@ -597,29 +600,29 @@ impl MyApp {
         TopBottomPanel::top("top_bar")
             .exact_height(48.0 * self.ui_metrics.scale_factor)
             .show(ctx, |ui| {
-            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                if ui
-                    .button(RichText::new("☰").size(18.0 * self.ui_metrics.scale_factor))
-                    .clicked()
-                {
-                    self.menu_open = !self.menu_open;
-                }
-                ui.add_space(4.0 * self.ui_metrics.scale_factor);
-                ui.label(
-                    RichText::new("ProjectX Security")
-                        .strong()
-                        .size(22.0 * self.ui_metrics.scale_factor),
-                );
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                     if ui
-                        .button(RichText::new("⚙").size(19.0 * self.ui_metrics.scale_factor))
+                        .button(RichText::new("☰").size(18.0 * self.ui_metrics.scale_factor))
                         .clicked()
                     {
-                        self.current_page = Page::Settings;
+                        self.menu_open = !self.menu_open;
                     }
+                    ui.add_space(4.0 * self.ui_metrics.scale_factor);
+                    ui.label(
+                        RichText::new("ProjectX Security")
+                            .strong()
+                            .size(22.0 * self.ui_metrics.scale_factor),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui
+                            .button(RichText::new("⚙").size(19.0 * self.ui_metrics.scale_factor))
+                            .clicked()
+                        {
+                            self.current_page = Page::Settings;
+                        }
+                    });
                 });
             });
-        });
     }
 
     fn render_menu(&mut self, ctx: &egui::Context) {
@@ -685,10 +688,30 @@ impl MyApp {
             .count();
 
         ui.horizontal_wrapped(|ui| {
-            stat_chip(ui, "Files scanned", files_scanned.to_string(), Color32::from_rgb(176, 221, 255));
-            stat_chip(ui, "Safe", safe_found.to_string(), Color32::from_rgb(127, 191, 127));
-            stat_chip(ui, "Malicious", malicious_found.to_string(), Color32::from_rgb(216, 100, 100));
-            stat_chip(ui, "Unsure", unsure_found.to_string(), Color32::from_rgb(224, 185, 105));
+            stat_chip(
+                ui,
+                "Files scanned",
+                files_scanned.to_string(),
+                Color32::from_rgb(176, 221, 255),
+            );
+            stat_chip(
+                ui,
+                "Safe",
+                safe_found.to_string(),
+                Color32::from_rgb(127, 191, 127),
+            );
+            stat_chip(
+                ui,
+                "Malicious",
+                malicious_found.to_string(),
+                Color32::from_rgb(216, 100, 100),
+            );
+            stat_chip(
+                ui,
+                "Unsure",
+                unsure_found.to_string(),
+                Color32::from_rgb(224, 185, 105),
+            );
         });
 
         ui.separator();
@@ -698,7 +721,11 @@ impl MyApp {
                 ui.add_space(8.0);
                 let segments = [
                     ("Safe", safe_found, Color32::from_rgb(127, 191, 127)),
-                    ("Malicious", malicious_found, Color32::from_rgb(216, 100, 100)),
+                    (
+                        "Malicious",
+                        malicious_found,
+                        Color32::from_rgb(216, 100, 100),
+                    ),
                     ("Unsure", unsure_found, Color32::from_rgb(224, 185, 105)),
                 ];
                 draw_pie_chart(ui, "verdict_pie", &segments);
@@ -709,7 +736,11 @@ impl MyApp {
                 ui.label(RichText::new("Storage status").strong());
                 ui.add_space(8.0);
                 let segments = [
-                    ("In quarantine", in_quarantine, Color32::from_rgb(132, 170, 214)),
+                    (
+                        "In quarantine",
+                        in_quarantine,
+                        Color32::from_rgb(132, 170, 214),
+                    ),
                     ("Restored", restored, Color32::from_rgb(127, 191, 127)),
                     ("Deleted", deleted, Color32::from_rgb(160, 160, 165)),
                 ];
@@ -775,18 +806,32 @@ impl MyApp {
                     TextEdit::singleline(&mut self.single_file_path)
                         .hint_text("/path/to/file-or-folder"),
                 );
-                if ui.button(path_button_label).clicked() {
-                    self.submit_manual_path();
-                }
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Browse file").clicked() {
+                        self.pick_file_target();
+                    }
+                    if ui.button("Browse folder").clicked() {
+                        self.pick_folder_target();
+                    }
+                    if ui.button(path_button_label).clicked() {
+                        self.submit_manual_path();
+                    }
+                });
             });
         } else {
             ui.horizontal(|ui| {
                 ui.label("Path");
                 ui.add_sized(
-                    [ui.available_width() * 0.72, 0.0],
+                    [ui.available_width() * 0.5, 0.0],
                     TextEdit::singleline(&mut self.single_file_path)
                         .hint_text("/path/to/file-or-folder"),
                 );
+                if ui.button("Browse file").clicked() {
+                    self.pick_file_target();
+                }
+                if ui.button("Browse folder").clicked() {
+                    self.pick_folder_target();
+                }
                 if ui.button(path_button_label).clicked() {
                     self.submit_manual_path();
                 }
@@ -916,8 +961,9 @@ impl MyApp {
                     .max(220.0),
                 0.0,
             ],
-            TextEdit::singleline(&mut self.report_search)
-                .hint_text("Search by path, report path, note, verdict, storage, or quarantine path"),
+            TextEdit::singleline(&mut self.report_search).hint_text(
+                "Search by path, report path, note, verdict, storage, or quarantine path",
+            ),
         );
         ui.horizontal_wrapped(|ui| {
             egui::ComboBox::from_id_source("report_verdict_filter")
@@ -929,7 +975,11 @@ impl MyApp {
                         ReportVerdictFilter::Malicious,
                         ReportVerdictFilter::Unsure,
                     ] {
-                        ui.selectable_value(&mut self.report_verdict_filter, filter, filter.label());
+                        ui.selectable_value(
+                            &mut self.report_verdict_filter,
+                            filter,
+                            filter.label(),
+                        );
                     }
                 });
             egui::ComboBox::from_id_source("report_storage_filter")
@@ -942,7 +992,11 @@ impl MyApp {
                         ReportStorageFilter::Deleted,
                         ReportStorageFilter::Unknown,
                     ] {
-                        ui.selectable_value(&mut self.report_storage_filter, filter, filter.label());
+                        ui.selectable_value(
+                            &mut self.report_storage_filter,
+                            filter,
+                            filter.label(),
+                        );
                     }
                 });
         });
@@ -960,7 +1014,8 @@ impl MyApp {
             ui.label(format!("Showing {} result(s)", indices.len()));
             ui.label(format!("Selected visible: {}", selected_visible));
             if ui.button("Select all shown").clicked() {
-                self.selected_report_ids.extend(displayed_ids.iter().cloned());
+                self.selected_report_ids
+                    .extend(displayed_ids.iter().cloned());
             }
             if ui.button("Clear shown").clicked() {
                 for id in &displayed_ids {
@@ -968,7 +1023,10 @@ impl MyApp {
                 }
             }
             if ui
-                .add_enabled(selected_visible > 0, egui::Button::new("Delete selected reports"))
+                .add_enabled(
+                    selected_visible > 0,
+                    egui::Button::new("Delete selected reports"),
+                )
                 .clicked()
             {
                 self.delete_selected_reports(&displayed_ids);
@@ -1190,7 +1248,8 @@ impl MyApp {
             ui.label("Max files per bulk scan");
             ui.add(egui::DragValue::new(&mut self.settings.max_files_per_bulk_scan).speed(500.0));
         });
-        self.settings.max_files_per_bulk_scan = self.settings.max_files_per_bulk_scan.clamp(1, 50_000);
+        self.settings.max_files_per_bulk_scan =
+            self.settings.max_files_per_bulk_scan.clamp(1, 50_000);
 
         ui.separator();
         ui.heading("Scanning stages");
@@ -1220,18 +1279,12 @@ impl MyApp {
             &mut self.settings.enable_yara,
             "YARA-style keyword matching",
         );
-        ui.checkbox(
-            &mut self.settings.enable_emulation,
-            "Lightweight emulation",
-        );
+        ui.checkbox(&mut self.settings.enable_emulation, "Lightweight emulation");
         ui.checkbox(
             &mut self.settings.enable_runtime_yara,
             "Runtime IOC enrichment",
         );
-        ui.checkbox(
-            &mut self.settings.enable_ml_scoring,
-            "ML scoring",
-        );
+        ui.checkbox(&mut self.settings.enable_ml_scoring, "ML scoring");
         ui.checkbox(
             &mut self.settings.enable_dynamic_sandbox,
             "Dynamic sandbox detonation",
@@ -1272,6 +1325,20 @@ impl MyApp {
             self.status_message = "Enter a file or folder path first.".to_string();
         } else {
             self.start_scan_from_roots(vec![PathBuf::from(input)]);
+        }
+    }
+
+    fn pick_file_target(&mut self) {
+        if let Some(path) = FileDialog::new().pick_file() {
+            self.single_file_path = path.display().to_string();
+            self.submit_manual_path();
+        }
+    }
+
+    fn pick_folder_target(&mut self) {
+        if let Some(path) = FileDialog::new().pick_folder() {
+            self.single_file_path = path.display().to_string();
+            self.submit_manual_path();
         }
     }
 
@@ -1345,7 +1412,8 @@ impl MyApp {
 
             let entry = self.download_watch.entry(path_string.clone()).or_default();
             let grew = size > entry.last_scanned_size;
-            let changed_recently = entry.last_seen_epoch == 0 || now.saturating_sub(entry.last_seen_epoch) <= 5;
+            let changed_recently =
+                entry.last_seen_epoch == 0 || now.saturating_sub(entry.last_seen_epoch) <= 5;
             entry.last_seen_epoch = now;
             entry.last_size = size;
 
@@ -1360,7 +1428,11 @@ impl MyApp {
 
         self.download_watch.retain(|path, _| seen.contains(path));
         self.download_status = if queued > 0 {
-            format!("Queued {} download snapshot(s) from {}.", queued, downloads_dir.display())
+            format!(
+                "Queued {} download snapshot(s) from {}.",
+                queued,
+                downloads_dir.display()
+            )
         } else if seen.is_empty() {
             "No active downloads detected.".to_string()
         } else {
@@ -1411,8 +1483,7 @@ impl MyApp {
         }
         self.status_message = format!(
             "Deleted {} selected report entrie(s) and removed {} report file(s).",
-            removed_entries,
-            removed_files
+            removed_entries, removed_files
         );
         save_history(&self.records, &self.timing_samples);
     }
@@ -2252,7 +2323,11 @@ fn stat_chip(ui: &mut egui::Ui, label: &str, value: String, color: Color32) {
 }
 
 fn draw_pie_chart(ui: &mut egui::Ui, id_source: &str, segments: &[(&str, usize, Color32)]) {
-    let total = segments.iter().map(|(_, value, _)| *value).sum::<usize>().max(1) as f32;
+    let total = segments
+        .iter()
+        .map(|(_, value, _)| *value)
+        .sum::<usize>()
+        .max(1) as f32;
     let desired_size = Vec2::new(220.0, 220.0);
     let (rect, _) = ui.allocate_at_least(desired_size, Sense::hover());
     let painter = ui.painter_at(rect);
@@ -2274,14 +2349,22 @@ fn draw_pie_chart(ui: &mut egui::Ui, id_source: &str, segments: &[(&str, usize, 
         start_angle = end_angle;
 
         if idx == segments.len() - 1 {
-            painter.circle_stroke(center, radius, Stroke::new(1.0, Color32::from_rgb(52, 52, 54)));
+            painter.circle_stroke(
+                center,
+                radius,
+                Stroke::new(1.0, Color32::from_rgb(52, 52, 54)),
+            );
         }
     }
     let _ = id_source;
 }
 
 fn draw_segment_bar(ui: &mut egui::Ui, segments: &[(&str, usize, Color32)]) {
-    let total = segments.iter().map(|(_, value, _)| *value).sum::<usize>().max(1) as f32;
+    let total = segments
+        .iter()
+        .map(|(_, value, _)| *value)
+        .sum::<usize>()
+        .max(1) as f32;
     let desired_size = Vec2::new(ui.available_width().max(220.0), 28.0);
     let (rect, _) = ui.allocate_at_least(desired_size, Sense::hover());
     let painter = ui.painter_at(rect);
@@ -2293,7 +2376,8 @@ fn draw_segment_bar(ui: &mut egui::Ui, segments: &[(&str, usize, Color32)]) {
             continue;
         }
         let width = rect.width() * (*value as f32 / total);
-        let segment_rect = egui::Rect::from_min_size(egui::pos2(x, rect.top()), Vec2::new(width, rect.height()));
+        let segment_rect =
+            egui::Rect::from_min_size(egui::pos2(x, rect.top()), Vec2::new(width, rect.height()));
         painter.rect_filled(segment_rect, 6.0, *color);
         x += width;
     }

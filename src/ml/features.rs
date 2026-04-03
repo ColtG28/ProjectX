@@ -1,6 +1,7 @@
 use crate::r#static::context::ScanContext;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FeatureVector {
     pub finding_count: usize,
     pub suspicious_weight: f64,
@@ -24,11 +25,21 @@ pub fn extract(ctx: &ScanContext) -> FeatureVector {
         .find(|view| view.name == "format.nested_depth")
         .and_then(|view| view.content.parse::<usize>().ok())
         .unwrap_or(0);
-    let yara_hits = ctx
-        .findings
-        .iter()
-        .filter(|finding| finding.code == "YARA_MATCH")
-        .count();
+    let mut yara_hits = 0usize;
+    let mut suspicious_weight = 0.0f64;
+    let mut has_macro_indicator = false;
+    let mut has_network_indicator = false;
+    for finding in &ctx.findings {
+        suspicious_weight += finding.weight;
+        yara_hits += usize::from(finding.code == "YARA_MATCH");
+        has_macro_indicator |= finding.code.contains("MACRO");
+        has_network_indicator |= finding.message.as_bytes().windows(4).any(|window| {
+            window[0].eq_ignore_ascii_case(&b'h')
+                && window[1].eq_ignore_ascii_case(&b't')
+                && window[2].eq_ignore_ascii_case(&b't')
+                && window[3].eq_ignore_ascii_case(&b'p')
+        });
+    }
     let emulation_runtime_hits = ctx
         .emulation
         .as_ref()
@@ -37,20 +48,14 @@ pub fn extract(ctx: &ScanContext) -> FeatureVector {
 
     FeatureVector {
         finding_count: ctx.findings.len(),
-        suspicious_weight: ctx.findings.iter().map(|finding| finding.weight).sum(),
+        suspicious_weight,
         decoded_count: ctx.decoded_strings.len(),
         artifact_count: ctx.artifacts.len(),
         nested_depth,
         yara_hits,
         emulation_runtime_hits,
-        has_macro_indicator: ctx
-            .findings
-            .iter()
-            .any(|finding| finding.code.contains("MACRO")),
-        has_network_indicator: ctx
-            .findings
-            .iter()
-            .any(|finding| finding.message.to_ascii_lowercase().contains("http")),
+        has_macro_indicator,
+        has_network_indicator,
         dynamic_network_events: ctx
             .dynamic_analysis
             .as_ref()

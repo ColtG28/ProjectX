@@ -14,6 +14,7 @@ use super::heuristics;
 use super::report;
 use super::types::Severity;
 use super::yara;
+use crate::r#static::types::Finding;
 
 #[derive(Debug, Clone, Copy)]
 pub struct ScanProgress {
@@ -205,7 +206,23 @@ where
         crate::sandbox::plan_for_context,
     );
 
-    if ctx.config.features.enable_dynamic_sandbox {
+    let auto_sandbox = ctx.config.features.enable_auto_sandbox && should_auto_sandbox(&ctx);
+    if auto_sandbox {
+        ctx.log_event(
+            "sandbox",
+            "Automatic sandbox escalation triggered by pre-execution indicators",
+        );
+        ctx.push_finding(Finding::new(
+            "AUTO_SANDBOX_ESCALATION",
+            "ProjectX automatically escalated the sample to sandbox analysis",
+            1.2,
+        ));
+        if let Some(summary) = &mut ctx.threat_severity {
+            summary.auto_sandbox_triggered = true;
+        }
+    }
+
+    if ctx.config.features.enable_dynamic_sandbox || auto_sandbox {
         run_stage(
             &mut ctx,
             &mut progress,
@@ -255,6 +272,98 @@ where
     report::run(&ctx, severity);
 
     Ok((ctx, severity))
+}
+
+fn should_auto_sandbox(ctx: &ScanContext) -> bool {
+    if ctx.dynamic_analysis.is_some() {
+        return false;
+    }
+    if ctx.original_size_bytes > 50 * 1024 * 1024 {
+        return false;
+    }
+
+    let extension = ctx.extension.to_ascii_lowercase();
+    if matches!(
+        extension.as_str(),
+        "asc" | "avi" | "bmp" | "gif" | "jpeg" | "jpg" | "mkv" | "mp4" | "pgp" | "png" | "txt"
+    ) {
+        return false;
+    }
+
+    let high_weight = ctx.findings.iter().map(|finding| finding.weight).sum::<f64>() >= 5.0;
+    let supports_prefilter_submission = matches!(
+        ctx.detected_format.as_deref(),
+        Some("Pe") | Some("Elf") | Some("Pdf") | Some("Zip") | Some("Office")
+    ) || matches!(
+        extension.as_str(),
+        "exe"
+            | "dll"
+            | "com"
+            | "elf"
+            | "pdf"
+            | "rtf"
+            | "doc"
+            | "docx"
+            | "docm"
+            | "dot"
+            | "dotm"
+            | "xls"
+            | "xlsx"
+            | "xlsm"
+            | "ppt"
+            | "pptx"
+            | "pptm"
+            | "pps"
+            | "ppsm"
+            | "potm"
+            | "potx"
+            | "js"
+            | "jse"
+            | "ps1"
+            | "psc1"
+            | "vbs"
+            | "vbe"
+            | "vb"
+            | "wsf"
+            | "wsh"
+            | "wsc"
+            | "sh"
+            | "zip"
+            | "jar"
+            | "7z"
+            | "bz"
+            | "bz2"
+            | "tgz"
+            | "msi"
+            | "rar"
+            | "iso"
+            | "arj"
+            | "eml"
+            | "tnef"
+            | "scr"
+    );
+    let has_unpacking_signals = ctx.findings.iter().any(|finding| {
+        finding.code.contains("PACK")
+            || finding.code.contains("OBFUS")
+            || finding.code.contains("DECODE")
+            || finding.code.contains("SCRIPT")
+            || finding.code.contains("MACRO")
+            || finding.code.contains("PDF_ACTIVE")
+    });
+    let suspicious_strings = ctx
+        .decoded_strings
+        .iter()
+        .any(|value| {
+            let lower = value.to_ascii_lowercase();
+            lower.contains("powershell")
+                || lower.contains("fromcharcode")
+                || lower.contains("http://")
+                || lower.contains("https://")
+                || lower.contains("cmd.exe")
+                || lower.contains("wscript.shell")
+        });
+
+    supports_prefilter_submission && (high_weight || has_unpacking_signals || suspicious_strings)
 }
 
 pub fn ensure_docker() -> Result<(), String> {

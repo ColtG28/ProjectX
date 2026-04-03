@@ -55,6 +55,7 @@ pub fn value(
         "cache": ctx.cache,
         "emulation": ctx.emulation,
         "ml": ctx.ml_assessment,
+        "threat_severity": ctx.threat_severity,
         "sandbox_plan": ctx.sandbox_plan,
         "dynamic_analysis": ctx.dynamic_analysis,
         "findings": ctx.findings.iter().map(|finding| serde_json::json!({

@@ -1,9 +1,12 @@
 use crate::r#static::types::View;
+use regex::Regex;
 use std::fs;
 use std::path::Path;
 use std::sync::OnceLock;
 
 static KEYWORDS: OnceLock<Vec<String>> = OnceLock::new();
+static HTTP_CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+static KEYWORD_RE: OnceLock<Regex> = OnceLock::new();
 
 pub fn run_on_views(rules: &[String], views: &[View]) -> Vec<String> {
     let mut hits = Vec::new();
@@ -74,8 +77,8 @@ fn fetch_yara_keywords_from_network() -> Vec<String> {
         return Vec::new();
     }
 
-    let client = reqwest::blocking::Client::new();
-    let keyword_re = regex::Regex::new(r#""([^"]{4,50})""#).expect("regex compiles");
+    let client = HTTP_CLIENT.get_or_init(reqwest::blocking::Client::new);
+    let keyword_re = KEYWORD_RE.get_or_init(|| Regex::new(r#""([^"]{4,50})""#).expect("regex"));
     let mut keywords = Vec::new();
 
     for url in urls {
@@ -116,7 +119,7 @@ fn load_cached_keywords() -> Vec<String> {
 }
 
 fn fetch_yara_file_urls() -> Vec<String> {
-    let client = reqwest::blocking::Client::new();
+    let client = HTTP_CLIENT.get_or_init(reqwest::blocking::Client::new);
     let mut urls = Vec::new();
 
     let dirs = vec![
@@ -137,7 +140,11 @@ fn fetch_yara_file_urls() -> Vec<String> {
             continue;
         };
 
-        let Ok(json) = response.json::<serde_json::Value>() else {
+        let Ok(text) = response.text() else {
+            continue;
+        };
+
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
             continue;
         };
 

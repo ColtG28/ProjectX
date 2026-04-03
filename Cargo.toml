@@ -9,16 +9,29 @@ path = "src/lib.rs"
 
 [features]
 default = ["gui"]
-gui = ["dep:eframe"]
+gui = ["dep:eframe", "dep:rfd"]
 
 [dependencies]
+crossbeam-channel = "0.5"
+libc = "0.2"
 sha2 = "0.10.9"
-hex = "0.4.3"
-reqwest = { version = "0.12", features = ["blocking", "json"] }
-regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+regex = { version = "1", default-features = false, features = ["std", "perf", "unicode-case"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 phf = { version = "0.11", features = ["macros"] }
 dotenvy = "0.15"
 flate2 = "1.1"
 eframe = { version = "0.24.1", optional = true, default-features = false, features = ["default_fonts", "glow"] }
+rfd = { version = "0.14", optional = true }
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+opt-level = 3
+panic = "abort"
+strip = "symbols"
+debug = 0
+debug-assertions = false
+overflow-checks = false
+incremental = false

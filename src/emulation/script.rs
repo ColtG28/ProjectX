@@ -1,3 +1,4 @@
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use regex::Regex;
@@ -14,12 +15,21 @@ pub(crate) fn emulate_powershell(
     config: EmulationConfig,
     started: Instant,
 ) {
-    let encoded_command_re =
-        Regex::new(r"(?i)(?:-enc|-encodedcommand)\s+([A-Za-z0-9+/=]{16,})").expect("regex");
-    let from_base64_re =
-        Regex::new(r#"(?i)frombase64string\s*\(\s*["']([A-Za-z0-9+/=]{12,})["']\s*\)"#)
-            .expect("regex");
-    let utf16_base64_re = Regex::new(r#"(?i)["']([A-Za-z0-9+/=]{24,})["']"#).expect("regex");
+    static ENCODED_COMMAND_RE: OnceLock<Regex> = OnceLock::new();
+    static FROM_BASE64_RE: OnceLock<Regex> = OnceLock::new();
+    static UTF16_BASE64_RE: OnceLock<Regex> = OnceLock::new();
+    let encoded_command_re = ENCODED_COMMAND_RE.get_or_init(|| {
+        Regex::new(r"(?i)(?:-enc|-encodedcommand)[ \t\r\n]+([A-Za-z0-9+/=]{16,})")
+            .expect("regex")
+    });
+    let from_base64_re = FROM_BASE64_RE.get_or_init(|| {
+        Regex::new(
+            r#"(?i)frombase64string[ \t\r\n]*\([ \t\r\n]*["']([A-Za-z0-9+/=]{12,})["'][ \t\r\n]*\)"#,
+        )
+        .expect("regex")
+    });
+    let utf16_base64_re = UTF16_BASE64_RE
+        .get_or_init(|| Regex::new(r#"(?i)["']([A-Za-z0-9+/=]{24,})["']"#).expect("regex"));
 
     for input in inputs {
         if !consume_budget(state, config, started) {
@@ -108,15 +118,27 @@ pub(crate) fn emulate_javascript(
     config: EmulationConfig,
     started: Instant,
 ) {
-    let charcode_re = Regex::new(r"String\.fromCharCode\(([\d,\s]+)\)").expect("regex");
-    let atob_re = Regex::new(r#"atob\(["']([A-Za-z0-9+/=]{12,})["']\)"#).expect("regex");
-    let join_re = Regex::new(
-        r#"\[\s*["']([^"']+)["'](?:\s*,\s*["']([^"']+)["'])*\s*\]\.join\(["']?([^"']*)["']?\)"#,
-    )
-    .expect("regex");
-    let concat_re = Regex::new(r#"["']([^"']+)["']\s*\+\s*["']([^"']+)["']"#).expect("regex");
-    let unescape_re =
-        Regex::new(r#"unescape\(["']((?:%[0-9A-Fa-f]{2}){4,})["']\)"#).expect("regex");
+    static CHARCODE_RE: OnceLock<Regex> = OnceLock::new();
+    static ATOB_RE: OnceLock<Regex> = OnceLock::new();
+    static JOIN_RE: OnceLock<Regex> = OnceLock::new();
+    static CONCAT_RE: OnceLock<Regex> = OnceLock::new();
+    static UNESCAPE_RE: OnceLock<Regex> = OnceLock::new();
+    let charcode_re = CHARCODE_RE
+        .get_or_init(|| Regex::new(r"String\.fromCharCode\(([0-9, \t\r\n]+)\)").expect("regex"));
+    let atob_re = ATOB_RE
+        .get_or_init(|| Regex::new(r#"atob\(["']([A-Za-z0-9+/=]{12,})["']\)"#).expect("regex"));
+    let join_re = JOIN_RE.get_or_init(|| {
+        Regex::new(
+            r#"\[[ \t\r\n]*["']([^"']+)["'](?:[ \t\r\n]*,[ \t\r\n]*["']([^"']+)["'])*[ \t\r\n]*\]\.join\(["']?([^"']*)["']?\)"#,
+        )
+        .expect("regex")
+    });
+    let concat_re = CONCAT_RE.get_or_init(|| {
+        Regex::new(r#"["']([^"']+)["'][ \t\r\n]*\+[ \t\r\n]*["']([^"']+)["']"#).expect("regex")
+    });
+    let unescape_re = UNESCAPE_RE.get_or_init(|| {
+        Regex::new(r#"unescape\(["']((?:%[0-9A-Fa-f]{2}){4,})["']\)"#).expect("regex")
+    });
 
     for input in inputs {
         if !consume_budget(state, config, started) {
@@ -198,8 +220,11 @@ pub(crate) fn emulate_vba(
     config: EmulationConfig,
     started: Instant,
 ) {
-    let chr_re = Regex::new(r"(?i)chrw?\((\d{1,3})\)").expect("regex");
-    let reverse_re = Regex::new(r#"(?i)strreverse\(["']([^"']{4,})["']\)"#).expect("regex");
+    static CHR_RE: OnceLock<Regex> = OnceLock::new();
+    static REVERSE_RE: OnceLock<Regex> = OnceLock::new();
+    let chr_re = CHR_RE.get_or_init(|| Regex::new(r"(?i)chrw?\(([0-9]{1,3})\)").expect("regex"));
+    let reverse_re = REVERSE_RE
+        .get_or_init(|| Regex::new(r#"(?i)strreverse\(["']([^"']{4,})["']\)"#).expect("regex"));
 
     for input in inputs {
         if !consume_budget(state, config, started) {

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use crate::r#static::file::hash::{check_malware_hash, MalwareHashStatus};
 
@@ -8,6 +9,11 @@ use crate::r#static::file::hash::{check_malware_hash, MalwareHashStatus};
 pub struct ThreatIntelMatch {
     pub provider: &'static str,
     pub detail: String,
+}
+
+fn http_client() -> &'static reqwest::blocking::Client {
+    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+    CLIENT.get_or_init(reqwest::blocking::Client::new)
 }
 
 pub fn lookup_hash(sha256: &str) -> Vec<ThreatIntelMatch> {
@@ -74,8 +80,7 @@ fn lookup_known_bad_hashes(sha256: &str) -> Option<String> {
 
 fn lookup_virustotal(sha256: &str) -> Option<String> {
     let api_key = std::env::var("VT_API_KEY").ok()?;
-    let client = reqwest::blocking::Client::new();
-    let response = client
+    let response = http_client()
         .get(format!("https://www.virustotal.com/api/v3/files/{sha256}"))
         .header("x-apikey", api_key)
         .send()
@@ -83,7 +88,8 @@ fn lookup_virustotal(sha256: &str) -> Option<String> {
     if !response.status().is_success() {
         return None;
     }
-    let value = response.json::<serde_json::Value>().ok()?;
+    let text = response.text().ok()?;
+    let value = serde_json::from_str::<serde_json::Value>(&text).ok()?;
     let stats = &value["data"]["attributes"]["last_analysis_stats"];
     let malicious = stats["malicious"].as_u64().unwrap_or(0);
     let suspicious = stats["suspicious"].as_u64().unwrap_or(0);

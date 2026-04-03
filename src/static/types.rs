@@ -140,11 +140,24 @@ pub struct EmulationSummary {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MlAssessment {
+    pub static_signal_score: f64,
+    pub heuristic_signal_score: f64,
     pub static_score: f64,
     pub dynamic_score: f64,
+    pub intel_score: f64,
+    pub evasion_score: f64,
+    pub ensemble_score: f64,
     pub blended_score: f64,
     pub label: String,
     pub reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ThreatSeveritySummary {
+    pub severity_score: f64,
+    pub recommended_action: String,
+    pub contributing_signals: Vec<String>,
+    pub auto_sandbox_triggered: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

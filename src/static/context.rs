@@ -6,7 +6,8 @@ use super::config::ScanConfig;
 use super::file::{hash, mime};
 use super::types::{
     CacheMetadata, DynamicAnalysisSummary, EmulationSummary, ExtractedArtifact, Finding,
-    MlAssessment, SandboxPlanSummary, ScanLogEntry, Score, StageTiming, StringPool, View,
+    MlAssessment, SandboxPlanSummary, ScanLogEntry, Score, StageTiming, StringPool,
+    ThreatSeveritySummary, View,
 };
 
 #[derive(Debug, Clone)]
@@ -35,6 +36,7 @@ pub struct ScanContext {
     pub ml_assessment: Option<MlAssessment>,
     pub sandbox_plan: Option<SandboxPlanSummary>,
     pub dynamic_analysis: Option<DynamicAnalysisSummary>,
+    pub threat_severity: Option<ThreatSeveritySummary>,
     pub config: ScanConfig,
 }
 
@@ -92,6 +94,7 @@ impl ScanContext {
             ml_assessment: None,
             sandbox_plan: None,
             dynamic_analysis: None,
+            threat_severity: None,
             config,
         })
     }

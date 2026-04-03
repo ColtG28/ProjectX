@@ -1,4 +1,5 @@
 use sha2::{Digest, Sha256};
+use std::sync::OnceLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MalwareHashStatus {
@@ -34,9 +35,9 @@ pub fn check_malware_hash(hash: &str) -> MalwareHashStatus {
         }
     };
 
-    let client = reqwest::blocking::Client::new();
-
-    let response = match client
+    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+    let response = match CLIENT
+        .get_or_init(reqwest::blocking::Client::new)
         .post("https://mb-api.abuse.ch/api/v1/")
         .header("User-Agent", "ProjectX")
         .header("Auth-Key", auth_key)

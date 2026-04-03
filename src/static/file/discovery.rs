@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -11,15 +10,12 @@ pub struct DiscoveredFile {
 
 pub fn collect_files(inputs: &[PathBuf], max_files: usize) -> Vec<DiscoveredFile> {
     let mut files = Vec::new();
-    let mut seen = HashSet::new();
-    let mut stack = inputs.to_vec();
+    let mut stack = Vec::with_capacity(inputs.len());
+    stack.extend(inputs.iter().rev().cloned());
 
     while let Some(path) = stack.pop() {
         if files.len() >= max_files {
             break;
-        }
-        if !seen.insert(path.clone()) {
-            continue;
         }
 
         let Ok(metadata) = fs::symlink_metadata(&path) else {
@@ -43,13 +39,8 @@ pub fn collect_files(inputs: &[PathBuf], max_files: usize) -> Vec<DiscoveredFile
             let Ok(entries) = fs::read_dir(&path) else {
                 continue;
             };
-            let mut children = entries
-                .flatten()
-                .map(|entry| entry.path())
-                .collect::<Vec<_>>();
-            children.sort();
-            for child in children.into_iter().rev() {
-                stack.push(child);
+            for entry in entries.flatten() {
+                stack.push(entry.path());
             }
         }
     }

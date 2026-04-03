@@ -1,4 +1,5 @@
 use std::time::Instant;
+use std::sync::OnceLock;
 
 use regex::Regex;
 
@@ -24,7 +25,8 @@ pub(crate) fn resolve_in_inputs(
     config: EmulationConfig,
     started: Instant,
 ) {
-    let hex_re = Regex::new(r"0x[0-9a-fA-F]{6,8}").expect("regex");
+    static HEX_RE: OnceLock<Regex> = OnceLock::new();
+    let hex_re = HEX_RE.get_or_init(|| Regex::new(r"0x[0-9a-fA-F]{6,8}").expect("regex"));
 
     for input in inputs {
         if !consume_budget(state, config, started) {
