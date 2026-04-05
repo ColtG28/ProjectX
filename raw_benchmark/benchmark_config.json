@@ -28,6 +28,15 @@
   ],
   "malicious_sources": [
     {
+      "name": "zoo_samples",
+      "type": "http",
+      "urls": [
+        "https://github.com/ytisf/theZoo/raw/master/malwares/Binaries/Win32.Worm.Downadup.zip",
+        "https://github.com/ytisf/theZoo/raw/master/malwares/Binaries/Win32.Trojan.Ramnit.zip",
+        "https://github.com/ytisf/theZoo/raw/master/malwares/Binaries/Win32.Trojan.Zbot.zip"
+      ]
+    },
+    {
       "name": "guest_staged_drop",
       "type": "guest_local",
       "path": "/opt/projectx_benchmark/incoming_malicious"
