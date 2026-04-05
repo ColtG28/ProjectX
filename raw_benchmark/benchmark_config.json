@@ -1,0 +1,87 @@
+{
+  "guest_only": true,
+  "projectx_binary": "/opt/projectx_benchmark/bin/ProjectX",
+  "workspace_root": "/opt/projectx_benchmark",
+  "malicious_dir": "/opt/projectx_benchmark/malicious",
+  "clean_dir": "/opt/projectx_benchmark/clean",
+  "manifests_dir": "/opt/projectx_benchmark/manifests",
+  "results_dir": "/opt/projectx_benchmark/results",
+  "approved_guest_prefixes": [
+    "/opt/projectx_benchmark",
+    "/var/lib/projectx_benchmark"
+  ],
+  "allowed_readonly_source_prefixes": [
+    "/opt/projectx_benchmark",
+    "/var/lib/projectx_benchmark",
+    "/bin",
+    "/usr",
+    "/etc"
+  ],
+  "blocked_path_prefixes": [
+    "/mnt",
+    "/media",
+    "/Volumes",
+    "/run/desktop",
+    "/run/host",
+    "/host_mnt",
+    "/Users"
+  ],
+  "malicious_sources": [
+    {
+      "name": "guest_staged_drop",
+      "type": "guest_local",
+      "path": "/opt/projectx_benchmark/incoming_malicious"
+    }
+  ],
+  "clean_sources": [
+    {
+      "name": "system_bins",
+      "type": "filesystem",
+      "paths": [
+        "/bin",
+        "/usr/bin",
+        "/usr/lib",
+        "/usr/share"
+      ]
+    }
+  ],
+  "allowed_clean_extensions": [
+    ".exe",
+    ".dll",
+    ".sys",
+    ".com",
+    ".ps1",
+    ".vbs",
+    ".js",
+    ".jar",
+    ".zip",
+    ".pdf",
+    ".txt",
+    ".html",
+    ".xml",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".ini",
+    ".cfg"
+  ],
+  "allowed_malicious_extensions": [],
+  "max_clean_files": 5000,
+  "max_malicious_files": 5000,
+  "scan_timeout_seconds": 120,
+  "concurrency": 0,
+  "batch_size": 0,
+  "scan_flags": [
+    "--cli",
+    "--pretty-json"
+  ],
+  "export_safe_extensions": [
+    ".json",
+    ".jsonl",
+    ".csv",
+    ".md",
+    ".txt",
+    ".log",
+    ".html"
+  ]
+}

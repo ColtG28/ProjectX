@@ -38,6 +38,8 @@ fn main() {
     let mut concurrency = None;
     let mut evaluation_manifest = None;
     let mut max_input_bytes = None;
+    let mut score_features_jsonl = None;
+    let mut export_embedded_model = None;
 
     let mut index = 1usize;
     while index < args.len() {
@@ -80,6 +82,14 @@ fn main() {
                 index += 1;
                 evaluation_manifest = args.get(index).map(PathBuf::from);
             }
+            "--score-features-jsonl" => {
+                index += 1;
+                score_features_jsonl = args.get(index).map(PathBuf::from);
+            }
+            "--export-embedded-model" => {
+                index += 1;
+                export_embedded_model = args.get(index).map(PathBuf::from);
+            }
             "--max-input-bytes" => {
                 index += 1;
                 max_input_bytes = args
@@ -120,6 +130,20 @@ fn main() {
     dotenvy::dotenv().ok();
     if let Err(error) = projectx::r#static::init_quarantine() {
         eprintln!("Quarantine initialization failed: {}", error);
+        return;
+    }
+
+    if let Some(path) = export_embedded_model {
+        if let Err(error) = export_embedded_model_to_path(&path) {
+            eprintln!("Embedded model export failed: {}", error);
+        }
+        return;
+    }
+
+    if let Some(path) = score_features_jsonl {
+        if let Err(error) = score_feature_jsonl(&path, model_path.as_deref()) {
+            eprintln!("Feature JSONL scoring failed: {}", error);
+        }
         return;
     }
 
@@ -203,6 +227,99 @@ fn main() {
     } else {
         print_text_results(&results);
     }
+}
+
+#[derive(serde::Deserialize)]
+struct FeatureJsonlRecord {
+    sample_id: Option<String>,
+    sha256: Option<String>,
+    source_label: Option<i32>,
+    feature_values: Vec<f32>,
+    #[serde(default)]
+    adapter_metadata: Option<serde_json::Value>,
+}
+
+#[derive(serde::Serialize)]
+struct FeatureJsonlScore {
+    sample_id: Option<String>,
+    sha256: Option<String>,
+    source_label: Option<i32>,
+    score: f32,
+    confidence: f32,
+    label: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    adapter_metadata: Option<serde_json::Value>,
+}
+
+fn export_embedded_model_to_path(path: &std::path::Path) -> Result<(), String> {
+    let model = projectx::ml::portable_model::PortableModel::embedded_default();
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("Failed to create {}: {error}", parent.display()))?;
+    let raw = serde_json::to_string_pretty(&model)
+        .map_err(|error| format!("Failed to serialize embedded model: {error}"))?;
+    std::fs::write(path, raw)
+        .map_err(|error| format!("Failed to write embedded model {}: {error}", path.display()))?;
+    println!("{}", path.display());
+    Ok(())
+}
+
+fn score_feature_jsonl(
+    path: &std::path::Path,
+    model_path: Option<&std::path::Path>,
+) -> Result<(), String> {
+    let model = match model_path {
+        Some(path) => projectx::ml::portable_model::PortableModel::load(path)?,
+        None => projectx::ml::portable_model::PortableModel::embedded_default(),
+    };
+    if !model.schema_matches_runtime() {
+        return Err(format!(
+            "Model feature schema mismatch. Rust expects {} features and the model declares {}.",
+            projectx::ml::portable_features::FEATURE_COUNT,
+            model.feature_count()
+        ));
+    }
+
+    let file = std::fs::File::open(path)
+        .map_err(|error| format!("Failed to open feature JSONL {}: {error}", path.display()))?;
+    let reader = std::io::BufReader::new(file);
+
+    for (line_number, line) in std::io::BufRead::lines(reader).enumerate() {
+        let line = line.map_err(|error| {
+            format!(
+                "Failed to read feature JSONL line {} from {}: {error}",
+                line_number + 1,
+                path.display()
+            )
+        })?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let record: FeatureJsonlRecord = serde_json::from_str(&line).map_err(|error| {
+            format!(
+                "Failed to parse feature JSONL line {} from {}: {error}",
+                line_number + 1,
+                path.display()
+            )
+        })?;
+        let prediction = model.predict_slice(&record.feature_values)?;
+        let output = FeatureJsonlScore {
+            sample_id: record.sample_id,
+            sha256: record.sha256,
+            source_label: record.source_label,
+            score: prediction.score,
+            confidence: prediction.confidence,
+            label: prediction.label,
+            adapter_metadata: record.adapter_metadata,
+        };
+        println!(
+            "{}",
+            serde_json::to_string(&output)
+                .map_err(|error| format!("Failed to serialize prediction JSON: {error}"))?
+        );
+    }
+
+    Ok(())
 }
 
 fn print_json_results(results: &[projectx::r#static::BatchScanResult], pretty: bool) {

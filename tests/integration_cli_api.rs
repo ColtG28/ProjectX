@@ -89,6 +89,105 @@ fn cli_detonate_scan_includes_dynamic_analysis_section() {
     }
 }
 
+#[test]
+fn cli_native_ml_scan_writes_summary_report_with_evaluation() {
+    let root = unique_path("cli_native_ml_scan_writes_summary_report_with_evaluation");
+    fs::create_dir_all(&root).unwrap();
+
+    let clean_path = root.join("clean_sample.txt");
+    let suspicious_path = root.join("suspicious_sample.ps1");
+    fs::write(&clean_path, "hello from projectx").unwrap();
+    fs::write(&suspicious_path, "IEX(New-Object Net.WebClient)").unwrap();
+
+    let manifest_path = root.join("ember_eval_manifest.csv");
+    fs::write(
+        &manifest_path,
+        format!(
+            "path,label\n{},0\n{},1\n",
+            clean_path.display(),
+            suspicious_path.display()
+        ),
+    )
+    .unwrap();
+
+    let output_prefix = root.join("native_ml_scan");
+    let output = Command::new(env!("CARGO_BIN_EXE_ProjectX"))
+        .args([
+            "--native-ml",
+            "--pretty-json",
+            "--output",
+            output_prefix.to_str().unwrap(),
+            "--eval-manifest",
+            manifest_path.to_str().unwrap(),
+            clean_path.to_str().unwrap(),
+            suspicious_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let parsed =
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).expect("valid json output");
+    assert_eq!(parsed["processed_files"], 2);
+    assert_eq!(parsed["output_csv"], output_prefix.with_extension("csv").display().to_string());
+    assert_eq!(
+        parsed["output_jsonl"],
+        output_prefix.with_extension("jsonl").display().to_string()
+    );
+    assert_eq!(parsed["evaluation"]["manifest_rows"], 2);
+    assert_eq!(parsed["evaluation"]["matched_rows"], 2);
+    assert!(parsed["evaluation"]["accuracy"].as_f64().is_some());
+
+    let summary_path = output_prefix.with_extension("summary.json");
+    let summary =
+        serde_json::from_str::<serde_json::Value>(&fs::read_to_string(&summary_path).unwrap())
+            .expect("valid summary report");
+    assert_eq!(summary["processed_files"], 2);
+    assert_eq!(summary["evaluation"]["manifest_rows"], 2);
+    assert!(output_prefix.with_extension("csv").is_file());
+    assert!(output_prefix.with_extension("jsonl").is_file());
+    assert!(summary_path.is_file());
+
+    let _ = fs::remove_file(output_prefix.with_extension("csv"));
+    let _ = fs::remove_file(output_prefix.with_extension("jsonl"));
+    let _ = fs::remove_file(summary_path);
+    let _ = fs::remove_file(manifest_path);
+    let _ = fs::remove_file(clean_path);
+    let _ = fs::remove_file(suspicious_path);
+    let _ = fs::remove_dir(root);
+}
+
+#[test]
+fn cli_score_features_jsonl_outputs_portable_predictions() {
+    let root = unique_path("cli_score_features_jsonl_outputs_portable_predictions");
+    fs::create_dir_all(&root).unwrap();
+    let input_path = root.join("features.jsonl");
+    let values = vec![0.0f32; 386];
+    fs::write(
+        &input_path,
+        format!(
+            "{{\"sample_id\":\"sample-1\",\"source_label\":0,\"feature_values\":{}}}\n",
+            serde_json::to_string(&values).unwrap()
+        ),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ProjectX"))
+        .args(["--score-features-jsonl", input_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let line = String::from_utf8(output.stdout).unwrap();
+    let parsed = serde_json::from_str::<serde_json::Value>(line.trim()).unwrap();
+    assert_eq!(parsed["sample_id"], "sample-1");
+    assert_eq!(parsed["label"], "clean");
+    assert!(parsed["score"].as_f64().unwrap() < 0.4);
+
+    let _ = fs::remove_file(input_path);
+    let _ = fs::remove_dir(root);
+}
+
 fn unique_path(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)

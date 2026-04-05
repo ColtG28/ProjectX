@@ -149,6 +149,19 @@ impl PortableModel {
         self.classify(score)
     }
 
+    pub fn predict_slice(&self, features: &[f32]) -> Result<Prediction, String> {
+        if features.len() != FEATURE_COUNT {
+            return Err(format!(
+                "Feature vector length mismatch. Expected {} values and received {}.",
+                FEATURE_COUNT,
+                features.len()
+            ));
+        }
+        let mut values = [0.0f32; FEATURE_COUNT];
+        values.copy_from_slice(features);
+        Ok(self.predict(&values))
+    }
+
     fn classify(&self, score: f32) -> Prediction {
         let label = if score >= self.malicious_threshold {
             "malicious"
