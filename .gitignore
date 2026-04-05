@@ -4,6 +4,8 @@
 /quarantine
 /.hf_cache/
 /.venv/
+/tmp/
+/ember_benchmark/
 # Generated IDE / Python noise
 **/.DS_Store
 **/__pycache__/
