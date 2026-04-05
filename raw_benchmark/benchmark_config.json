@@ -31,9 +31,9 @@
       "name": "zoo_samples",
       "type": "http",
       "urls": [
-        "https://github.com/ytisf/theZoo/raw/master/malwares/Binaries/Win32.Worm.Downadup.zip",
-        "https://github.com/ytisf/theZoo/raw/master/malwares/Binaries/Win32.Trojan.Ramnit.zip",
-        "https://github.com/ytisf/theZoo/raw/master/malwares/Binaries/Win32.Trojan.Zbot.zip"
+        "https://github.com/ytisf/theZoo/raw/main/malwares/Binaries/Win32.Worm.Downadup.zip",
+        "https://github.com/ytisf/theZoo/raw/main/malwares/Binaries/Win32.Trojan.Ramnit.zip",
+        "https://github.com/ytisf/theZoo/raw/main/malwares/Binaries/Win32.Trojan.Zbot.zip"
       ]
     },
     {
