@@ -125,6 +125,29 @@ fn split_rules(contents: &str) -> Vec<String> {
     rules
 }
 
+fn dir_signature(files: &[std::path::PathBuf]) -> String {
+    use std::time::UNIX_EPOCH;
+
+    let mut signature = String::new();
+    for path in files {
+        if let Ok(metadata) = fs::metadata(path) {
+            let modified = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map(|duration| duration.as_secs())
+                .unwrap_or(0);
+            signature.push_str(&format!(
+                "{}:{}:{}\n",
+                path.to_string_lossy(),
+                metadata.len(),
+                modified
+            ));
+        }
+    }
+    crate::r#static::file::hash::sha256_hex(signature.as_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::split_rules;
@@ -152,27 +175,4 @@ mod tests {
         assert!(rules[0].contains("first_rule"));
         assert!(rules[1].contains("second_rule"));
     }
-}
-
-fn dir_signature(files: &[std::path::PathBuf]) -> String {
-    use std::time::UNIX_EPOCH;
-
-    let mut signature = String::new();
-    for path in files {
-        if let Ok(metadata) = fs::metadata(path) {
-            let modified = metadata
-                .modified()
-                .ok()
-                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-                .map(|duration| duration.as_secs())
-                .unwrap_or(0);
-            signature.push_str(&format!(
-                "{}:{}:{}\n",
-                path.to_string_lossy(),
-                metadata.len(),
-                modified
-            ));
-        }
-    }
-    crate::r#static::file::hash::sha256_hex(signature.as_bytes())
 }

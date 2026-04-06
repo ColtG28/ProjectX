@@ -314,66 +314,6 @@ pub fn verdict_from_severity(severity: Severity) -> SummaryVerdict {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{
-        normalize_reason_description, normalize_reason_name, normalize_reason_source,
-        normalize_severity, source_label, verdict_from_severity, NormalizedSeverity,
-        SummaryVerdict,
-    };
-    use crate::r#static::types::Severity;
-
-    #[test]
-    fn normalizes_reason_sources_consistently() {
-        assert_eq!(normalize_reason_source("YARA_RULE_MATCH"), "rule");
-        assert_eq!(normalize_reason_source("EMULATED_JS_CHAIN"), "emulation");
-        assert_eq!(normalize_reason_source("ML_SCORE_HIGH"), "ml");
-        assert_eq!(normalize_reason_source("CACHE_HIT"), "cache");
-        assert_eq!(normalize_reason_source("SCRIPT_CONCAT_EVAL"), "heuristic");
-    }
-
-    #[test]
-    fn normalizes_severity_levels() {
-        assert_eq!(
-            normalize_severity(Severity::Clean, 0.1),
-            NormalizedSeverity::Clean
-        );
-        assert_eq!(
-            normalize_severity(Severity::Suspicious, 2.0),
-            NormalizedSeverity::Low
-        );
-        assert_eq!(
-            normalize_severity(Severity::Suspicious, 4.0),
-            NormalizedSeverity::Medium
-        );
-        assert_eq!(
-            normalize_severity(Severity::Suspicious, 6.0),
-            NormalizedSeverity::High
-        );
-        assert_eq!(
-            normalize_severity(Severity::Malicious, 8.0),
-            NormalizedSeverity::High
-        );
-        assert_eq!(
-            verdict_from_severity(Severity::Suspicious),
-            SummaryVerdict::Suspicious
-        );
-    }
-
-    #[test]
-    fn normalizes_reason_names_and_labels() {
-        assert_eq!(
-            normalize_reason_name("SCRIPT_CONCAT_EVAL"),
-            "Script Concat Eval"
-        );
-        assert_eq!(
-            normalize_reason_description("Suspicious script concatenation pattern"),
-            "Suspicious script concatenation pattern"
-        );
-        assert_eq!(source_label("rule"), "Local rule");
-    }
-}
-
 pub fn run(ctx: &ScanContext, severity: Severity) {
     let emit_stdout = std::env::var("PROJECTX_REPORT_STDOUT")
         .ok()
@@ -452,4 +392,64 @@ fn append_telemetry(value: &serde_json::Value) -> Result<(), String> {
         .map_err(|error| format!("Failed to open telemetry log: {error}"))?;
     writeln!(file, "{line}").map_err(|error| format!("Failed to append telemetry log: {error}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        normalize_reason_description, normalize_reason_name, normalize_reason_source,
+        normalize_severity, source_label, verdict_from_severity, NormalizedSeverity,
+        SummaryVerdict,
+    };
+    use crate::r#static::types::Severity;
+
+    #[test]
+    fn normalizes_reason_sources_consistently() {
+        assert_eq!(normalize_reason_source("YARA_RULE_MATCH"), "rule");
+        assert_eq!(normalize_reason_source("EMULATED_JS_CHAIN"), "emulation");
+        assert_eq!(normalize_reason_source("ML_SCORE_HIGH"), "ml");
+        assert_eq!(normalize_reason_source("CACHE_HIT"), "cache");
+        assert_eq!(normalize_reason_source("SCRIPT_CONCAT_EVAL"), "heuristic");
+    }
+
+    #[test]
+    fn normalizes_severity_levels() {
+        assert_eq!(
+            normalize_severity(Severity::Clean, 0.1),
+            NormalizedSeverity::Clean
+        );
+        assert_eq!(
+            normalize_severity(Severity::Suspicious, 2.0),
+            NormalizedSeverity::Low
+        );
+        assert_eq!(
+            normalize_severity(Severity::Suspicious, 4.0),
+            NormalizedSeverity::Medium
+        );
+        assert_eq!(
+            normalize_severity(Severity::Suspicious, 6.0),
+            NormalizedSeverity::High
+        );
+        assert_eq!(
+            normalize_severity(Severity::Malicious, 8.0),
+            NormalizedSeverity::High
+        );
+        assert_eq!(
+            verdict_from_severity(Severity::Suspicious),
+            SummaryVerdict::Suspicious
+        );
+    }
+
+    #[test]
+    fn normalizes_reason_names_and_labels() {
+        assert_eq!(
+            normalize_reason_name("SCRIPT_CONCAT_EVAL"),
+            "Script Concat Eval"
+        );
+        assert_eq!(
+            normalize_reason_description("Suspicious script concatenation pattern"),
+            "Suspicious script concatenation pattern"
+        );
+        assert_eq!(source_label("rule"), "Local rule");
+    }
 }

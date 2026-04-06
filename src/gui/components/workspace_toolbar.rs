@@ -9,6 +9,7 @@ pub struct WorkspaceToolbarResponse {
     pub delete_selected_reports: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_record_workspace_toolbar(
     ui: &mut egui::Ui,
     search: &mut String,

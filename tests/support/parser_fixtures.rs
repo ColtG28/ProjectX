@@ -591,7 +591,7 @@ fn build_import_blob(imports: &[PeImportSpec<'_>], section_rva: u32) -> Vec<u8> 
 }
 
 fn align(value: usize, alignment: usize) -> usize {
-    ((value + alignment - 1) / alignment) * alignment
+    value.div_ceil(alignment) * alignment
 }
 
 fn align_u32(value: u32, alignment: u32) -> u32 {

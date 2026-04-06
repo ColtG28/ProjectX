@@ -168,6 +168,7 @@ pub fn calculate(ctx: &ScanContext) -> f64 {
         .clamp(0.0, 10.0)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn adjusted_weight(
     finding: &Finding,
     benign_script_context: bool,

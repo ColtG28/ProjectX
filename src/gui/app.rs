@@ -943,6 +943,12 @@ impl MyApp {
     }
 }
 
+impl Default for MyApp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl eframe::App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.apply_responsive_scaling(ctx);
@@ -1868,9 +1874,9 @@ fn format_local_timestamp(epoch: u64, pattern: &str) -> Option<String> {
 
     #[cfg(unix)]
     unsafe {
-        let mut time = epoch as libc::time_t;
+        let time = epoch as libc::time_t;
         let mut local = std::mem::zeroed::<libc::tm>();
-        if libc::localtime_r(&mut time, &mut local).is_null() {
+        if libc::localtime_r(&time, &mut local).is_null() {
             return None;
         }
         let mut buffer = [0u8; 64];
