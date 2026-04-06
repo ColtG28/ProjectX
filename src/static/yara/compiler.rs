@@ -88,7 +88,7 @@ fn build_bundle(files: &[std::path::PathBuf]) -> RuleBundle {
             version_material.push('\n');
             version_material.push_str(&contents);
             version_material.push('\n');
-            rules.push(contents);
+            rules.extend(split_rules(&contents));
         }
     }
 
@@ -99,6 +99,59 @@ fn build_bundle(files: &[std::path::PathBuf]) -> RuleBundle {
     };
 
     RuleBundle { rules, version }
+}
+
+fn split_rules(contents: &str) -> Vec<String> {
+    let mut rules = Vec::new();
+    let mut current = String::new();
+
+    for line in contents.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("rule ") && !current.trim().is_empty() {
+            rules.push(current.trim().to_string());
+            current.clear();
+        }
+
+        if !current.is_empty() {
+            current.push('\n');
+        }
+        current.push_str(line);
+    }
+
+    if !current.trim().is_empty() {
+        rules.push(current.trim().to_string());
+    }
+
+    rules
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_rules;
+
+    #[test]
+    fn splits_multi_rule_files_into_individual_entries() {
+        let rules = split_rules(
+            r#"
+            rule first_rule {
+                strings:
+                    $a = "alpha"
+                condition:
+                    $a
+            }
+
+            rule second_rule {
+                strings:
+                    $b = "beta"
+                condition:
+                    $b
+            }
+            "#,
+        );
+        assert_eq!(rules.len(), 2);
+        assert!(rules[0].contains("first_rule"));
+        assert!(rules[1].contains("second_rule"));
+    }
 }
 
 fn dir_signature(files: &[std::path::PathBuf]) -> String {

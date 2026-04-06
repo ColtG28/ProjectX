@@ -1,0 +1,5 @@
+WordDocument
+vbaProject.bin
+AutoOpen
+CreateObject
+This document converts CSV exports into a formatted worksheet and copies the result into a summary page.

@@ -12,15 +12,31 @@ pub fn run_on_views(rules: &[String], views: &[View]) -> Vec<String> {
     let mut hits = Vec::new();
 
     for rule in rules {
-        let needle = first_quoted_literal(rule);
-        let Some(needle) = needle else { continue };
+        let literals = quoted_literals(rule);
+        if literals.is_empty() {
+            continue;
+        }
+        let require_all = rule.to_ascii_lowercase().contains("all of them");
+        let rule_name = short_rule_name(rule);
 
         for view in views {
-            if view.content.contains(&needle) {
+            let lowered_view = view.content.to_ascii_lowercase();
+            let matched_literals = literals
+                .iter()
+                .filter(|literal| lowered_view.contains(literal.as_str()))
+                .cloned()
+                .collect::<Vec<_>>();
+            let matched = if require_all {
+                matched_literals.len() == literals.len()
+            } else {
+                !matched_literals.is_empty()
+            };
+
+            if matched {
                 hits.push(format!(
-                    "{} matched '{}' in {}",
-                    short_rule_name(rule),
-                    needle,
+                    "{} matched {} in {}",
+                    rule_name,
+                    matched_literals.join(", "),
                     view.name
                 ));
             }
@@ -51,11 +67,13 @@ fn keywords() -> &'static Vec<String> {
 }
 
 fn fetch_yara_keywords() -> Vec<String> {
-    let fresh = fetch_yara_keywords_from_network();
-    if !fresh.is_empty() {
-        save_cached_keywords(&fresh);
-        println!("Loaded {} keywords from YARA rules", fresh.len());
-        return fresh;
+    if allow_online_rule_preload() {
+        let fresh = fetch_yara_keywords_from_network();
+        if !fresh.is_empty() {
+            save_cached_keywords(&fresh);
+            println!("Loaded {} keywords from YARA rules", fresh.len());
+            return fresh;
+        }
     }
 
     let cached = load_cached_keywords();
@@ -69,6 +87,13 @@ fn fetch_yara_keywords() -> Vec<String> {
 
     eprintln!("YARA keyword preload failed (network + cache unavailable).");
     Vec::new()
+}
+
+fn allow_online_rule_preload() -> bool {
+    std::env::var("PROJECTX_ALLOW_ONLINE_RULE_PRELOAD")
+        .ok()
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 fn fetch_yara_keywords_from_network() -> Vec<String> {
@@ -168,15 +193,19 @@ fn fetch_yara_file_urls() -> Vec<String> {
     urls
 }
 
-fn first_quoted_literal(rule: &str) -> Option<String> {
+fn quoted_literals(rule: &str) -> Vec<String> {
     let bytes = rule.as_bytes();
     let mut start = None;
+    let mut literals = Vec::new();
 
     for (idx, b) in bytes.iter().enumerate() {
         if *b == b'"' {
             if let Some(s) = start {
                 if idx > s + 1 {
-                    return Some(rule[s + 1..idx].to_string());
+                    let literal = rule[s + 1..idx].to_ascii_lowercase();
+                    if !literals.contains(&literal) {
+                        literals.push(literal);
+                    }
                 }
                 start = None;
             } else {
@@ -185,7 +214,7 @@ fn first_quoted_literal(rule: &str) -> Option<String> {
         }
     }
 
-    None
+    literals
 }
 
 fn short_rule_name(rule: &str) -> String {
@@ -196,4 +225,51 @@ fn short_rule_name(rule: &str) -> String {
         }
     }
     "unknown_rule".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::r#static::types::View;
+
+    use super::run_on_views;
+
+    #[test]
+    fn multi_literal_rules_require_corroboration_when_requested() {
+        let rule = r#"
+            rule suspicious_combo {
+                strings:
+                    $a = "VirtualAlloc"
+                    $b = "CreateRemoteThread"
+                condition:
+                    all of them
+            }
+        "#;
+        let hits = run_on_views(
+            &[rule.to_string()],
+            &[View::new(
+                "strings",
+                "VirtualAlloc and CreateRemoteThread appear here",
+            )],
+        );
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].contains("suspicious_combo"));
+    }
+
+    #[test]
+    fn multi_literal_rules_do_not_fire_on_partial_matches() {
+        let rule = r#"
+            rule suspicious_combo {
+                strings:
+                    $a = "VirtualAlloc"
+                    $b = "CreateRemoteThread"
+                condition:
+                    all of them
+            }
+        "#;
+        let hits = run_on_views(
+            &[rule.to_string()],
+            &[View::new("strings", "VirtualAlloc only")],
+        );
+        assert!(hits.is_empty());
+    }
 }

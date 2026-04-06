@@ -24,7 +24,7 @@ pub fn inspect_bytes(
             findings: vec![Finding::new(
                 "RESOURCE_RECURSION_LIMIT",
                 format!(
-                    "Skipped nested inspection for {display_path} because recursion depth {} exceeded limit {}",
+                    "Archive contains deeply nested content in {display_path}, so inspection stopped at depth {} to stay within the safety limit of {}",
                     depth, limits.max_recursion_depth
                 ),
                 0.5,
@@ -64,7 +64,7 @@ fn inspect_zip(
         findings.push(Finding::new(
             "RESOURCE_ARCHIVE_ENTRY_LIMIT",
             format!(
-                "Archive inspection stopped after {} entries in {}",
+                "Archive inspection stopped after {} entries in {}, which suggests the container may be unusually large or repetitive",
                 limits.max_archive_entries, display_path
             ),
             1.0,
@@ -74,7 +74,7 @@ fn inspect_zip(
         findings.push(Finding::new(
             "RESOURCE_DECOMPRESS_LIMIT",
             format!(
-                "Archive decompression limit reached while inspecting {}",
+                "Archive extraction reached the configured decompression safety limit while inspecting {}",
                 display_path
             ),
             1.0,
@@ -84,7 +84,7 @@ fn inspect_zip(
         findings.push(Finding::new(
             "ZIP_UNSUPPORTED_METHOD",
             format!(
-                "Skipped {} archive entries in {} due to unsupported compression methods",
+                "Skipped {} archive entries in {} because their compression method is not supported by this scanner",
                 extraction.unsupported_entries, display_path
             ),
             0.5,
@@ -103,14 +103,25 @@ fn inspect_zip(
 
         let lower_name = entry.name.to_ascii_lowercase();
         if looks_executable_name(&lower_name) {
-            findings.push(Finding::new(
-                "ZIP_EMBEDDED_EXECUTABLE",
-                format!(
-                    "Archive entry {} contains an executable-style payload",
-                    full_path
-                ),
-                2.0,
-            ));
+            if looks_script_name(&lower_name) {
+                findings.push(Finding::new(
+                    "ZIP_EMBEDDED_SCRIPT",
+                    format!(
+                        "Archive entry {} contains a script file, which is common in installers and automation packages but still worth reviewing in context",
+                        full_path
+                    ),
+                    1.0,
+                ));
+            } else {
+                findings.push(Finding::new(
+                    "ZIP_EMBEDDED_EXECUTABLE",
+                    format!(
+                        "Archive entry {} looks like an executable payload",
+                        full_path
+                    ),
+                    2.0,
+                ));
+            }
         }
         if lower_name.contains("vbaproject.bin")
             || lower_name.contains("/vba")
@@ -118,7 +129,7 @@ fn inspect_zip(
         {
             findings.push(Finding::new(
                 "OFFICE_MACRO_CONTAINER",
-                format!("Embedded Office macro component found at {}", full_path),
+                format!("Embedded Office macro component found inside {}", full_path),
                 2.5,
             ));
         }
@@ -168,7 +179,7 @@ fn inspect_pdf(
             findings.push(Finding::new(
                 "PDF_EMBEDDED_SCRIPT",
                 format!(
-                    "Suspicious embedded PDF JavaScript found in {}",
+                    "Embedded PDF JavaScript in {} contains suspicious automation or launch markers",
                     artifact_path
                 ),
                 2.0,
@@ -216,17 +227,19 @@ fn inspect_script_like(bytes: &[u8], display_path: &str, depth: usize) -> Contai
         .cloned()
         .collect::<Vec<_>>();
 
-    if text.contains("http://") || text.contains("https://") {
+    let has_network_url = text.contains("http://") || text.contains("https://");
+    if has_network_url {
         hits.push("network-url");
     }
 
     let mut findings = Vec::new();
     let mut artifacts = Vec::new();
-    if !hits.is_empty() {
+    let meaningful_hits = hits.iter().filter(|hit| **hit != "network-url").count();
+    if meaningful_hits > 0 {
         findings.push(Finding::new(
             "EMBEDDED_SCRIPT_MARKERS",
             format!(
-                "Embedded content {} contains suspicious script markers: {}",
+                "Embedded content {} contains script markers associated with obfuscation, automation, or network activity: {}",
                 display_path,
                 hits.join(", ")
             ),
@@ -295,6 +308,12 @@ fn looks_executable_name(name: &str) -> bool {
     ]
     .iter()
     .any(|suffix| name.ends_with(suffix))
+}
+
+fn looks_script_name(name: &str) -> bool {
+    [".js", ".vbs", ".ps1", ".bat", ".cmd"]
+        .iter()
+        .any(|suffix| name.ends_with(suffix))
 }
 
 fn entry_kind_label(name: &str, data: &[u8]) -> &'static str {
@@ -421,5 +440,20 @@ mod tests {
             .artifacts
             .iter()
             .any(|artifact| artifact.path.contains("inner.zip!payload.js")));
+    }
+
+    #[test]
+    fn recursion_limit_message_is_clear() {
+        let limits = ScanConfig::default().limits;
+        let inspection = inspect_bytes(
+            b"hello",
+            "deep.zip",
+            limits.max_recursion_depth + 1,
+            &limits,
+        );
+        assert_eq!(inspection.findings.len(), 1);
+        assert!(inspection.findings[0]
+            .message
+            .starts_with("Archive contains deeply nested content"));
     }
 }

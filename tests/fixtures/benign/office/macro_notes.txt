@@ -1,0 +1,5 @@
+WordDocument
+vbaProject.bin
+AutoOpen
+Workbook_Open
+This workbook reformats tables and refreshes summary cells for the finance team.

@@ -143,7 +143,8 @@ pub struct MlAssessment {
     pub static_signal_score: f64,
     pub heuristic_signal_score: f64,
     pub static_score: f64,
-    pub dynamic_score: f64,
+    #[serde(default, alias = "dynamic_score")]
+    pub runtime_signal_score: f64,
     pub intel_score: f64,
     pub evasion_score: f64,
     pub ensemble_score: f64,
@@ -157,47 +158,6 @@ pub struct ThreatSeveritySummary {
     pub severity_score: f64,
     pub recommended_action: String,
     pub contributing_signals: Vec<String>,
-    pub auto_sandbox_triggered: bool,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct SandboxPlanSummary {
-    pub engine: String,
-    pub network_enabled: bool,
-    pub read_only_root: bool,
-    pub snapshot_strategy: String,
-    pub notes: Vec<String>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct DynamicBehaviorEvent {
-    pub kind: String,
-    pub subject: String,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct DynamicBehaviorSummary {
-    pub file_events: usize,
-    pub registry_events: usize,
-    pub network_events: usize,
-    pub process_events: usize,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct DynamicAnalysisSummary {
-    pub attempted: bool,
-    pub executed: bool,
-    pub timed_out: bool,
-    pub engine: String,
-    pub exit_code: Option<i32>,
-    pub stdout_preview: String,
-    pub stderr_preview: String,
-    pub behavior: DynamicBehaviorSummary,
-    pub events: Vec<DynamicBehaviorEvent>,
-    pub runtime_yara_hits: Vec<String>,
-    pub snapshot_id: Option<String>,
-    pub revert_command: Option<String>,
-    pub error: Option<String>,
 }
 
 pub type Weights = HashMap<String, f64>;

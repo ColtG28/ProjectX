@@ -30,7 +30,7 @@ pub(crate) fn detect_decryption_loops(
         if has_loop && has_decryption_ops {
             state.findings.push(Finding::new(
                 "EMULATION_DECRYPT_LOOP",
-                "Detected a likely string-decryption loop during lightweight emulation",
+                "Analysis found a loop that appears to decode or transform hidden strings",
                 1.5,
             ));
         }

@@ -150,6 +150,10 @@ fn matches_container_family(bytes: &[u8], ext_upper: &str) -> bool {
         return matches!(ext_upper, "EXE" | "DLL" | "SYS" | "SCR" | "CPL" | "COM");
     }
 
+    if bytes.starts_with(b"\x7fELF") {
+        return matches!(ext_upper, "ELF" | "SO");
+    }
+
     if bytes.starts_with(b"%PDF") {
         return matches!(ext_upper, "PDF" | "FDF");
     }
@@ -219,6 +223,12 @@ mod tests {
             "ps1"
         ));
         assert!(find_header_bytes(b"#!/bin/sh\necho test\n", "sh"));
+    }
+
+    #[test]
+    fn accepts_elf_family_headers() {
+        assert!(find_header_bytes(b"\x7fELF\x02\x01\x01\x00", "elf"));
+        assert!(find_header_bytes(b"\x7fELF\x02\x01\x01\x00", "so"));
     }
 
     #[test]

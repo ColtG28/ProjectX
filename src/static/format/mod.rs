@@ -43,7 +43,7 @@ pub fn run(ctx: &mut ScanContext) {
                 ctx.push_finding(Finding::new(
                     "PDF_ACTIVE_CONTENT",
                     format!(
-                        "PDF contains active-content markers: {}",
+                        "PDF includes embedded script or launch markers: {}",
                         markers.join(", ")
                     ),
                     2.0,
@@ -54,7 +54,7 @@ pub fn run(ctx: &mut ScanContext) {
             if zip::has_many_entries(&ctx.bytes) {
                 ctx.push_finding(Finding::new(
                     "ZIP_DENSE",
-                    "Potential archive bomb characteristics",
+                    "Archive is unusually dense and may expand into a large number of files",
                     1.5,
                 ));
             }
@@ -64,7 +64,7 @@ pub fn run(ctx: &mut ScanContext) {
                 ctx.push_finding(Finding::new(
                     "ZIP_SUSPICIOUS_ENTRIES",
                     format!(
-                        "Archive contains suspicious embedded entries: {}",
+                        "Archive contains embedded files with risky names or payload types: {}",
                         suspicious_entries.join(", ")
                     ),
                     1.5,
@@ -75,21 +75,32 @@ pub fn run(ctx: &mut ScanContext) {
             if nested_archive_markers >= 2 {
                 ctx.push_finding(Finding::new(
                     "ZIP_NESTED_ARCHIVES",
-                    "Archive advertises multiple nested archive payload markers",
+                    "Archive appears to contain multiple nested archive layers",
                     1.0,
                 ));
             }
         }
         detect::FormatKind::Office => {
-            let markers = office::macros::suspicious_macro_markers(&ctx.bytes);
-            if !markers.is_empty() {
+            let macro_markers = office::macros::suspicious_macro_markers(&ctx.bytes);
+            let high_risk_markers = office::macros::high_risk_macro_markers(&ctx.bytes);
+            if !macro_markers.is_empty() && !high_risk_markers.is_empty() {
                 ctx.push_finding(Finding::new(
                     "OFFICE_MACRO",
                     format!(
-                        "Suspicious Office macro markers found: {}",
-                        markers.join(", ")
+                        "Office document includes auto-run macros plus automation or download markers: {} | {}",
+                        macro_markers.join(", "),
+                        high_risk_markers.join(", ")
                     ),
                     2.5,
+                ));
+            } else if !macro_markers.is_empty() {
+                ctx.push_finding(Finding::new(
+                    "OFFICE_MACRO_CONTAINER",
+                    format!(
+                        "Office document includes macro storage or auto-run markers that should be reviewed: {}",
+                        macro_markers.join(", ")
+                    ),
+                    1.2,
                 ));
             }
         }

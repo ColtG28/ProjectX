@@ -1,5 +1,5 @@
-use std::time::Instant;
 use std::sync::OnceLock;
+use std::time::Instant;
 
 use regex::Regex;
 
@@ -47,7 +47,7 @@ pub(crate) fn resolve_in_inputs(
                         state.resolved_api_hashes.push(resolution.clone());
                         state.findings.push(Finding::new(
                             "EMULATION_API_HASH",
-                            format!("Resolved API hash candidate to {api}"),
+                            format!("Analysis reconstructed a hashed API reference to {api}"),
                             1.5,
                         ));
                     }

@@ -12,10 +12,6 @@ pub struct FeatureVector {
     pub emulation_runtime_hits: usize,
     pub has_macro_indicator: bool,
     pub has_network_indicator: bool,
-    pub dynamic_network_events: usize,
-    pub dynamic_process_events: usize,
-    pub dynamic_file_events: usize,
-    pub dynamic_runtime_yara_hits: usize,
 }
 
 pub fn extract(ctx: &ScanContext) -> FeatureVector {
@@ -56,26 +52,6 @@ pub fn extract(ctx: &ScanContext) -> FeatureVector {
         emulation_runtime_hits,
         has_macro_indicator,
         has_network_indicator,
-        dynamic_network_events: ctx
-            .dynamic_analysis
-            .as_ref()
-            .map(|summary| summary.behavior.network_events)
-            .unwrap_or(0),
-        dynamic_process_events: ctx
-            .dynamic_analysis
-            .as_ref()
-            .map(|summary| summary.behavior.process_events)
-            .unwrap_or(0),
-        dynamic_file_events: ctx
-            .dynamic_analysis
-            .as_ref()
-            .map(|summary| summary.behavior.file_events)
-            .unwrap_or(0),
-        dynamic_runtime_yara_hits: ctx
-            .dynamic_analysis
-            .as_ref()
-            .map(|summary| summary.runtime_yara_hits.len())
-            .unwrap_or(0),
     }
 }
 

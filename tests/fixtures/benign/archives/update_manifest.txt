@@ -1,0 +1,4 @@
+version=2026.04.05
+channel=stable
+package=https://updates.example.local/projectx.zip
+notes=Contains documentation and templates only

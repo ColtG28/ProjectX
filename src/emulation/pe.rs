@@ -41,11 +41,11 @@ pub(crate) fn emulate_loader(
         .cloned()
         .collect::<Vec<_>>();
 
-    if !hits.is_empty() {
+    if should_emit_loader_signal(&hits) {
         state.findings.push(Finding::new(
             "EMULATION_PE_LOADER",
             format!(
-                "PE loader emulation observed suspicious loader/import markers: {}",
+                "PE analysis found loader-style API markers associated with code injection or download behavior: {}",
                 hits.join(", ")
             ),
             2.0,
@@ -53,16 +53,57 @@ pub(crate) fn emulate_loader(
     }
 
     let imports = extract_import_indicators(bytes);
-    if !imports.is_empty() {
+    if should_emit_import_signal(&imports) {
         state.findings.push(Finding::new(
             "EMULATION_PE_IMPORTS",
             format!(
-                "PE emulation recovered suspicious import indicators: {}",
+                "PE analysis found import names associated with process injection, networking, or persistence: {}",
                 imports.join(", ")
             ),
             1.5,
         ));
     }
+}
+
+fn should_emit_loader_signal(hits: &[&str]) -> bool {
+    if hits.is_empty() {
+        return false;
+    }
+
+    let stronger_markers = [
+        "virtualalloc",
+        "virtualprotect",
+        "writeprocessmemory",
+        "createprocessw",
+        "urlmon",
+        "wininet",
+    ];
+
+    hits.len() >= 3 || hits.iter().any(|hit| stronger_markers.contains(hit))
+}
+
+fn should_emit_import_signal(imports: &[String]) -> bool {
+    if imports.is_empty() {
+        return false;
+    }
+
+    let stronger_markers = [
+        "virtualalloc",
+        "virtualprotect",
+        "writeprocessmemory",
+        "createremotethread",
+        "winexec",
+        "shellexecute",
+        "internetopen",
+        "urldownloadtofile",
+        "regsetvalue",
+        "wsastartup",
+    ];
+
+    imports.len() >= 3
+        || imports
+            .iter()
+            .any(|import| stronger_markers.contains(&import.as_str()))
 }
 
 fn extract_import_indicators(bytes: &[u8]) -> Vec<String> {
@@ -99,4 +140,39 @@ fn extract_import_indicators(bytes: &[u8]) -> Vec<String> {
         }
     }
     hits
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{should_emit_import_signal, should_emit_loader_signal};
+
+    #[test]
+    fn dynamic_loader_markers_alone_do_not_emit_loader_signal() {
+        assert!(!should_emit_loader_signal(&[
+            "loadlibrarya",
+            "getprocaddress"
+        ]));
+    }
+
+    #[test]
+    fn stronger_loader_markers_emit_loader_signal() {
+        assert!(should_emit_loader_signal(&[
+            "virtualalloc",
+            "getprocaddress"
+        ]));
+    }
+
+    #[test]
+    fn dll_name_alone_does_not_emit_import_signal() {
+        assert!(!should_emit_import_signal(&["kernel32.dll".to_string()]));
+    }
+
+    #[test]
+    fn strong_import_chain_emits_import_signal() {
+        assert!(should_emit_import_signal(&[
+            "kernel32.dll".to_string(),
+            "virtualalloc".to_string(),
+            "writeprocessmemory".to_string(),
+        ]));
+    }
 }

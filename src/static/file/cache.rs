@@ -22,15 +22,13 @@ pub struct CachedScan {
     pub rules_version: String,
     pub emulation: Option<crate::r#static::types::EmulationSummary>,
     pub ml_assessment: Option<crate::r#static::types::MlAssessment>,
-    pub sandbox_plan: Option<crate::r#static::types::SandboxPlanSummary>,
-    pub dynamic_analysis: Option<crate::r#static::types::DynamicAnalysisSummary>,
     pub threat_severity: Option<crate::r#static::types::ThreatSeveritySummary>,
 }
 
 pub fn cache_key(sha256: &str, config: &ScanConfig, rules_version: &str) -> String {
     let config_json = serde_json::to_string(config).unwrap_or_default();
     crate::r#static::file::hash::sha256_hex(
-        format!("projectx-static-v3|{sha256}|{rules_version}|{config_json}").as_bytes(),
+        format!("projectx-static-v13|{sha256}|{rules_version}|{config_json}").as_bytes(),
     )
 }
 
@@ -85,8 +83,6 @@ pub fn store(key: &str, ctx: &ScanContext, severity: Severity) -> std::io::Resul
         rules_version: ctx.rules_version.clone(),
         emulation: ctx.emulation.clone(),
         ml_assessment: ctx.ml_assessment.clone(),
-        sandbox_plan: ctx.sandbox_plan.clone(),
-        dynamic_analysis: ctx.dynamic_analysis.clone(),
         threat_severity: ctx.threat_severity.clone(),
     };
     let json = serde_json::to_string_pretty(&entry).unwrap_or_else(|_| "{}".to_string());
@@ -107,8 +103,6 @@ pub fn apply(ctx: &mut ScanContext, key: &str, cached: CachedScan) -> Severity {
     ctx.rules_version = cached.rules_version.clone();
     ctx.emulation = cached.emulation;
     ctx.ml_assessment = cached.ml_assessment;
-    ctx.sandbox_plan = cached.sandbox_plan;
-    ctx.dynamic_analysis = cached.dynamic_analysis;
     ctx.threat_severity = cached.threat_severity;
     ctx.cache = Some(CacheMetadata {
         key: key.to_string(),

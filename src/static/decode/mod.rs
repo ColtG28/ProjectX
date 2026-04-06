@@ -82,8 +82,18 @@ pub fn run(ctx: &mut ScanContext) {
     {
         ctx.push_finding(Finding::new(
             "DECODED_ACTIVE_CONTENT",
-            "Decoded content exposed suspicious execution or network markers",
+            "Decoded content reveals network access or script-launch patterns that were previously hidden",
             1.5,
+        ));
+    }
+    if decoded
+        .iter()
+        .any(|value| contains_follow_on_behavior(value))
+    {
+        ctx.push_finding(Finding::new(
+            "DECODED_FOLLOW_ON_BEHAVIOR",
+            "Decoded content reveals a correlated download or launch sequence that was previously hidden",
+            2.2,
         ));
     }
 
@@ -114,6 +124,23 @@ fn contains_suspicious_marker(value: &str) -> bool {
         || lower.contains("http://")
         || lower.contains("https://")
         || lower.contains("cmd.exe")
+}
+
+fn contains_follow_on_behavior(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    let has_network = lower.contains("http://")
+        || lower.contains("https://")
+        || lower.contains("downloadstring")
+        || lower.contains("downloadfile")
+        || lower.contains("invoke-webrequest");
+    let has_launch = lower.contains("invoke-expression")
+        || lower.contains("iex")
+        || lower.contains("cmd.exe")
+        || lower.contains("start-process")
+        || lower.contains("wscript.shell")
+        || lower.contains("rundll32")
+        || lower.contains("mshta");
+    has_network && has_launch
 }
 
 #[cfg(test)]

@@ -2,9 +2,51 @@ use crate::r#static::types::Finding;
 
 pub fn check(bytes: &[u8]) -> Vec<Finding> {
     let text = String::from_utf8_lossy(bytes).to_ascii_lowercase();
+    let mut findings = Vec::new();
     if text.contains("/bin/sh") {
-        vec![Finding::new("ELF_SHELL", "ELF references /bin/sh", 1.0)]
-    } else {
-        Vec::new()
+        findings.push(Finding::new(
+            "ELF_SHELL",
+            "File references /bin/sh, which can indicate shell-launch behavior on Unix-like systems",
+            1.0,
+        ));
+    }
+    if contains_all(&text, &["/bin/sh", "curl "]) || contains_all(&text, &["/bin/sh", "wget "]) {
+        findings.push(Finding::new(
+            "ELF_SHELL_DOWNLOADER",
+            "File combines shell-launch and downloader strings in a way commonly used to fetch follow-on content",
+            2.2,
+        ));
+    }
+    if contains_all(&text, &["/bin/sh", "nc "]) || contains_all(&text, &["/bin/sh", "socket"]) {
+        findings.push(Finding::new(
+            "ELF_SHELL_NETWORK_CHAIN",
+            "File combines shell-launch and network-control strings that suggest interactive follow-on behavior",
+            2.0,
+        ));
+    }
+    findings
+}
+
+fn contains_all(input: &str, needles: &[&str]) -> bool {
+    needles.iter().all(|needle| input.contains(needle))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check;
+
+    #[test]
+    fn shell_reference_message_is_clear() {
+        let findings = check(b"/bin/sh");
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].message.contains("shell-launch behavior"));
+    }
+
+    #[test]
+    fn shell_downloader_message_is_clear() {
+        let findings = check(b"/bin/sh\0curl http://example.invalid\0");
+        assert!(findings
+            .iter()
+            .any(|finding| finding.code == "ELF_SHELL_DOWNLOADER"));
     }
 }

@@ -21,7 +21,10 @@ pub fn run(ctx: &mut ScanContext) {
     if size::is_unusually_small(file_size) && !bundle_resource.suppress_small_file {
         ctx.push_finding(Finding::new(
             "FILE_SMALL",
-            format!("File is very small ({} bytes)", file_size),
+            format!(
+                "File is unusually small ({} bytes), which can indicate a stub, launcher, or incomplete payload",
+                file_size
+            ),
             ctx.config.weights.size,
         ));
     }
@@ -62,7 +65,7 @@ pub fn run(ctx: &mut ScanContext) {
     {
         ctx.push_finding(Finding::new(
             "MAGIC_MISMATCH",
-            "File signature does not match extension",
+            "File contents do not match the expected format for its extension",
             ctx.config.weights.magic,
         ));
     }
@@ -71,7 +74,9 @@ pub fn run(ctx: &mut ScanContext) {
     if entropy > 7.5 && !bundle_resource.suppress_high_entropy {
         ctx.push_finding(Finding::new(
             "HIGH_ENTROPY",
-            format!("High entropy content detected ({entropy:.2})"),
+            format!(
+                "File contains compressed, encrypted, or heavily obfuscated content ({entropy:.2})"
+            ),
             1.0,
         ));
     }
@@ -159,6 +164,9 @@ fn apple_bundle_resource_context(
 mod tests {
     use std::path::Path;
 
+    use crate::r#static::config::ScanConfig;
+    use crate::r#static::context::ScanContext;
+
     use super::apple_bundle_resource_context;
 
     #[test]
@@ -182,5 +190,22 @@ mod tests {
         );
         assert!(context.is_known_resource);
         assert!(context.suppress_small_file);
+    }
+
+    #[test]
+    fn file_profile_messages_are_human_readable() {
+        let path =
+            std::env::temp_dir().join(format!("projectx_file_profile_{}.txt", std::process::id()));
+        std::fs::write(&path, b"A").unwrap();
+
+        let mut ctx = ScanContext::from_path(&path, ScanConfig::default()).unwrap();
+        super::run(&mut ctx);
+
+        assert!(ctx
+            .findings
+            .iter()
+            .any(|finding| finding.message.starts_with("File is unusually small")));
+
+        let _ = std::fs::remove_file(path);
     }
 }

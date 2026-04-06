@@ -21,7 +21,11 @@ pub fn run(ctx: &mut ScanContext) {
 
     let matches = runner::run_on_views(&bundle.rules, &ctx.views);
     for m in matches {
-        ctx.push_finding(super::types::Finding::new("YARA_MATCH", m, 2.0));
+        ctx.push_finding(super::types::Finding::new(
+            "YARA_MATCH",
+            format!("Local rule matched: {m}"),
+            2.0,
+        ));
     }
 }
 

@@ -1,0 +1,9 @@
+synthetic elf self-relaunch notes
+
+/proc/self/exe
+execve
+readlink
+readlinkat
+realpath
+
+all paths and control flow in this fixture are inert placeholders only

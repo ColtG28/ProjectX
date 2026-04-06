@@ -18,9 +18,7 @@ pub struct FeatureFlags {
     pub enable_emulation: bool,
     pub enable_runtime_yara: bool,
     pub enable_ml_scoring: bool,
-    pub enable_dynamic_sandbox: bool,
     pub enable_ensemble_scoring: bool,
-    pub enable_auto_sandbox: bool,
     pub enable_active_learning: bool,
 }
 
@@ -37,9 +35,6 @@ pub struct ResourceLimits {
     pub max_view_items: usize,
     pub max_emulation_steps: usize,
     pub emulation_timeout_ms: u64,
-    pub sandbox_timeout_ms: u64,
-    pub sandbox_output_bytes: usize,
-    pub sandbox_event_limit: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,9 +75,7 @@ impl Default for ScanConfig {
                 enable_emulation: true,
                 enable_runtime_yara: true,
                 enable_ml_scoring: true,
-                enable_dynamic_sandbox: false,
                 enable_ensemble_scoring: true,
-                enable_auto_sandbox: true,
                 enable_active_learning: false,
             },
             limits: ResourceLimits {
@@ -97,9 +90,6 @@ impl Default for ScanConfig {
                 max_view_items: 256,
                 max_emulation_steps: 25_000,
                 emulation_timeout_ms: 750,
-                sandbox_timeout_ms: 15_000,
-                sandbox_output_bytes: 64 * 1024,
-                sandbox_event_limit: 1_024,
             },
         }
     }

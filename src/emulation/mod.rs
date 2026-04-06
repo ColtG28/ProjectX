@@ -172,7 +172,7 @@ mod tests {
     use super::{api_hash, consume_budget, script, EmulationConfig, EmulationState};
 
     #[test]
-    fn budget_stops_execution() {
+    fn budget_stops_analysis() {
         let config = EmulationConfig {
             instruction_budget: 1,
             timeout_ms: 5_000,

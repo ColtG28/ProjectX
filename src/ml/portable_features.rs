@@ -7,11 +7,56 @@ const BYTE_HISTOGRAM_BINS: usize = 32;
 pub const FEATURE_COUNT: usize = 386;
 
 const PATTERNS: [&str; 50] = [
-    "http", "https", "exe", "dll", "bat", "cmd", "powershell", "net", "web", "download",
-    "upload", "connect", "server", "client", "file", "path", "url", "ip", "address", "port",
-    "tcp", "udp", "socket", "bind", "listen", "accept", "send", "recv", "read", "write",
-    "open", "close", "create", "delete", "copy", "move", "run", "exec", "system", "shell",
-    "bash", "sh", "python", "perl", "ruby", "java", "c#", "vb", "macro", "vba"
+    "http",
+    "https",
+    "exe",
+    "dll",
+    "bat",
+    "cmd",
+    "powershell",
+    "net",
+    "web",
+    "download",
+    "upload",
+    "connect",
+    "server",
+    "client",
+    "file",
+    "path",
+    "url",
+    "ip",
+    "address",
+    "port",
+    "tcp",
+    "udp",
+    "socket",
+    "bind",
+    "listen",
+    "accept",
+    "send",
+    "recv",
+    "read",
+    "write",
+    "open",
+    "close",
+    "create",
+    "delete",
+    "copy",
+    "move",
+    "run",
+    "exec",
+    "system",
+    "shell",
+    "bash",
+    "sh",
+    "python",
+    "perl",
+    "ruby",
+    "java",
+    "c#",
+    "vb",
+    "macro",
+    "vba",
 ];
 
 pub const FEATURE_NAMES: [&str; FEATURE_COUNT] = [
@@ -613,13 +658,18 @@ pub fn extract_path(path: &Path, max_input_bytes: usize) -> Result<ExtractedFeat
         f32::from(effective_buffer.starts_with(b"%PDF")),
         f32::from(effective_buffer.starts_with(b"PK\x03\x04")),
         f32::from(effective_buffer.starts_with(b"#!")),
-        f32::from(slice_contains(&effective_buffer, b"This program cannot be run")),
+        f32::from(slice_contains(
+            &effective_buffer,
+            b"This program cannot be run",
+        )),
     ];
     values[..head.len()].copy_from_slice(&head);
-    values[head.len()..head.len() + byte_stats.histogram.len()].copy_from_slice(&byte_stats.histogram);
+    values[head.len()..head.len() + byte_stats.histogram.len()]
+        .copy_from_slice(&byte_stats.histogram);
 
     let patterns_start = head.len() + byte_stats.histogram.len();
-    values[patterns_start..patterns_start + string_metrics.pattern_ratios.len()].copy_from_slice(&string_metrics.pattern_ratios);
+    values[patterns_start..patterns_start + string_metrics.pattern_ratios.len()]
+        .copy_from_slice(&string_metrics.pattern_ratios);
 
     let entropy_hist = compute_byte_entropy_histogram(&effective_buffer);
     let entropy_start = patterns_start + string_metrics.pattern_ratios.len();
@@ -660,7 +710,7 @@ fn looks_like_hex(bytes: &[u8]) -> bool {
 }
 
 fn try_base64_decode(bytes: &[u8]) -> Option<Vec<u8>> {
-    use base64::{Engine as _, engine::general_purpose};
+    use base64::{engine::general_purpose, Engine as _};
     general_purpose::STANDARD.decode(bytes).ok()
 }
 
@@ -808,7 +858,15 @@ fn shannon_entropy(bytes: &[u8]) -> f32 {
 }
 
 fn extract_string_metrics(bytes: &[u8]) -> StringMetrics {
-    let mut state = StringScanState { count: 0, total_len: 0, max_len: 0, url_hits: 0, path_hits: 0, suspicious_hits: 0, pattern_hits: [0; 50] };
+    let mut state = StringScanState {
+        count: 0,
+        total_len: 0,
+        max_len: 0,
+        url_hits: 0,
+        path_hits: 0,
+        suspicious_hits: 0,
+        pattern_hits: [0; 50],
+    };
     let mut longest_printable_run = 0usize;
     let mut current_start = 0usize;
     let mut current_len = 0usize;
@@ -1036,11 +1094,12 @@ fn extract_pe_metrics(bytes: &[u8]) -> Result<PeMetrics, String> {
     } else {
         0
     };
-    let (suspicious_imports, network_import_modules, process_import_modules) = if import_rva > 0 && import_size > 0 {
-        count_suspicious_imports(bytes, &sections, import_rva)
-    } else {
-        (0, 0, 0)
-    };
+    let (suspicious_imports, network_import_modules, process_import_modules) =
+        if import_rva > 0 && import_size > 0 {
+            count_suspicious_imports(bytes, &sections, import_rva)
+        } else {
+            (0, 0, 0)
+        };
     let has_cert = cert_size > 0;
 
     let overlay_ratio = sections
@@ -1186,7 +1245,11 @@ fn read_rva_string<'a>(bytes: &'a [u8], sections: &[SectionInfo], rva: u32) -> O
     Some(&bytes[start..end])
 }
 
-fn count_suspicious_imports(bytes: &[u8], sections: &[SectionInfo], import_rva: u32) -> (usize, usize, usize) {
+fn count_suspicious_imports(
+    bytes: &[u8],
+    sections: &[SectionInfo],
+    import_rva: u32,
+) -> (usize, usize, usize) {
     let Some(mut offset) = rva_to_offset(sections, import_rva) else {
         return (0, 0, 0);
     };
@@ -1215,13 +1278,7 @@ fn count_suspicious_imports(bytes: &[u8], sections: &[SectionInfo], import_rva: 
         b"iphlpapi",
         b"dnsapi",
     ];
-    let process_modules: &[&[u8]] = &[
-        b"kernel32",
-        b"advapi32",
-        b"ntdll",
-        b"psapi",
-        b"user32",
-    ];
+    let process_modules: &[&[u8]] = &[b"kernel32", b"advapi32", b"ntdll", b"psapi", b"user32"];
 
     while offset + 20 <= bytes.len() {
         let original_first_thunk = read_u32(bytes, offset).unwrap_or(0);

@@ -27,7 +27,7 @@ pub fn run(ctx: &mut ScanContext) {
             .push(format!("Threat-intel hash hit from {}", providers));
         intel_score = 1.0;
         assessment.intel_score = intel_score;
-        assessment.dynamic_score = assessment.dynamic_score.max(0.95);
+        assessment.runtime_signal_score = assessment.runtime_signal_score.max(0.95);
         assessment.ensemble_score = assessment.ensemble_score.max(0.97);
         assessment.blended_score = assessment.blended_score.max(0.97);
         assessment.label = "malicious".to_string();
@@ -45,7 +45,7 @@ pub fn run(ctx: &mut ScanContext) {
 
     if ctx.config.features.enable_ensemble_scoring {
         assessment.blended_score = (assessment.static_score * 0.35
-            + assessment.dynamic_score * 0.25
+            + assessment.runtime_signal_score * 0.25
             + assessment.heuristic_signal_score * 0.15
             + assessment.evasion_score * 0.10
             + intel_score * 0.15)
@@ -75,7 +75,7 @@ pub fn run(ctx: &mut ScanContext) {
         static_signal_score: assessment.static_signal_score,
         heuristic_signal_score: assessment.heuristic_signal_score,
         static_score: assessment.static_score,
-        dynamic_score: assessment.dynamic_score,
+        runtime_signal_score: assessment.runtime_signal_score,
         intel_score: assessment.intel_score,
         evasion_score: assessment.evasion_score,
         ensemble_score: assessment.ensemble_score,
@@ -113,27 +113,16 @@ pub fn run(ctx: &mut ScanContext) {
 
 fn build_threat_severity(ctx: &ScanContext, assessment: &MlAssessment) -> ThreatSeveritySummary {
     let heuristic_risk = (ctx.score.risk / 10.0).clamp(0.0, 1.0);
-    let dynamic_pressure = ctx
-        .dynamic_analysis
-        .as_ref()
-        .map(|summary| {
-            ((summary.behavior.network_events.min(5) as f64 * 0.08)
-                + (summary.behavior.process_events.min(5) as f64 * 0.05)
-                + (summary.runtime_yara_hits.len().min(4) as f64 * 0.12))
-                .clamp(0.0, 1.0)
-        })
-        .unwrap_or(0.0);
-
     let severity_score = (assessment.ensemble_score * 0.55
         + heuristic_risk * 0.25
-        + dynamic_pressure * 0.20)
+        + assessment.runtime_signal_score * 0.20)
         .clamp(0.0, 1.0);
     let recommended_action = if severity_score >= 0.9 {
         "block_and_escalate"
     } else if severity_score >= 0.7 {
         "quarantine_and_review"
     } else if severity_score >= 0.45 {
-        "sandbox_or_triage"
+        "review_or_triage"
     } else {
         "allow_with_logging"
     };
@@ -141,8 +130,8 @@ fn build_threat_severity(ctx: &ScanContext, assessment: &MlAssessment) -> Threat
     if assessment.intel_score > 0.0 {
         contributing_signals.push("threat_intel".to_string());
     }
-    if assessment.dynamic_score >= 0.4 {
-        contributing_signals.push("dynamic_behavior".to_string());
+    if assessment.runtime_signal_score >= 0.4 {
+        contributing_signals.push("runtime_patterns".to_string());
     }
     if assessment.evasion_score >= 0.3 {
         contributing_signals.push("evasion_indicators".to_string());
@@ -157,6 +146,5 @@ fn build_threat_severity(ctx: &ScanContext, assessment: &MlAssessment) -> Threat
         severity_score,
         recommended_action: recommended_action.to_string(),
         contributing_signals,
-        auto_sandbox_triggered: false,
     }
 }

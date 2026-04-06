@@ -7,7 +7,7 @@ use super::context::ScanContext;
 use super::types::Severity;
 
 pub fn run(ctx: &mut ScanContext) -> Severity {
-    let weighted = score::calculate(&ctx.findings);
+    let weighted = score::calculate(ctx);
     ctx.score.risk = weighted;
     ctx.score.safety = 10.0 - weighted;
     decision::classify(weighted, &ctx.config.thresholds)

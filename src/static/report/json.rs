@@ -1,6 +1,10 @@
 use std::path::Path;
 
 use crate::r#static::context::ScanContext;
+use crate::r#static::report::{
+    normalize_reason_description, normalize_reason_name, normalize_reason_source,
+    normalize_severity,
+};
 use crate::r#static::types::Severity;
 
 pub fn render(
@@ -47,20 +51,31 @@ pub fn value(
         },
         "verdict": {
             "severity": format!("{severity:?}"),
+            "normalized_severity": normalize_severity(severity, ctx.score.risk).as_str(),
             "risk": ctx.score.risk,
             "safety": ctx.score.safety,
             "retained_in_quarantine": !restored_to_original_path,
             "restored_to_original_path": restored_to_original_path,
         },
+        "summary": {
+            "warning_count": warning_count(ctx),
+            "error_count": error_count(ctx),
+            "signal_sources": signal_sources(ctx),
+        },
         "cache": ctx.cache,
         "emulation": ctx.emulation,
         "ml": ctx.ml_assessment,
         "threat_severity": ctx.threat_severity,
-        "sandbox_plan": ctx.sandbox_plan,
-        "dynamic_analysis": ctx.dynamic_analysis,
         "findings": ctx.findings.iter().map(|finding| serde_json::json!({
             "code": finding.code,
             "message": finding.message,
+            "weight": finding.weight,
+        })).collect::<Vec<_>>(),
+        "reasons": ctx.findings.iter().map(|finding| serde_json::json!({
+            "reason_type": normalize_reason_source(&finding.code),
+            "source": normalize_reason_source(&finding.code),
+            "name": normalize_reason_name(&finding.code),
+            "description": normalize_reason_description(&finding.message),
             "weight": finding.weight,
         })).collect::<Vec<_>>(),
         "stages": ctx.stage_timings.iter().map(|stage| serde_json::json!({
@@ -78,4 +93,32 @@ pub fn value(
             "message": entry.message,
         })).collect::<Vec<_>>(),
     })
+}
+
+fn signal_sources(ctx: &ScanContext) -> Vec<&'static str> {
+    let mut sources = Vec::new();
+    if ctx.cache.as_ref().map(|cache| cache.hit).unwrap_or(false) {
+        sources.push("cache");
+    }
+    for finding in &ctx.findings {
+        let source = normalize_reason_source(&finding.code);
+        if !sources.contains(&source) {
+            sources.push(source);
+        }
+    }
+    sources
+}
+
+fn warning_count(ctx: &ScanContext) -> usize {
+    ctx.findings.len()
+}
+
+fn error_count(ctx: &ScanContext) -> usize {
+    ctx.telemetry
+        .iter()
+        .filter(|entry| {
+            let message = entry.message.to_ascii_lowercase();
+            message.contains("error") || message.contains("failed")
+        })
+        .count()
 }

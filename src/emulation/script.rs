@@ -19,8 +19,7 @@ pub(crate) fn emulate_powershell(
     static FROM_BASE64_RE: OnceLock<Regex> = OnceLock::new();
     static UTF16_BASE64_RE: OnceLock<Regex> = OnceLock::new();
     let encoded_command_re = ENCODED_COMMAND_RE.get_or_init(|| {
-        Regex::new(r"(?i)(?:-enc|-encodedcommand)[ \t\r\n]+([A-Za-z0-9+/=]{16,})")
-            .expect("regex")
+        Regex::new(r"(?i)(?:-enc|-encodedcommand)[ \t\r\n]+([A-Za-z0-9+/=]{16,})").expect("regex")
     });
     let from_base64_re = FROM_BASE64_RE.get_or_init(|| {
         Regex::new(
@@ -49,7 +48,7 @@ pub(crate) fn emulate_powershell(
                 if suspicious_script_content(&decoded) {
                     state.findings.push(Finding::new(
                         "EMULATION_PS_DECODED",
-                        "PowerShell emulation recovered suspicious decoded script content",
+                        "PowerShell analysis reconstructed decoded script content with suspicious command patterns",
                         1.5,
                     ));
                 }
@@ -66,7 +65,7 @@ pub(crate) fn emulate_powershell(
                 if suspicious_script_content(decoded) {
                     state.findings.push(Finding::new(
                         "EMULATION_PS_FROMBASE64",
-                        "PowerShell emulation recovered suspicious FromBase64String content",
+                        "PowerShell analysis reconstructed FromBase64String content with suspicious command patterns",
                         1.5,
                     ));
                 }
@@ -103,7 +102,7 @@ pub(crate) fn emulate_powershell(
                 {
                     state.findings.push(Finding::new(
                         "EMULATION_PS_UTF16",
-                        "PowerShell emulation recovered suspicious UTF-16LE encoded script content",
+                        "PowerShell analysis reconstructed UTF-16 encoded script content with suspicious command patterns",
                         1.5,
                     ));
                 }
@@ -159,7 +158,7 @@ pub(crate) fn emulate_javascript(
                 if suspicious_script_content(&values) {
                     state.findings.push(Finding::new(
                         "EMULATION_JS_CHARCODE",
-                        "JavaScript emulation reconstructed suspicious String.fromCharCode content",
+                        "JavaScript analysis reconstructed String.fromCharCode content with suspicious script behavior",
                         1.5,
                     ));
                 }
@@ -243,7 +242,7 @@ pub(crate) fn emulate_vba(
                 if suspicious_script_content(&rebuilt) {
                     state.findings.push(Finding::new(
                         "EMULATION_VBA_CHR",
-                        "VBA emulation reconstructed suspicious Chr/ChrW content",
+                        "VBA analysis reconstructed Chr/ChrW content with suspicious automation patterns",
                         1.5,
                     ));
                 }
@@ -260,7 +259,7 @@ pub(crate) fn emulate_vba(
                 if suspicious_script_content(&rebuilt) {
                     state.findings.push(Finding::new(
                         "EMULATION_VBA_STRREVERSE",
-                        "VBA emulation reconstructed suspicious StrReverse content",
+                        "VBA analysis reconstructed reversed string content with suspicious automation patterns",
                         1.5,
                     ));
                 }

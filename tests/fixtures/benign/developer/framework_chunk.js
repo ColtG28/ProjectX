@@ -1,0 +1,1 @@
+(()=>{const manifest={"chunk":"vendor","routes":["/home","/settings"],"assets":["main.css","main.js"]};const encoded="YXBwLWNvbmZpZw==";const value=atob(encoded);console.log("framework ready",manifest.chunk,value);})();
