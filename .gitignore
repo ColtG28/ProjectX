@@ -2,27 +2,3 @@
 /Planning
 /.env
 /quarantine
-/.hf_cache/
-/.venv/
-/tmp/
-/ember_benchmark/
-# Generated IDE / Python noise
-**/.DS_Store
-**/__pycache__/
-**/*.pyc
-*.tmp
-# Generated ML training scratch artifacts
-/ml_train/artifacts/eval_smoke*
-/ml_train/artifacts/ember_download_state.json
-# Cloned reference repos do not need git metadata in this workspace
-/ml_train/downloads/repos/**/.git/
-# Generated benchmark environments, datasets, and reports
-/ember_benchmark/.venv/
-/ember_benchmark/data/
-/ember_benchmark/artifacts/
-/ember_benchmark/runs/
-/ember_benchmark/reports/
-/ember_benchmark/ember_repo/.git/
-/ember_benchmark/ember_repo/**/__pycache__/
-/raw_benchmark/artifacts/
-/raw_benchmark/benchmark_config.quick.json
