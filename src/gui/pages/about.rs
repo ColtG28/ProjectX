@@ -24,10 +24,11 @@ impl MyApp {
             ui.label(RichText::new("Current desktop focus").strong());
             ui.label("1. Better visibility into scan data and verdicts");
             ui.label("2. Better workflow for local file triage");
+            ui.label("3. Real-time protection with explainable automatic passive scans");
             ui.label(
-                "3. Clear, professional quarantine and report handling with explicit confirmation",
+                "4. Clear, professional quarantine and report handling with explicit confirmation",
             );
-            ui.label("4. Privacy-conscious defaults with external lookups off by default");
+            ui.label("5. Privacy-conscious defaults with external lookups off by default");
         });
     }
 }

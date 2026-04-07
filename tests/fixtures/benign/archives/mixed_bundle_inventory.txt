@@ -1,0 +1,9 @@
+bundle/
+  assets/theme.css
+  assets/logo.svg
+  scripts/post_install_notes.txt
+  configs/appsettings.template.json
+  docs/release_notes.md
+
+Archive inventory for support review only.
+This bundle contains documentation, templates, and assets.

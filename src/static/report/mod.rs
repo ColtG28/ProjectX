@@ -152,6 +152,8 @@ pub struct ReportSummary {
     #[serde(default)]
     pub action_note: String,
     #[serde(default)]
+    pub workflow_origin: Option<String>,
+    #[serde(default)]
     pub risk_score: Option<f64>,
     #[serde(default)]
     pub safety_score: Option<f64>,
@@ -231,6 +233,12 @@ impl ReportSummary {
 pub fn normalize_reason_source(code: &str) -> &'static str {
     if code.contains("YARA") {
         "rule"
+    } else if code.contains("TRUST_")
+        || code.contains("REPUTATION_")
+        || code.contains("ALLOWLIST_")
+        || code.contains("THREAT_INTEL")
+    {
+        "intelligence"
     } else if code.contains("EMU") || code.contains("EMUL") {
         "emulation"
     } else if code.contains("ML") {
@@ -246,6 +254,7 @@ pub fn source_label(source: &str) -> &'static str {
     match source {
         "heuristic" => "Heuristic",
         "rule" => "Local rule",
+        "intelligence" => "Local intelligence",
         "emulation" => "Emulation",
         "ml" => "ML",
         "cache" => "Cached result",
@@ -406,6 +415,10 @@ mod tests {
     #[test]
     fn normalizes_reason_sources_consistently() {
         assert_eq!(normalize_reason_source("YARA_RULE_MATCH"), "rule");
+        assert_eq!(
+            normalize_reason_source("TRUST_ALLOWLIST_HASH"),
+            "intelligence"
+        );
         assert_eq!(normalize_reason_source("EMULATED_JS_CHAIN"), "emulation");
         assert_eq!(normalize_reason_source("ML_SCORE_HIGH"), "ml");
         assert_eq!(normalize_reason_source("CACHE_HIT"), "cache");
@@ -451,5 +464,6 @@ mod tests {
             "Suspicious script concatenation pattern"
         );
         assert_eq!(source_label("rule"), "Local rule");
+        assert_eq!(source_label("intelligence"), "Local intelligence");
     }
 }

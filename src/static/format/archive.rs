@@ -323,6 +323,7 @@ fn entry_kind_label(name: &str, data: &[u8]) -> &'static str {
         FormatKind::Pdf => "pdf",
         FormatKind::Pe => "portable-executable",
         FormatKind::Elf => "elf",
+        FormatKind::Macho => "mach-o",
         FormatKind::Unknown => {
             if is_text(data) {
                 "text"

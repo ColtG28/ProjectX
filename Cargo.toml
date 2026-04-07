@@ -9,7 +9,7 @@ path = "src/lib.rs"
 
 [features]
 default = ["gui"]
-gui = ["dep:eframe", "dep:rfd"]
+gui = ["dep:eframe", "dep:rfd", "dep:notify"]
 
 [dependencies]
 crossbeam-channel = "0.5"
@@ -25,6 +25,7 @@ dotenvy = "0.15"
 flate2 = "1.1"
 eframe = { version = "0.24.1", optional = true, default-features = false, features = ["default_fonts", "glow"] }
 rfd = { version = "0.14", optional = true }
+notify = { version = "6.1", optional = true }
 
 [profile.release]
 codegen-units = 1

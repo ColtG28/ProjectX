@@ -10,5 +10,5 @@ pub fn run(ctx: &mut ScanContext) -> Severity {
     let weighted = score::calculate(ctx);
     ctx.score.risk = weighted;
     ctx.score.safety = 10.0 - weighted;
-    decision::classify(weighted, &ctx.config.thresholds)
+    decision::classify(ctx, weighted, &ctx.config.thresholds)
 }

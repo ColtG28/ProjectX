@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::r#static::config::ScanConfig;
 use crate::r#static::context::ScanContext;
-use crate::r#static::types::{CacheMetadata, Finding, Score, Severity, StringPool, View};
+use crate::r#static::types::{
+    CacheMetadata, Finding, IntelligenceSummary, Score, Severity, StringPool, View,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CachedScan {
@@ -23,12 +25,13 @@ pub struct CachedScan {
     pub emulation: Option<crate::r#static::types::EmulationSummary>,
     pub ml_assessment: Option<crate::r#static::types::MlAssessment>,
     pub threat_severity: Option<crate::r#static::types::ThreatSeveritySummary>,
+    pub intelligence: Option<IntelligenceSummary>,
 }
 
 pub fn cache_key(sha256: &str, config: &ScanConfig, rules_version: &str) -> String {
     let config_json = serde_json::to_string(config).unwrap_or_default();
     crate::r#static::file::hash::sha256_hex(
-        format!("projectx-static-v13|{sha256}|{rules_version}|{config_json}").as_bytes(),
+        format!("projectx-static-v16|{sha256}|{rules_version}|{config_json}").as_bytes(),
     )
 }
 
@@ -84,6 +87,7 @@ pub fn store(key: &str, ctx: &ScanContext, severity: Severity) -> std::io::Resul
         emulation: ctx.emulation.clone(),
         ml_assessment: ctx.ml_assessment.clone(),
         threat_severity: ctx.threat_severity.clone(),
+        intelligence: ctx.intelligence.clone(),
     };
     let json = serde_json::to_string_pretty(&entry).unwrap_or_else(|_| "{}".to_string());
     fs::write(&path, json)?;
@@ -104,6 +108,7 @@ pub fn apply(ctx: &mut ScanContext, key: &str, cached: CachedScan) -> Severity {
     ctx.emulation = cached.emulation;
     ctx.ml_assessment = cached.ml_assessment;
     ctx.threat_severity = cached.threat_severity;
+    ctx.intelligence = cached.intelligence;
     ctx.cache = Some(CacheMetadata {
         key: key.to_string(),
         hit: true,

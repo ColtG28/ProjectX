@@ -25,73 +25,81 @@ pub fn render_record_workspace_toolbar(
 ) -> WorkspaceToolbarResponse {
     let mut response = WorkspaceToolbarResponse::default();
 
-    ui.add_sized(
-        [ui.available_width().min(420.0), 0.0],
-        egui::TextEdit::singleline(search).hint_text(placeholder),
-    );
-    ui.horizontal_wrapped(|ui| {
-        egui::ComboBox::from_id_source(ui.id().with("verdict_filter"))
-            .selected_text(verdict_filter.label())
-            .show_ui(ui, |ui| {
-                for filter in [
-                    ReportVerdictFilter::All,
-                    ReportVerdictFilter::Clean,
-                    ReportVerdictFilter::Malicious,
-                    ReportVerdictFilter::Suspicious,
-                    ReportVerdictFilter::Error,
-                ] {
-                    ui.selectable_value(verdict_filter, filter, filter.label());
-                }
-            });
-        egui::ComboBox::from_id_source(ui.id().with("storage_filter"))
-            .selected_text(storage_filter.label())
-            .show_ui(ui, |ui| {
-                for filter in [
-                    ReportStorageFilter::All,
-                    ReportStorageFilter::InQuarantine,
-                    ReportStorageFilter::Restored,
-                    ReportStorageFilter::Deleted,
-                    ReportStorageFilter::Unknown,
-                ] {
-                    ui.selectable_value(storage_filter, filter, filter.label());
-                }
-            });
-        egui::ComboBox::from_id_source(ui.id().with("sort_order"))
-            .selected_text(sort_order.label())
-            .show_ui(ui, |ui| {
-                for sort in [
-                    ReportSortOrder::NewestFirst,
-                    ReportSortOrder::OldestFirst,
-                    ReportSortOrder::SeverityFirst,
-                    ReportSortOrder::Name,
-                ] {
-                    ui.selectable_value(sort_order, sort, sort.label());
-                }
-            });
-        if let Some(quarantine_only) = quarantine_only {
-            ui.checkbox(quarantine_only, "Quarantined only");
-        }
-    });
-    ui.horizontal_wrapped(|ui| {
-        ui.label(format!("Showing {} result(s)", shown_count));
-        if let Some(selected_visible) = selected_visible {
-            ui.label(format!("Selected visible: {}", selected_visible));
-            if ui.button("Select all shown").clicked() {
-                response.select_all_shown = true;
+    ui.group(|ui| {
+        ui.add_sized(
+            [ui.available_width().min(460.0), 0.0],
+            egui::TextEdit::singleline(search).hint_text(placeholder),
+        );
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Verdict");
+            egui::ComboBox::from_id_source(ui.id().with("verdict_filter"))
+                .selected_text(verdict_filter.label())
+                .show_ui(ui, |ui| {
+                    for filter in [
+                        ReportVerdictFilter::All,
+                        ReportVerdictFilter::Clean,
+                        ReportVerdictFilter::Malicious,
+                        ReportVerdictFilter::Suspicious,
+                        ReportVerdictFilter::Error,
+                    ] {
+                        ui.selectable_value(verdict_filter, filter, filter.label());
+                    }
+                });
+            ui.label("Storage");
+            egui::ComboBox::from_id_source(ui.id().with("storage_filter"))
+                .selected_text(storage_filter.label())
+                .show_ui(ui, |ui| {
+                    for filter in [
+                        ReportStorageFilter::All,
+                        ReportStorageFilter::InQuarantine,
+                        ReportStorageFilter::Restored,
+                        ReportStorageFilter::Deleted,
+                        ReportStorageFilter::Unknown,
+                    ] {
+                        ui.selectable_value(storage_filter, filter, filter.label());
+                    }
+                });
+            ui.label("Sort");
+            egui::ComboBox::from_id_source(ui.id().with("sort_order"))
+                .selected_text(sort_order.label())
+                .show_ui(ui, |ui| {
+                    for sort in [
+                        ReportSortOrder::NewestFirst,
+                        ReportSortOrder::OldestFirst,
+                        ReportSortOrder::SeverityFirst,
+                        ReportSortOrder::Name,
+                    ] {
+                        ui.selectable_value(sort_order, sort, sort.label());
+                    }
+                });
+            if let Some(quarantine_only) = quarantine_only {
+                ui.checkbox(quarantine_only, "Quarantined only");
             }
-            if ui.button("Clear shown").clicked() {
-                response.clear_shown = true;
+        });
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!("Showing {} item(s)", shown_count));
+            if let Some(selected_visible) = selected_visible {
+                ui.label(format!("Selected visible: {}", selected_visible));
+                if ui.button("Select all").clicked() {
+                    response.select_all_shown = true;
+                }
+                if ui.button("Clear selection").clicked() {
+                    response.clear_shown = true;
+                }
+                if ui
+                    .add_enabled(
+                        allow_bulk_delete && selected_visible > 0,
+                        egui::Button::new("Delete selected reports"),
+                    )
+                    .clicked()
+                {
+                    response.delete_selected_reports = true;
+                }
             }
-            if ui
-                .add_enabled(
-                    allow_bulk_delete && selected_visible > 0,
-                    egui::Button::new("Delete selected reports"),
-                )
-                .clicked()
-            {
-                response.delete_selected_reports = true;
-            }
-        }
+        });
+        ui.add_space(2.0);
         ui.label(note);
     });
 

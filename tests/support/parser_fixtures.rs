@@ -1,4 +1,9 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+static TEMP_PATH_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy)]
 pub struct PeSectionSpec<'a> {
@@ -19,12 +24,34 @@ pub struct ElfSymbolSpec<'a> {
     pub name: &'a str,
 }
 
+#[derive(Clone, Copy)]
+pub struct ElfSymbolTableSpec<'a> {
+    pub dyn_symbols: &'a [ElfSymbolSpec<'a>],
+    pub static_symbols: &'a [ElfSymbolSpec<'a>],
+}
+
+#[derive(Clone, Copy)]
+pub struct MachoSegmentSpec<'a> {
+    pub name: &'a str,
+    pub maxprot: u32,
+    pub initprot: u32,
+    pub sections: &'a [&'a str],
+}
+
+#[derive(Clone, Copy)]
+pub struct MachoDylibSpec<'a> {
+    pub path: &'a str,
+    pub command: u32,
+}
+
 pub fn unique_temp_path(prefix: &str, extension: &str) -> std::path::PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or(0);
-    std::env::temp_dir().join(format!("{prefix}_{nanos}.{extension}"))
+    let counter = TEMP_PATH_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    std::env::temp_dir().join(format!("{prefix}_{pid}_{nanos}_{counter}.{extension}"))
 }
 
 pub fn build_test_pe(section_specs: &[PeSectionSpec<'_>], payload: &[u8]) -> Vec<u8> {
@@ -95,6 +122,15 @@ pub fn build_test_pe_with_imports(
     imports: &[PeImportSpec<'_>],
     payload: &[u8],
 ) -> Vec<u8> {
+    build_test_pe_with_imports_and_entrypoint(section_specs, imports, payload, None)
+}
+
+pub fn build_test_pe_with_imports_and_entrypoint(
+    section_specs: &[PeSectionSpec<'_>],
+    imports: &[PeImportSpec<'_>],
+    payload: &[u8],
+    entrypoint_section: Option<&str>,
+) -> Vec<u8> {
     let section_alignment = 0x1000u32;
     let file_alignment = 0x200u32;
     let optional_header_size = 0xE0u16;
@@ -146,6 +182,18 @@ pub fn build_test_pe_with_imports(
 
     let optional_offset = pe_offset + 24;
     bytes[optional_offset..optional_offset + 2].copy_from_slice(&(0x10Bu16).to_le_bytes());
+    let entrypoint_rva = entrypoint_section
+        .and_then(|name| {
+            sections
+                .iter()
+                .position(|section| section.name.eq_ignore_ascii_case(name))
+                .and_then(|idx| layout.get(idx))
+                .map(|layout| layout.virtual_address)
+        })
+        .or_else(|| layout.first().map(|section| section.virtual_address))
+        .unwrap_or(section_alignment);
+    bytes[optional_offset + 16..optional_offset + 20]
+        .copy_from_slice(&entrypoint_rva.to_le_bytes());
     bytes[optional_offset + 32..optional_offset + 36]
         .copy_from_slice(&section_alignment.to_le_bytes());
     bytes[optional_offset + 36..optional_offset + 40]
@@ -262,7 +310,15 @@ pub fn malformed_pe_bad_import_directory() -> Vec<u8> {
 }
 
 pub fn build_test_elf(section_names: &[&str], interp: Option<&str>, payload: &[u8]) -> Vec<u8> {
-    build_test_elf_with_symbols(section_names, interp, &[], payload)
+    build_test_elf_with_symbol_tables(
+        section_names,
+        interp,
+        ElfSymbolTableSpec {
+            dyn_symbols: &[],
+            static_symbols: &[],
+        },
+        payload,
+    )
 }
 
 pub fn build_standard_elf(payload: &[u8]) -> Vec<u8> {
@@ -295,6 +351,23 @@ pub fn build_test_elf_with_symbols(
     symbols: &[ElfSymbolSpec<'_>],
     payload: &[u8],
 ) -> Vec<u8> {
+    build_test_elf_with_symbol_tables(
+        section_names,
+        interp,
+        ElfSymbolTableSpec {
+            dyn_symbols: symbols,
+            static_symbols: &[],
+        },
+        payload,
+    )
+}
+
+pub fn build_test_elf_with_symbol_tables(
+    section_names: &[&str],
+    interp: Option<&str>,
+    symbol_tables: ElfSymbolTableSpec<'_>,
+    payload: &[u8],
+) -> Vec<u8> {
     let mut shstrtab = vec![0u8];
     let mut name_offsets = Vec::new();
     for name in section_names {
@@ -305,8 +378,18 @@ pub fn build_test_elf_with_symbols(
 
     let dynstr_index = section_names.iter().position(|name| *name == ".dynstr");
     let dynsym_index = section_names.iter().position(|name| *name == ".dynsym");
-    let dynstr = build_elf_dynstr(symbols);
-    let dynsym = build_elf_dynsym(symbols, dynsym_index.is_some() && dynstr_index.is_some());
+    let strtab_index = section_names.iter().position(|name| *name == ".strtab");
+    let symtab_index = section_names.iter().position(|name| *name == ".symtab");
+    let dynstr = build_elf_string_table(symbol_tables.dyn_symbols);
+    let dynsym = build_elf_symbol_table(
+        symbol_tables.dyn_symbols,
+        dynsym_index.is_some() && dynstr_index.is_some(),
+    );
+    let strtab = build_elf_string_table(symbol_tables.static_symbols);
+    let symtab = build_elf_symbol_table(
+        symbol_tables.static_symbols,
+        symtab_index.is_some() && strtab_index.is_some(),
+    );
 
     let section_count = section_names.len() + 1;
     let sh_entry_size = 64usize;
@@ -338,6 +421,11 @@ pub fn build_test_elf_with_symbols(
         } else if *name == ".dynsym" {
             let link = dynstr_index.map(|value| (value + 1) as u32).unwrap_or(0);
             (11u32, link, 24u64, dynsym.clone())
+        } else if *name == ".strtab" {
+            (3u32, 0u32, 0u64, strtab.clone())
+        } else if *name == ".symtab" {
+            let link = strtab_index.map(|value| (value + 1) as u32).unwrap_or(0);
+            (2u32, link, 24u64, symtab.clone())
         } else if *name == ".shstrtab" {
             (3u32, 0u32, 0u64, shstrtab.clone())
         } else {
@@ -463,6 +551,24 @@ pub fn malformed_elf_partial_loader_symbols() -> Vec<u8> {
     bytes
 }
 
+pub fn malformed_elf_bad_static_symbol_table() -> Vec<u8> {
+    let mut bytes = build_test_elf_with_symbol_tables(
+        &[".text", ".strtab", ".symtab", ".interp", ".shstrtab"],
+        Some("/lib64/ld-linux-x86-64.so.2"),
+        ElfSymbolTableSpec {
+            dyn_symbols: &[],
+            static_symbols: &[
+                ElfSymbolSpec { name: "execve" },
+                ElfSymbolSpec { name: "socket" },
+            ],
+        },
+        b"placeholder",
+    );
+    let symtab_offset = elf_section_header_offset(3);
+    bytes[symtab_offset + 40..symtab_offset + 44].copy_from_slice(&(99u32).to_le_bytes());
+    bytes
+}
+
 fn elf_section_header_offset(index: usize) -> usize {
     0x100 + index * 64
 }
@@ -475,7 +581,7 @@ fn elf_section_data_offset(bytes: &[u8], index: usize) -> usize {
     ]) as usize
 }
 
-fn build_elf_dynstr(symbols: &[ElfSymbolSpec<'_>]) -> Vec<u8> {
+fn build_elf_string_table(symbols: &[ElfSymbolSpec<'_>]) -> Vec<u8> {
     let mut dynstr = vec![0u8];
     for symbol in symbols {
         dynstr.extend_from_slice(symbol.name.as_bytes());
@@ -484,7 +590,7 @@ fn build_elf_dynstr(symbols: &[ElfSymbolSpec<'_>]) -> Vec<u8> {
     dynstr
 }
 
-fn build_elf_dynsym(symbols: &[ElfSymbolSpec<'_>], enabled: bool) -> Vec<u8> {
+fn build_elf_symbol_table(symbols: &[ElfSymbolSpec<'_>], enabled: bool) -> Vec<u8> {
     if !enabled {
         return Vec::new();
     }
@@ -501,6 +607,176 @@ fn build_elf_dynsym(symbols: &[ElfSymbolSpec<'_>], enabled: bool) -> Vec<u8> {
         name_offset = name_offset.saturating_add(symbol.name.len() as u32 + 1);
     }
     dynsym
+}
+
+pub fn build_test_macho(
+    segments: &[MachoSegmentSpec<'_>],
+    dylibs: &[&str],
+    payload: &[u8],
+) -> Vec<u8> {
+    let dylibs = dylibs
+        .iter()
+        .map(|path| MachoDylibSpec { path, command: 0xC })
+        .collect::<Vec<_>>();
+    build_test_macho_with_dylib_specs(segments, &dylibs, payload)
+}
+
+pub fn build_test_macho_with_dylib_specs(
+    segments: &[MachoSegmentSpec<'_>],
+    dylibs: &[MachoDylibSpec<'_>],
+    payload: &[u8],
+) -> Vec<u8> {
+    build_test_macho_with_magic(0xFEEDFACF, segments, dylibs, payload)
+}
+
+pub fn build_standard_macho(payload: &[u8]) -> Vec<u8> {
+    build_test_macho(
+        &[
+            MachoSegmentSpec {
+                name: "__TEXT",
+                maxprot: 5,
+                initprot: 5,
+                sections: &["__text"],
+            },
+            MachoSegmentSpec {
+                name: "__DATA",
+                maxprot: 3,
+                initprot: 3,
+                sections: &["__data"],
+            },
+        ],
+        &["/usr/lib/libSystem.B.dylib"],
+        payload,
+    )
+}
+
+pub fn build_test_fat_macho(thin: &[u8]) -> Vec<u8> {
+    let header_size = 8usize + 20usize;
+    let thin_offset = align(header_size, 0x1000);
+    let mut bytes = vec![0u8; thin_offset + thin.len()];
+    bytes[0..4].copy_from_slice(&0xCAFEBABEu32.to_be_bytes());
+    bytes[4..8].copy_from_slice(&(1u32).to_be_bytes());
+    bytes[8..12].copy_from_slice(&(0x0100_0007u32).to_be_bytes());
+    bytes[12..16].copy_from_slice(&(3u32).to_be_bytes());
+    bytes[16..20].copy_from_slice(&(thin_offset as u32).to_be_bytes());
+    bytes[20..24].copy_from_slice(&(thin.len() as u32).to_be_bytes());
+    bytes[24..28].copy_from_slice(&(12u32).to_be_bytes());
+    bytes[thin_offset..thin_offset + thin.len()].copy_from_slice(thin);
+    bytes
+}
+
+pub fn malformed_macho_bad_load_command() -> Vec<u8> {
+    let mut bytes = build_standard_macho(b"notes");
+    bytes[16..20].copy_from_slice(&(1u32).to_le_bytes());
+    bytes[20..24].copy_from_slice(&(8u32).to_le_bytes());
+    bytes[32..36].copy_from_slice(&(0x19u32).to_le_bytes());
+    bytes[36..40].copy_from_slice(&(4u32).to_le_bytes());
+    bytes
+}
+
+pub fn malformed_macho_bad_dylib_name_offset() -> Vec<u8> {
+    let mut bytes = build_test_macho(
+        &[MachoSegmentSpec {
+            name: "__TEXT",
+            maxprot: 5,
+            initprot: 5,
+            sections: &["__text"],
+        }],
+        &["/usr/lib/libSystem.B.dylib"],
+        b"notes",
+    );
+    let first_command = 32usize;
+    let segment_cmdsize = u32::from_le_bytes(
+        bytes[first_command + 4..first_command + 8]
+            .try_into()
+            .unwrap(),
+    ) as usize;
+    let dylib_offset = first_command + segment_cmdsize;
+    bytes[dylib_offset + 8..dylib_offset + 12].copy_from_slice(&(0xFFFFu32).to_le_bytes());
+    bytes
+}
+
+fn build_test_macho_with_magic(
+    magic: u32,
+    segments: &[MachoSegmentSpec<'_>],
+    dylibs: &[MachoDylibSpec<'_>],
+    payload: &[u8],
+) -> Vec<u8> {
+    let segment_commands_size = segments
+        .iter()
+        .map(|segment| 72usize + segment.sections.len() * 80usize)
+        .sum::<usize>();
+    let dylib_commands_size = dylibs
+        .iter()
+        .map(|dylib| align(24usize + dylib.path.len() + 1, 8))
+        .sum::<usize>();
+    let header_size = 32usize;
+    let sizeofcmds = segment_commands_size + dylib_commands_size;
+    let mut bytes = vec![0u8; header_size + sizeofcmds + payload.len()];
+
+    bytes[0..4].copy_from_slice(&magic.to_le_bytes());
+    bytes[4..8].copy_from_slice(&(0x0100_0007u32).to_le_bytes());
+    bytes[8..12].copy_from_slice(&(3u32).to_le_bytes());
+    bytes[12..16].copy_from_slice(&(2u32).to_le_bytes());
+    bytes[16..20].copy_from_slice(&((segments.len() + dylibs.len()) as u32).to_le_bytes());
+    bytes[20..24].copy_from_slice(&(sizeofcmds as u32).to_le_bytes());
+    bytes[24..28].copy_from_slice(&(0u32).to_le_bytes());
+    bytes[28..32].copy_from_slice(&(0u32).to_le_bytes());
+
+    let mut cursor = header_size;
+    let section_data_cursor = header_size + sizeofcmds;
+    for segment in segments {
+        let cmdsize = 72usize + segment.sections.len() * 80usize;
+        bytes[cursor..cursor + 4].copy_from_slice(&(0x19u32).to_le_bytes());
+        bytes[cursor + 4..cursor + 8].copy_from_slice(&(cmdsize as u32).to_le_bytes());
+        write_fixed_name(&mut bytes[cursor + 8..cursor + 24], segment.name);
+        bytes[cursor + 40..cursor + 48].copy_from_slice(&(payload.len() as u64).to_le_bytes());
+        bytes[cursor + 56..cursor + 60].copy_from_slice(&segment.maxprot.to_le_bytes());
+        bytes[cursor + 60..cursor + 64].copy_from_slice(&segment.initprot.to_le_bytes());
+        bytes[cursor + 64..cursor + 68]
+            .copy_from_slice(&(segment.sections.len() as u32).to_le_bytes());
+
+        for (index, section_name) in segment.sections.iter().enumerate() {
+            let section_offset = cursor + 72 + index * 80;
+            write_fixed_name(
+                &mut bytes[section_offset..section_offset + 16],
+                section_name,
+            );
+            write_fixed_name(
+                &mut bytes[section_offset + 16..section_offset + 32],
+                segment.name,
+            );
+            bytes[section_offset + 48..section_offset + 52]
+                .copy_from_slice(&(payload.len() as u32).to_le_bytes());
+            bytes[section_offset + 52..section_offset + 56]
+                .copy_from_slice(&(section_data_cursor as u32).to_le_bytes());
+        }
+
+        cursor += cmdsize;
+    }
+
+    for dylib in dylibs {
+        let cmdsize = align(24usize + dylib.path.len() + 1, 8);
+        bytes[cursor..cursor + 4].copy_from_slice(&dylib.command.to_le_bytes());
+        bytes[cursor + 4..cursor + 8].copy_from_slice(&(cmdsize as u32).to_le_bytes());
+        bytes[cursor + 8..cursor + 12].copy_from_slice(&(24u32).to_le_bytes());
+        let name_start = cursor + 24;
+        bytes[name_start..name_start + dylib.path.len()].copy_from_slice(dylib.path.as_bytes());
+        bytes[name_start + dylib.path.len()] = 0;
+        cursor += cmdsize;
+    }
+
+    bytes[section_data_cursor..section_data_cursor + payload.len()].copy_from_slice(payload);
+    bytes
+}
+
+fn write_fixed_name(slot: &mut [u8], value: &str) {
+    let bytes = value.as_bytes();
+    let copy_len = bytes.len().min(slot.len());
+    slot[..copy_len].copy_from_slice(&bytes[..copy_len]);
+    for byte in &mut slot[copy_len..] {
+        *byte = 0;
+    }
 }
 
 fn build_import_blob(imports: &[PeImportSpec<'_>], section_rva: u32) -> Vec<u8> {

@@ -18,6 +18,8 @@ pub struct FeatureFlags {
     pub enable_emulation: bool,
     pub enable_runtime_yara: bool,
     pub enable_ml_scoring: bool,
+    pub enable_local_intelligence: bool,
+    pub enable_external_intelligence: bool,
     pub enable_ensemble_scoring: bool,
     pub enable_active_learning: bool,
 }
@@ -75,6 +77,8 @@ impl Default for ScanConfig {
                 enable_emulation: true,
                 enable_runtime_yara: true,
                 enable_ml_scoring: true,
+                enable_local_intelligence: true,
+                enable_external_intelligence: false,
                 enable_ensemble_scoring: true,
                 enable_active_learning: false,
             },

@@ -19,6 +19,8 @@ pub fn check(bytes: &[u8]) -> Vec<Finding> {
     };
 
     let mut findings = Vec::new();
+    let entrypoint_section = parse_entrypoint_rva(bytes)
+        .and_then(|entrypoint_rva| section_for_rva(&sections, entrypoint_rva));
 
     if sections.iter().any(|section| {
         matches!(
@@ -55,6 +57,28 @@ pub fn check(bytes: &[u8]) -> Vec<Finding> {
             "Parsed PE layout is unusually sparse, with very few sections and one section expanding far beyond its on-disk size",
             1.6,
         ));
+    }
+
+    if let Some(section) = entrypoint_section {
+        if matches!(
+            section.name.as_str(),
+            "upx0" | "upx1" | ".upx" | ".aspack" | ".vmp0" | ".vmp1"
+        ) {
+            findings.push(Finding::new(
+                "PE_ENTRYPOINT_IN_PACKED_SECTION",
+                "Parsed PE entry point falls inside a packed or unusually named section, which can indicate an unpacking stub or staged loader",
+                2.4,
+            ));
+        }
+
+        let flags = section.characteristics;
+        if flags & IMAGE_SCN_MEM_EXECUTE != 0 && flags & IMAGE_SCN_MEM_WRITE != 0 {
+            findings.push(Finding::new(
+                "PE_ENTRYPOINT_IN_WRITABLE_EXECUTABLE_SECTION",
+                "Parsed PE entry point starts in a writable and executable section, which is unusual for standard applications",
+                2.5,
+            ));
+        }
     }
 
     findings
@@ -123,6 +147,31 @@ fn read_u32_le(bytes: &[u8], offset: usize) -> Option<u32> {
     Some(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]))
 }
 
+fn parse_entrypoint_rva(bytes: &[u8]) -> Option<u32> {
+    if bytes.len() < 0x40 || !bytes.starts_with(b"MZ") {
+        return None;
+    }
+    let pe_offset = read_u32_le(bytes, 0x3c)? as usize;
+    if pe_offset.checked_add(24)? > bytes.len() || bytes.get(pe_offset..pe_offset + 4)? != b"PE\0\0"
+    {
+        return None;
+    }
+    let optional_offset = pe_offset + 24;
+    if optional_offset.checked_add(20)? > bytes.len() {
+        return None;
+    }
+    Some(read_u32_le(bytes, optional_offset + 16)?)
+}
+
+fn section_for_rva<'a>(sections: &'a [PeSection], rva: u32) -> Option<&'a PeSection> {
+    sections.iter().find(|section| {
+        let start = section.virtual_address;
+        let span = section.virtual_size.max(section.raw_size).max(1);
+        let end = start.saturating_add(span);
+        rva >= start && rva < end
+    })
+}
+
 #[cfg(test)]
 mod tests {
     mod parser_fixtures {
@@ -135,7 +184,8 @@ mod tests {
 
     use super::{check, parse_sections, IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_WRITE};
     use parser_fixtures::{
-        build_test_pe, malformed_pe_bad_lfanew, malformed_pe_truncated_section_table, PeSectionSpec,
+        build_test_pe, build_test_pe_with_imports_and_entrypoint, malformed_pe_bad_lfanew,
+        malformed_pe_truncated_section_table, PeSectionSpec,
     };
 
     #[test]
@@ -204,6 +254,33 @@ mod tests {
         assert!(findings
             .iter()
             .any(|finding| finding.code == "PE_EXECUTABLE_WRITABLE_SECTION"));
+    }
+
+    #[test]
+    fn entrypoint_in_packed_section_message_is_clear() {
+        let bytes = build_test_pe_with_imports_and_entrypoint(
+            &[
+                PeSectionSpec {
+                    name: "UPX0",
+                    virtual_size: 0x900,
+                    raw_size: 0x200,
+                    characteristics: 0x6000_0020,
+                },
+                PeSectionSpec {
+                    name: ".rsrc",
+                    virtual_size: 0x200,
+                    raw_size: 0x200,
+                    characteristics: 0x4000_0040,
+                },
+            ],
+            &[],
+            b"payload",
+            Some("UPX0"),
+        );
+        let findings = check(&bytes);
+        assert!(findings
+            .iter()
+            .any(|finding| finding.code == "PE_ENTRYPOINT_IN_PACKED_SECTION"));
     }
 
     #[test]

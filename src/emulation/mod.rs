@@ -65,7 +65,17 @@ pub fn run(ctx: &mut ScanContext) {
             .enumerate()
             .map(|(index, content)| View::new(format!("emulation.output.{index}"), content))
             .collect::<Vec<_>>();
-        state.runtime_yara_hits = runner::run_on_views(&bundle.rules, &views);
+        state.runtime_yara_hits = runner::run_on_views(&bundle.rules, &views)
+            .into_iter()
+            .map(|hit| {
+                format!(
+                    "{} matched {} in {}",
+                    hit.name,
+                    hit.matched_literals.join(", "),
+                    hit.view_name
+                )
+            })
+            .collect();
         for hit in &state.runtime_yara_hits {
             state.findings.push(Finding::new(
                 "EMULATION_RUNTIME_YARA",

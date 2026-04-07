@@ -1,6 +1,7 @@
 pub mod archive;
 pub mod detect;
 pub mod elf;
+pub mod macho;
 pub mod office;
 pub mod pdf;
 pub mod pe;
@@ -36,6 +37,10 @@ pub fn run(ctx: &mut ScanContext) {
         detect::FormatKind::Elf => {
             let elf_findings = elf::analyze(&ctx.bytes);
             ctx.findings.extend(elf_findings);
+        }
+        detect::FormatKind::Macho => {
+            let macho_findings = macho::analyze(&ctx.bytes);
+            ctx.findings.extend(macho_findings);
         }
         detect::FormatKind::Pdf => {
             let markers = pdf::suspicious_markers(&ctx.bytes);

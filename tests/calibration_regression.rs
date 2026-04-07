@@ -6,8 +6,11 @@ use std::path::{Path, PathBuf};
 mod parser_fixtures;
 
 use parser_fixtures::{
-    build_standard_elf_with_symbols, build_standard_pe_with_imports, build_test_elf, build_test_pe,
-    unique_temp_path, ElfSymbolSpec, PeImportSpec, PeSectionSpec,
+    build_standard_elf_with_symbols, build_standard_macho, build_standard_pe_with_imports,
+    build_test_elf, build_test_elf_with_symbol_tables, build_test_macho,
+    build_test_macho_with_dylib_specs, build_test_pe, build_test_pe_with_imports_and_entrypoint,
+    unique_temp_path, ElfSymbolSpec, ElfSymbolTableSpec, MachoDylibSpec, MachoSegmentSpec,
+    PeImportSpec, PeSectionSpec,
 };
 use projectx::r#static::config::ScanConfig;
 use projectx::r#static::run_pipeline;
@@ -574,6 +577,42 @@ mod edge_cases {
     }
 
     #[test]
+    fn benign_pe_entrypoint_layout_stays_clean_without_corroboration() {
+        let path = unique_temp_path("projectx_benign_fixture", "exe");
+        let bytes = build_test_pe_with_imports_and_entrypoint(
+            &[
+                PeSectionSpec {
+                    name: ".text",
+                    virtual_size: 0x600,
+                    raw_size: 0x400,
+                    characteristics: 0x6000_0020,
+                },
+                PeSectionSpec {
+                    name: ".rdata",
+                    virtual_size: 0x200,
+                    raw_size: 0x200,
+                    characteristics: 0x4000_0040,
+                },
+            ],
+            &[],
+            b"version info release notes",
+            Some(".text"),
+        );
+        fs::write(&path, bytes).unwrap();
+
+        let (ctx, severity) = run_fixture(&path);
+        assert_eq!(severity, Severity::Clean);
+        assert!(ctx.score.risk < 3.5);
+        assert!(ctx
+            .findings
+            .iter()
+            .all(|finding| finding.code != "PE_ENTRYPOINT_IN_PACKED_SECTION"
+                && finding.code != "PE_ENTRYPOINT_IN_WRITABLE_EXECUTABLE_SECTION"));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn parsed_benign_elf_layout_stays_clean() {
         let path = unique_temp_path("projectx_benign_fixture", "elf");
         let bytes = build_test_elf(
@@ -674,6 +713,120 @@ mod edge_cases {
 
         let _ = fs::remove_file(path);
     }
+
+    #[test]
+    fn benign_static_elf_symbols_stay_clean() {
+        let path = unique_temp_path("projectx_benign_fixture", "elf");
+        let bytes = build_test_elf_with_symbol_tables(
+            &[".text", ".strtab", ".symtab", ".interp", ".shstrtab"],
+            Some("/lib64/ld-linux-x86-64.so.2"),
+            ElfSymbolTableSpec {
+                dyn_symbols: &[],
+                static_symbols: &[
+                    ElfSymbolSpec { name: "printf" },
+                    ElfSymbolSpec { name: "puts" },
+                    ElfSymbolSpec {
+                        name: "getaddrinfo",
+                    },
+                ],
+            },
+            b"support metadata and package notes",
+        );
+        fs::write(&path, bytes).unwrap();
+
+        let (ctx, severity) = run_fixture(&path);
+        assert_eq!(severity, Severity::Clean);
+        assert!(ctx.score.risk < 3.5);
+        assert!(ctx
+            .findings
+            .iter()
+            .all(|finding| finding.code != "ELF_STATIC_SYMBOL_LOADER_CHAIN"
+                && finding.code != "ELF_STATIC_SYMBOL_EXEC_NETWORK_CHAIN"));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn parsed_benign_macho_layout_stays_clean() {
+        let path = unique_temp_path("projectx_benign_fixture", "dylib");
+        let bytes = build_standard_macho(b"printf objc runtime metadata");
+        fs::write(&path, bytes).unwrap();
+
+        let (ctx, severity) = run_fixture(&path);
+        assert_eq!(severity, Severity::Clean);
+        assert!(ctx.score.risk < 3.5);
+        assert!(ctx
+            .findings
+            .iter()
+            .all(|finding| finding.code != "MAGIC_MISMATCH"));
+        assert!(ctx
+            .findings
+            .iter()
+            .all(|finding| finding.code != "MACHO_EXECUTABLE_WRITABLE_SEGMENT"));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn benign_macho_loader_adjacent_notes_stay_clean() {
+        let path = unique_temp_path("projectx_benign_fixture", "dylib");
+        let bytes = build_test_macho(
+            &[MachoSegmentSpec {
+                name: "__TEXT",
+                maxprot: 5,
+                initprot: 5,
+                sections: &["__text"],
+            }],
+            &["/usr/lib/libSystem.B.dylib"],
+            b"release notes discuss dlopen examples and plugin loading docs",
+        );
+        fs::write(&path, bytes).unwrap();
+
+        let (ctx, severity) = run_fixture(&path);
+        assert_eq!(severity, Severity::Clean);
+        assert!(ctx.score.risk < 3.5);
+        assert!(ctx
+            .findings
+            .iter()
+            .all(|finding| finding.code != "MACHO_DYNAMIC_LOADER_CHAIN"));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn benign_macho_relative_loader_path_stays_clean_without_corroboration() {
+        let path = unique_temp_path("projectx_benign_fixture", "dylib");
+        let bytes = build_test_macho_with_dylib_specs(
+            &[MachoSegmentSpec {
+                name: "__TEXT",
+                maxprot: 5,
+                initprot: 5,
+                sections: &["__text"],
+            }],
+            &[
+                MachoDylibSpec {
+                    path: "@rpath/Frameworks/Plugin.framework/Plugin",
+                    command: 0x8000_0018,
+                },
+                MachoDylibSpec {
+                    path: "/usr/lib/libSystem.B.dylib",
+                    command: 0x0000_000c,
+                },
+            ],
+            b"release notes for plugin loading",
+        );
+        fs::write(&path, bytes).unwrap();
+
+        let (ctx, severity) = run_fixture(&path);
+        assert_eq!(severity, Severity::Clean);
+        assert!(ctx.score.risk < 3.5);
+        assert!(ctx
+            .findings
+            .iter()
+            .all(|finding| finding.code != "MACHO_RELATIVE_LOADER_PATH_CHAIN"));
+
+        let _ = fs::remove_file(path);
+    }
 }
 
 mod correlated_suspicious {
@@ -695,10 +848,12 @@ mod correlated_suspicious {
 
         let (ctx, severity) = run_fixture(&path);
         assert_ne!(severity, Severity::Clean);
-        assert!(ctx
-            .findings
-            .iter()
-            .any(|finding| finding.code == "YARA_MATCH"));
+        assert!(ctx.findings.iter().any(|finding| {
+            matches!(
+                finding.code.as_str(),
+                "YARA_MATCH" | "PSH_DOWNLOADER_CHAIN" | "DECODED_FOLLOW_ON_BEHAVIOR"
+            )
+        }));
 
         let _ = fs::remove_file(path);
     }

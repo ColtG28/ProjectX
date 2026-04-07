@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use super::config::ScanConfig;
 use super::file::{hash, mime};
 use super::types::{
-    CacheMetadata, EmulationSummary, ExtractedArtifact, Finding, MlAssessment, ScanLogEntry, Score,
-    StageTiming, StringPool, ThreatSeveritySummary, View,
+    CacheMetadata, EmulationSummary, ExtractedArtifact, Finding, IntelligenceSummary, MlAssessment,
+    ScanLogEntry, Score, StageTiming, StringPool, ThreatSeveritySummary, View,
 };
 
 #[derive(Debug, Clone)]
@@ -32,6 +32,7 @@ pub struct ScanContext {
     pub cache: Option<CacheMetadata>,
     pub rules_version: String,
     pub emulation: Option<EmulationSummary>,
+    pub intelligence: Option<IntelligenceSummary>,
     pub ml_assessment: Option<MlAssessment>,
     pub threat_severity: Option<ThreatSeveritySummary>,
     pub config: ScanConfig,
@@ -88,6 +89,7 @@ impl ScanContext {
             cache: None,
             rules_version: String::new(),
             emulation: None,
+            intelligence: None,
             ml_assessment: None,
             threat_severity: None,
             config,

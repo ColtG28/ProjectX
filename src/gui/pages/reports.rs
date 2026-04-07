@@ -13,7 +13,7 @@ impl MyApp {
     pub fn render_reports(&mut self, ui: &mut egui::Ui) {
         ui.heading("Results Explorer");
         ui.label(
-            "Filter scan history, inspect reasoning, and manage safe report or quarantine actions.",
+            "Focus on current triage, inspect reasoning, and manage safe report or quarantine actions.",
         );
         ui.separator();
 
@@ -78,7 +78,7 @@ impl MyApp {
             indices.len(),
             Some(selected_visible),
             true,
-            "Use Results for active triage. Report removal requires confirmation.",
+            "Use Results for active triage and latest decisions. Report removal requires confirmation.",
         );
         if toolbar.select_all_shown {
             self.selected_report_ids
@@ -98,7 +98,7 @@ impl MyApp {
             &indices,
             "No matching results",
             "Try clearing filters or run a new scan to populate the results explorer.",
-            "Results focuses on current triage and report management. Safe file actions remain local and confirm before changing quarantine state.",
+            "Results focuses on the current working set. Use Operations for long-running audit history and protection events.",
         );
     }
 }

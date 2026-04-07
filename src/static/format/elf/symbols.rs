@@ -3,18 +3,22 @@ use crate::r#static::types::Finding;
 use super::sections::{parse_sections, ElfSection};
 
 pub fn check(bytes: &[u8]) -> Vec<Finding> {
-    let Some(symbols) = parse_symbols(bytes) else {
+    let Some(symbols) = parse_symbol_tables(bytes) else {
         return Vec::new();
     };
-    if symbols.is_empty() {
+    let all_symbols = symbols
+        .iter()
+        .map(|symbol| symbol.name.clone())
+        .collect::<Vec<_>>();
+    if all_symbols.is_empty() {
         return Vec::new();
     }
 
     let text = String::from_utf8_lossy(bytes).to_ascii_lowercase();
     let mut findings = Vec::new();
 
-    if has_all(&symbols, &["dlopen", "dlsym"])
-        && has_any(&symbols, &["mprotect", "mmap", "memfd_create"])
+    if has_all(&all_symbols, &["dlopen", "dlsym"])
+        && has_any(&all_symbols, &["mprotect", "mmap", "memfd_create"])
     {
         findings.push(Finding::new(
             "ELF_DYNAMIC_SYMBOL_CHAIN",
@@ -23,9 +27,9 @@ pub fn check(bytes: &[u8]) -> Vec<Finding> {
         ));
     }
 
-    if has_any(&symbols, &["system", "execve", "posix_spawn"])
+    if has_any(&all_symbols, &["system", "execve", "posix_spawn"])
         && has_any(
-            &symbols,
+            &all_symbols,
             &["socket", "connect", "getaddrinfo", "curl_easy_perform"],
         )
     {
@@ -36,8 +40,8 @@ pub fn check(bytes: &[u8]) -> Vec<Finding> {
         ));
     }
 
-    if has_any(&symbols, &["execve", "posix_spawn"])
-        && has_any(&symbols, &["readlink", "readlinkat", "realpath"])
+    if has_any(&all_symbols, &["execve", "posix_spawn"])
+        && has_any(&all_symbols, &["readlink", "readlinkat", "realpath"])
         && text.contains("/proc/self/exe")
     {
         findings.push(Finding::new(
@@ -47,45 +51,119 @@ pub fn check(bytes: &[u8]) -> Vec<Finding> {
         ));
     }
 
+    let static_symbols = symbols
+        .iter()
+        .filter(|symbol| matches!(symbol.kind, SymbolKind::Static))
+        .map(|symbol| symbol.name.clone())
+        .collect::<Vec<_>>();
+    if has_all(&static_symbols, &["dlopen", "dlsym"])
+        && has_any(&static_symbols, &["mprotect", "mmap", "memfd_create"])
+    {
+        findings.push(Finding::new(
+            "ELF_STATIC_SYMBOL_LOADER_CHAIN",
+            "Parsed ELF symbol tables combine runtime symbol loading with executable-memory behavior even when those relationships are not exposed through dynamic symbols",
+            2.1,
+        ));
+    }
+
+    if has_any(&static_symbols, &["system", "execve", "posix_spawn"])
+        && has_any(
+            &static_symbols,
+            &["socket", "connect", "getaddrinfo", "curl_easy_perform"],
+        )
+    {
+        findings.push(Finding::new(
+            "ELF_STATIC_SYMBOL_EXEC_NETWORK_CHAIN",
+            "Parsed ELF symbol tables combine command execution and network communication functions in a way that can support follow-on behavior",
+            2.0,
+        ));
+    }
+
     findings
 }
 
+#[cfg(test)]
 pub(crate) fn parse_symbols(bytes: &[u8]) -> Option<Vec<String>> {
+    Some(
+        parse_symbol_tables(bytes)?
+            .into_iter()
+            .map(|symbol| symbol.name)
+            .collect(),
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SymbolKind {
+    Dynamic,
+    Static,
+}
+
+#[derive(Debug, Clone)]
+struct ParsedSymbol {
+    name: String,
+    kind: SymbolKind,
+}
+
+fn parse_symbol_tables(bytes: &[u8]) -> Option<Vec<ParsedSymbol>> {
     let sections = parse_sections(bytes)?;
-    let Some(dynsym) = sections
+    let mut symbols = Vec::new();
+    symbols.extend(parse_named_symbol_table(
+        bytes,
+        &sections,
+        ".dynsym",
+        11,
+        SymbolKind::Dynamic,
+    )?);
+    symbols.extend(parse_named_symbol_table(
+        bytes,
+        &sections,
+        ".symtab",
+        2,
+        SymbolKind::Static,
+    )?);
+    Some(symbols)
+}
+
+fn parse_named_symbol_table(
+    bytes: &[u8],
+    sections: &[ElfSection],
+    section_name: &str,
+    section_type: u32,
+    kind: SymbolKind,
+) -> Option<Vec<ParsedSymbol>> {
+    let Some(table) = sections
         .iter()
-        .find(|section| section.name == ".dynsym" && section.section_type == 11)
+        .find(|section| section.name == section_name && section.section_type == section_type)
     else {
         return Some(Vec::new());
     };
-    if dynsym.size == 0 || dynsym.entry_size == 0 {
+    if table.size == 0 || table.entry_size == 0 {
         return Some(Vec::new());
     }
-    if dynsym.entry_size < 8 || dynsym.entry_size > 256 || dynsym.size % dynsym.entry_size != 0 {
+    if table.entry_size < 8 || table.entry_size > 256 || table.size % table.entry_size != 0 {
         return None;
     }
 
-    let strtab = linked_strtab(&sections, dynsym)?;
+    let strtab = linked_strtab(sections, table)?;
     if strtab.size == 0 {
         return Some(Vec::new());
     }
-    let dynstr = bytes.get(strtab.offset..strtab.offset.checked_add(strtab.size)?)?;
-    let dynsym_bytes = bytes.get(dynsym.offset..dynsym.offset.checked_add(dynsym.size)?)?;
-    let entry_count = (dynsym.size / dynsym.entry_size).min(256);
+    let strtab_bytes = bytes.get(strtab.offset..strtab.offset.checked_add(strtab.size)?)?;
+    let table_bytes = bytes.get(table.offset..table.offset.checked_add(table.size)?)?;
+    let entry_count = (table.size / table.entry_size).min(512);
     if entry_count == 0 {
         return Some(Vec::new());
     }
 
     let mut symbols = Vec::new();
     for index in 1..entry_count {
-        let offset = index.checked_mul(dynsym.entry_size)?;
-        let name_offset = read_u32_le(dynsym_bytes, offset)? as usize;
-        let name = read_c_string(dynstr, name_offset)?.to_ascii_lowercase();
+        let offset = index.checked_mul(table.entry_size)?;
+        let name_offset = read_u32_le(table_bytes, offset)? as usize;
+        let name = read_c_string(strtab_bytes, name_offset)?.to_ascii_lowercase();
         if !name.is_empty() {
-            symbols.push(name);
+            symbols.push(ParsedSymbol { name, kind });
         }
     }
-
     Some(symbols)
 }
 
@@ -134,10 +212,11 @@ mod tests {
 
     use super::{check, parse_symbols};
     use parser_fixtures::{
-        build_test_elf_with_symbols, malformed_elf_bad_symbol_table,
+        build_test_elf_with_symbol_tables, build_test_elf_with_symbols,
+        malformed_elf_bad_static_symbol_table, malformed_elf_bad_symbol_table,
         malformed_elf_invalid_symbol_entry_size, malformed_elf_partial_loader_symbols,
         malformed_elf_symbol_name_out_of_bounds, malformed_elf_truncated_dynstr,
-        malformed_elf_truncated_dynsym, ElfSymbolSpec,
+        malformed_elf_truncated_dynsym, ElfSymbolSpec, ElfSymbolTableSpec,
     };
 
     #[test]
@@ -213,6 +292,34 @@ mod tests {
     #[test]
     fn partial_loader_text_without_symbol_table_does_not_emit_parsed_symbol_findings() {
         let bytes = malformed_elf_partial_loader_symbols();
+        assert!(check(&bytes).is_empty());
+        assert!(parse_symbols(&bytes).is_none());
+    }
+
+    #[test]
+    fn static_symbol_table_chain_is_detected() {
+        let bytes = build_test_elf_with_symbol_tables(
+            &[".text", ".strtab", ".symtab", ".interp", ".shstrtab"],
+            Some("/lib64/ld-linux-x86-64.so.2"),
+            ElfSymbolTableSpec {
+                dyn_symbols: &[],
+                static_symbols: &[
+                    ElfSymbolSpec { name: "dlopen" },
+                    ElfSymbolSpec { name: "dlsym" },
+                    ElfSymbolSpec { name: "mprotect" },
+                ],
+            },
+            b"notes",
+        );
+        let findings = check(&bytes);
+        assert!(findings
+            .iter()
+            .any(|finding| finding.code == "ELF_STATIC_SYMBOL_LOADER_CHAIN"));
+    }
+
+    #[test]
+    fn malformed_static_symbol_table_fails_safely() {
+        let bytes = malformed_elf_bad_static_symbol_table();
         assert!(check(&bytes).is_empty());
         assert!(parse_symbols(&bytes).is_none());
     }

@@ -11,9 +11,9 @@ use crate::gui::state::{MyApp, RecordStorageState, Verdict};
 
 impl MyApp {
     pub fn render_history(&mut self, ui: &mut egui::Ui) {
-        ui.heading("History & Quarantine");
+        ui.heading("Operations & Quarantine");
         ui.label(
-            "Browse prior scans, focus on quarantined items, and inspect operational outcomes.",
+            "Browse prior scans, focus on quarantined items, and inspect operational or protection-driven outcomes.",
         );
         ui.separator();
 
@@ -67,6 +67,245 @@ impl MyApp {
         });
         ui.separator();
 
+        if !self.protection_events.is_empty() {
+            ui.group(|ui| {
+                ui.label(egui::RichText::new("Protection activity").strong());
+                ui.label(
+                    "Settings controls what gets watched, Scan shows live state, and Operations keeps the reviewable protection timeline.",
+                );
+                ui.horizontal_wrapped(|ui| {
+                    stat_chip(
+                        ui,
+                        "Queue health",
+                        self.protection_summary.queue_health.clone(),
+                        Color32::from_rgb(176, 221, 255),
+                    );
+                    stat_chip(
+                        ui,
+                        "Monitor",
+                        format!(
+                            "{} ({})",
+                            self.protection_summary.monitor_mode,
+                            self.protection_summary.monitor_state
+                        ),
+                        Color32::from_rgb(132, 170, 214),
+                    );
+                    stat_chip(
+                        ui,
+                        "Backlog",
+                        self.protection_summary.backlog_count.to_string(),
+                        Color32::from_rgb(224, 185, 105),
+                    );
+                    stat_chip(
+                        ui,
+                        "Deferred",
+                        self.protection_summary.deferred_event_count.to_string(),
+                        Color32::from_rgb(224, 185, 105),
+                    );
+                    stat_chip(
+                        ui,
+                        "Skipped",
+                        self.protection_summary.skipped_event_count.to_string(),
+                        Color32::from_rgb(170, 170, 180),
+                    );
+                });
+                if !self.protection_summary.queue_health_detail.is_empty() {
+                    ui.label(&self.protection_summary.queue_health_detail);
+                }
+                ui.add_space(6.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Search");
+                    ui.add_sized(
+                        [ui.available_width().min(260.0), 0.0],
+                        egui::TextEdit::singleline(&mut self.protection_event_search)
+                            .hint_text("Path, note, origin, or event type"),
+                    );
+                    egui::ComboBox::from_id_source("protection_kind_filter")
+                        .selected_text(self.protection_kind_filter.label())
+                        .show_ui(ui, |ui| {
+                            for filter in [
+                                crate::gui::state::ProtectionEventKindFilter::All,
+                                crate::gui::state::ProtectionEventKindFilter::Queued,
+                                crate::gui::state::ProtectionEventKindFilter::Deferred,
+                                crate::gui::state::ProtectionEventKindFilter::Completed,
+                                crate::gui::state::ProtectionEventKindFilter::Throttled,
+                                crate::gui::state::ProtectionEventKindFilter::Skipped,
+                                crate::gui::state::ProtectionEventKindFilter::Error,
+                            ] {
+                                ui.selectable_value(
+                                    &mut self.protection_kind_filter,
+                                    filter,
+                                    filter.label(),
+                                );
+                            }
+                        });
+                    egui::ComboBox::from_id_source("protection_file_filter")
+                        .selected_text(self.protection_file_filter.label())
+                        .show_ui(ui, |ui| {
+                            for filter in [
+                                crate::gui::state::ProtectionFileClassFilter::All,
+                                crate::gui::state::ProtectionFileClassFilter::Executable,
+                                crate::gui::state::ProtectionFileClassFilter::Script,
+                                crate::gui::state::ProtectionFileClassFilter::Archive,
+                                crate::gui::state::ProtectionFileClassFilter::Document,
+                                crate::gui::state::ProtectionFileClassFilter::TempCache,
+                                crate::gui::state::ProtectionFileClassFilter::Other,
+                            ] {
+                                ui.selectable_value(
+                                    &mut self.protection_file_filter,
+                                    filter,
+                                    filter.label(),
+                                );
+                            }
+                        });
+                    egui::ComboBox::from_id_source("protection_priority_filter")
+                        .selected_text(self.protection_priority_filter.label())
+                        .show_ui(ui, |ui| {
+                            for filter in [
+                                crate::gui::state::ProtectionPriorityFilter::All,
+                                crate::gui::state::ProtectionPriorityFilter::High,
+                                crate::gui::state::ProtectionPriorityFilter::Normal,
+                                crate::gui::state::ProtectionPriorityFilter::Low,
+                            ] {
+                                ui.selectable_value(
+                                    &mut self.protection_priority_filter,
+                                    filter,
+                                    filter.label(),
+                                );
+                            }
+                        });
+                    egui::ComboBox::from_id_source("protection_origin_filter")
+                        .selected_text(self.protection_origin_filter.label())
+                        .show_ui(ui, |ui| {
+                            for filter in [
+                                crate::gui::state::ProtectionOriginFilter::All,
+                                crate::gui::state::ProtectionOriginFilter::RealTimeProtection,
+                                crate::gui::state::ProtectionOriginFilter::DownloadMonitoring,
+                                crate::gui::state::ProtectionOriginFilter::Manual,
+                            ] {
+                                ui.selectable_value(
+                                    &mut self.protection_origin_filter,
+                                    filter,
+                                    filter.label(),
+                                );
+                            }
+                        });
+                    egui::ComboBox::from_id_source("protection_verdict_filter")
+                        .selected_text(self.protection_verdict_filter.label())
+                        .show_ui(ui, |ui| {
+                            for filter in [
+                                crate::gui::state::ProtectionVerdictFilter::All,
+                                crate::gui::state::ProtectionVerdictFilter::Clean,
+                                crate::gui::state::ProtectionVerdictFilter::Suspicious,
+                                crate::gui::state::ProtectionVerdictFilter::Malicious,
+                                crate::gui::state::ProtectionVerdictFilter::Error,
+                                crate::gui::state::ProtectionVerdictFilter::None,
+                            ] {
+                                ui.selectable_value(
+                                    &mut self.protection_verdict_filter,
+                                    filter,
+                                    filter.label(),
+                                );
+                            }
+                        });
+                    egui::ComboBox::from_id_source("protection_action_filter")
+                        .selected_text(self.protection_action_filter.label())
+                        .show_ui(ui, |ui| {
+                            for filter in [
+                                crate::gui::state::ProtectionActionFilter::All,
+                                crate::gui::state::ProtectionActionFilter::Quarantined,
+                                crate::gui::state::ProtectionActionFilter::Restored,
+                                crate::gui::state::ProtectionActionFilter::Deleted,
+                                crate::gui::state::ProtectionActionFilter::Unknown,
+                                crate::gui::state::ProtectionActionFilter::None,
+                            ] {
+                                ui.selectable_value(
+                                    &mut self.protection_action_filter,
+                                    filter,
+                                    filter.label(),
+                                );
+                            }
+                        });
+                    if ui.button("Clear filters").clicked() {
+                        self.protection_event_search.clear();
+                        self.protection_kind_filter =
+                            crate::gui::state::ProtectionEventKindFilter::All;
+                        self.protection_file_filter =
+                            crate::gui::state::ProtectionFileClassFilter::All;
+                        self.protection_priority_filter =
+                            crate::gui::state::ProtectionPriorityFilter::All;
+                        self.protection_origin_filter =
+                            crate::gui::state::ProtectionOriginFilter::All;
+                        self.protection_verdict_filter =
+                            crate::gui::state::ProtectionVerdictFilter::All;
+                        self.protection_action_filter =
+                            crate::gui::state::ProtectionActionFilter::All;
+                    }
+                });
+
+                let protection_indices = self.filtered_protection_event_indices(100);
+                if protection_indices.is_empty() {
+                    ui.label("No protection events match the current filters.");
+                } else {
+                    egui::ScrollArea::vertical()
+                        .max_height(240.0)
+                        .show(ui, |ui| {
+                            for index in protection_indices {
+                                let event = &self.protection_events[index];
+                                ui.group(|ui| {
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.label(format!(
+                                            "{} | {} | {} | {}",
+                                            event.kind,
+                                            crate::gui::app::format_timestamp_compact(
+                                                event.timestamp_epoch
+                                            ),
+                                            event.workflow_source,
+                                            event.file_class.label()
+                                        ));
+                                        ui.label(format!(
+                                            "{} priority | {}",
+                                            event.priority.label(),
+                                            event.change_class.label()
+                                        ));
+                                    });
+                                    if !event.event_source.is_empty() {
+                                        ui.label(format!("Event source: {}", event.event_source));
+                                    }
+                                    ui.monospace(&event.path);
+                                    ui.label(&event.note);
+                                    ui.label(format!(
+                                        "{}{}{}",
+                                        if event.grouped_change_count > 1
+                                            || event.burst_window_seconds > 0
+                                        {
+                                            format!(
+                                                "Grouped {} change(s) across {}s",
+                                                event.grouped_change_count,
+                                                event.burst_window_seconds
+                                            )
+                                        } else {
+                                            "Single observed change".to_string()
+                                        },
+                                        event
+                                            .verdict
+                                            .as_deref()
+                                            .map(|verdict| format!(" | result {verdict}"))
+                                            .unwrap_or_default(),
+                                        event
+                                            .storage_state
+                                            .as_deref()
+                                            .map(|state| format!(" | action {state}"))
+                                            .unwrap_or_default()
+                                    ));
+                                });
+                            }
+                        });
+                }
+            });
+            ui.separator();
+        }
+
         let displayed_ids = indices
             .iter()
             .map(|&index| self.records[index].record_id())
@@ -82,7 +321,7 @@ impl MyApp {
             indices.len(),
             None,
             false,
-            "History mirrors the Results explorer while focusing on retained records and quarantine state.",
+            "Operations keeps the long-running audit view while Results stays focused on active triage.",
         );
         if toolbar.select_all_shown {
             self.selected_report_ids
@@ -99,7 +338,7 @@ impl MyApp {
             &indices,
             "No matching history items",
             "Run a scan or clear the quarantine-only toggle to see more operational history.",
-            "History is optimized for operational review. Restore and delete remain limited to quarantined files and always require confirmation.",
+            "Operations is optimized for audit review, quarantine handling, and automatic protection outcomes. Restore and delete remain limited to quarantined files and always require confirmation.",
         );
     }
 }

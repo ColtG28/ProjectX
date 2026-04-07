@@ -189,6 +189,17 @@ where
         );
     }
 
+    if ctx.config.features.enable_local_intelligence {
+        run_stage(
+            &mut ctx,
+            &mut progress,
+            &mut completed_steps,
+            total_steps,
+            "Evaluating local intelligence",
+            super::intelligence::run,
+        );
+    }
+
     if ctx.config.features.enable_yara {
         run_stage(
             &mut ctx,
@@ -646,6 +657,7 @@ fn pipeline_step_count(config: &ScanConfig) -> usize {
         + usize::from(config.features.enable_decode)
         + usize::from(config.features.enable_script_parsing)
         + usize::from(config.features.enable_format_analysis)
+        + usize::from(config.features.enable_local_intelligence)
         + usize::from(config.features.enable_yara)
         + usize::from(config.features.enable_emulation)
         + usize::from(config.features.enable_ml_scoring)

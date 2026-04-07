@@ -4,6 +4,7 @@ use super::office;
 pub enum FormatKind {
     Pe,
     Elf,
+    Macho,
     Pdf,
     Zip,
     Office,
@@ -18,6 +19,9 @@ pub fn kind(bytes: &[u8], extension: &str) -> FormatKind {
     }
     if bytes.starts_with(&[0x7f, b'E', b'L', b'F']) {
         return FormatKind::Elf;
+    }
+    if is_macho(bytes) {
+        return FormatKind::Macho;
     }
     if bytes.starts_with(b"%PDF") || ext == "pdf" {
         return FormatKind::Pdf;
@@ -58,6 +62,20 @@ fn looks_like_office_zip(bytes: &[u8]) -> bool {
         && (text.contains("[content_types].xml") || text.contains("vbaproject.bin"))
 }
 
+fn is_macho(bytes: &[u8]) -> bool {
+    matches!(
+        bytes.get(0..4),
+        Some([0xFE, 0xED, 0xFA, 0xCE])
+            | Some([0xCE, 0xFA, 0xED, 0xFE])
+            | Some([0xFE, 0xED, 0xFA, 0xCF])
+            | Some([0xCF, 0xFA, 0xED, 0xFE])
+            | Some([0xCA, 0xFE, 0xBA, 0xBE])
+            | Some([0xBE, 0xBA, 0xFE, 0xCA])
+            | Some([0xCA, 0xFE, 0xBA, 0xBF])
+            | Some([0xBF, 0xBA, 0xFE, 0xCA])
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{kind, FormatKind};
@@ -73,5 +91,17 @@ mod tests {
         let mut bytes = vec![0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
         bytes.extend_from_slice(b"WordDocument VBA");
         assert_eq!(kind(&bytes, "bin"), FormatKind::Office);
+    }
+
+    #[test]
+    fn detects_macho_headers() {
+        assert_eq!(
+            kind(&[0xCF, 0xFA, 0xED, 0xFE, 0, 0, 0, 0], "dylib"),
+            FormatKind::Macho
+        );
+        assert_eq!(
+            kind(&[0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 1], "macho"),
+            FormatKind::Macho
+        );
     }
 }

@@ -61,9 +61,45 @@ pub fn value(
             "warning_count": warning_count(ctx),
             "error_count": error_count(ctx),
             "signal_sources": signal_sources(ctx),
+            "intelligence_status": ctx
+                .intelligence
+                .as_ref()
+                .map(|summary| summary.external_intelligence_status.clone())
+                .unwrap_or_else(|| "disabled".to_string()),
+            "intelligence_store_version": ctx
+                .intelligence
+                .as_ref()
+                .and_then(|summary| summary.store_version.clone())
+                .unwrap_or_else(|| "none".to_string()),
+            "reputation_hit_count": ctx
+                .intelligence
+                .as_ref()
+                .map(|summary| summary.reputation_hits.len())
+                .unwrap_or(0),
+            "trust_reason_count": ctx
+                .intelligence
+                .as_ref()
+                .map(|summary| summary.trust_reasons.len())
+                .unwrap_or(0),
+            "trust_category_count": ctx
+                .intelligence
+                .as_ref()
+                .map(|summary| summary.trust_categories.len())
+                .unwrap_or(0),
+            "trust_ecosystem_count": ctx
+                .intelligence
+                .as_ref()
+                .map(|summary| summary.trust_ecosystems.len())
+                .unwrap_or(0),
+            "trust_vendor_count": ctx
+                .intelligence
+                .as_ref()
+                .map(|summary| summary.trust_vendors.len())
+                .unwrap_or(0),
         },
         "cache": ctx.cache,
         "emulation": ctx.emulation,
+        "intelligence": ctx.intelligence,
         "ml": ctx.ml_assessment,
         "threat_severity": ctx.threat_severity,
         "findings": ctx.findings.iter().map(|finding| serde_json::json!({

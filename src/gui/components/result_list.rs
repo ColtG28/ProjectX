@@ -1,7 +1,7 @@
 use eframe::egui;
 use egui::{Color32, RichText};
 
-use crate::gui::app::{format_bytes, format_elapsed_ms, format_timestamp_compact};
+use crate::gui::app::{format_elapsed_ms, format_timestamp_compact};
 use crate::gui::components::status_bar::{
     badge, count_badge, severity_color, signal_badge, storage_badge, verdict_color,
 };
@@ -38,7 +38,7 @@ pub fn render_result_row(
                     ),
                 );
                 ui.add_sized(
-                    [160.0, 0.0],
+                    [180.0, 0.0],
                     egui::Label::new(
                         RichText::new(record.display_name())
                             .strong()
@@ -111,11 +111,6 @@ pub fn render_result_row(
                             .color(Color32::from_rgb(200, 206, 212)),
                     );
                 }
-                ui.label(
-                    RichText::new(format_bytes(record.file_size_bytes))
-                        .size(11.0)
-                        .color(Color32::from_rgb(160, 168, 178)),
-                );
             });
         });
     inspect_clicked

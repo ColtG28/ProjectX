@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -8,6 +8,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use eframe::egui;
 use egui::{Align, Align2, CentralPanel, Layout, RichText, Sense, SidePanel, TopBottomPanel, Vec2};
+use notify::{
+    Config as NotifyConfig, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
+};
 use rfd::FileDialog;
 
 use super::components::empty_state::empty_state;
@@ -33,7 +36,8 @@ pub fn gui() -> Result<(), eframe::Error> {
 impl MyApp {
     pub fn new() -> Self {
         let persisted = load_history();
-        Self {
+        let settings = load_gui_settings();
+        let mut app = Self {
             current_page: Page::Analytics,
             menu_open: true,
             period: TimePeriod::Last7Days,
@@ -41,13 +45,21 @@ impl MyApp {
             records: persisted.records,
             timing_samples: persisted.timing_samples,
             job: Arc::new(Mutex::new(ScanJobState::default())),
-            settings: SettingsState::default(),
+            settings,
+            protection_path_input: String::new(),
             single_file_path: String::new(),
             report_search: String::new(),
             history_search: String::new(),
+            protection_event_search: String::new(),
             report_verdict_filter: ReportVerdictFilter::All,
             report_storage_filter: ReportStorageFilter::All,
             report_sort_order: ReportSortOrder::NewestFirst,
+            protection_kind_filter: ProtectionEventKindFilter::All,
+            protection_file_filter: ProtectionFileClassFilter::All,
+            protection_priority_filter: ProtectionPriorityFilter::All,
+            protection_origin_filter: ProtectionOriginFilter::All,
+            protection_verdict_filter: ProtectionVerdictFilter::All,
+            protection_action_filter: ProtectionActionFilter::All,
             history_quarantine_only: false,
             selected_report_ids: HashSet::new(),
             focused_report_id: None,
@@ -56,10 +68,19 @@ impl MyApp {
             base_pixels_per_point: None,
             last_applied_scale: None,
             ui_metrics: UiMetrics::default(),
+            last_protection_poll: Instant::now(),
+            protection_watch: HashMap::new(),
+            protection_events: load_protection_events(),
+            protection_backlog: load_protection_backlog(),
+            protection_monitor: ProtectionMonitorRuntime::default(),
+            protection_status: String::new(),
+            protection_summary: ProtectionSummary::default(),
             last_download_poll: Instant::now(),
             download_watch: HashMap::new(),
             download_status: String::new(),
-        }
+        };
+        app.refresh_protection_summary();
+        app
     }
 
     pub fn is_booting(&self) -> bool {
@@ -88,6 +109,8 @@ impl MyApp {
         config.features.enable_emulation = self.settings.enable_emulation;
         config.features.enable_runtime_yara = self.settings.enable_runtime_yara;
         config.features.enable_ml_scoring = self.settings.enable_ml_scoring;
+        config.features.enable_local_intelligence = self.settings.enable_local_intelligence;
+        config.features.enable_external_intelligence = self.settings.enable_external_intelligence;
         config
     }
 
@@ -195,6 +218,12 @@ impl MyApp {
                             snapshot.processed.min(snapshot.total),
                             snapshot.total
                         )
+                    } else if self.settings.enable_real_time_protection {
+                        if self.protection_summary.active_status.is_empty() {
+                            "Protection active".to_string()
+                        } else {
+                            self.protection_summary.active_status.clone()
+                        }
                     } else if !self.download_status.is_empty() {
                         self.download_status.clone()
                     } else {
@@ -590,7 +619,14 @@ impl MyApp {
             return;
         };
 
-        render_result_detail(ui, self.ui_metrics.scale_factor, &record);
+        let protection_event = self.protection_events.iter().rev().find(|event| {
+            event.scan_id.as_deref() == Some(record.record_id().as_str())
+                || (!event.path.is_empty()
+                    && event.path == record.path
+                    && event.workflow_source == record.workflow_origin.clone().unwrap_or_default())
+        });
+
+        render_result_detail(ui, self.ui_metrics.scale_factor, &record, protection_event);
     }
 
     fn hydrate_focused_record_from_report(&mut self) {
@@ -680,6 +716,47 @@ impl MyApp {
         indices.into_iter().take(limit).collect()
     }
 
+    pub(crate) fn filtered_protection_event_indices(&self, limit: usize) -> Vec<usize> {
+        let query = self.protection_event_search.trim().to_ascii_lowercase();
+        let mut indices = (0..self.protection_events.len())
+            .filter(|&index| {
+                let event = &self.protection_events[index];
+                self.protection_kind_filter.matches(&event.kind)
+                    && self.protection_file_filter.matches(event.file_class)
+                    && self.protection_priority_filter.matches(event.priority)
+                    && self
+                        .protection_origin_filter
+                        .matches(&event.workflow_source)
+                    && self
+                        .protection_verdict_filter
+                        .matches(event.verdict.as_deref())
+                    && self
+                        .protection_action_filter
+                        .matches(event.storage_state.as_deref())
+                    && (query.is_empty()
+                        || event.path.to_ascii_lowercase().contains(&query)
+                        || event.note.to_ascii_lowercase().contains(&query)
+                        || event.workflow_source.to_ascii_lowercase().contains(&query)
+                        || event.kind.to_ascii_lowercase().contains(&query)
+                        || event
+                            .verdict
+                            .as_deref()
+                            .unwrap_or_default()
+                            .to_ascii_lowercase()
+                            .contains(&query)
+                        || event
+                            .storage_state
+                            .as_deref()
+                            .unwrap_or_default()
+                            .to_ascii_lowercase()
+                            .contains(&query))
+            })
+            .collect::<Vec<_>>();
+        indices
+            .sort_by_key(|&index| std::cmp::Reverse(self.protection_events[index].timestamp_epoch));
+        indices.into_iter().take(limit).collect()
+    }
+
     fn poll_finished_job(&mut self) {
         let mut maybe_records = Vec::new();
         let mut maybe_timing_samples = Vec::new();
@@ -693,6 +770,38 @@ impl MyApp {
         }
 
         if !maybe_records.is_empty() || !maybe_timing_samples.is_empty() {
+            for record in &maybe_records {
+                if let Some(origin) = record.workflow_origin.as_deref() {
+                    if origin == ScanOrigin::RealTimeProtection.label()
+                        || origin == ScanOrigin::DownloadMonitor.label()
+                    {
+                        self.record_protection_event(ProtectionEventInput {
+                            kind: ProtectionEventKind::Completed,
+                            path: record.path.clone(),
+                            note: format!(
+                                "Automatic scan completed with {} and {}.",
+                                record.verdict.label(),
+                                record.resolved_storage_state().label()
+                            ),
+                            workflow_source: origin.to_string(),
+                            event_source: "Automatic scan result".to_string(),
+                            verdict: Some(record.verdict.label().to_string()),
+                            storage_state: Some(
+                                record.resolved_storage_state().label().to_string(),
+                            ),
+                            scan_id: Some(record.record_id()),
+                            grouped_change_count: 1,
+                            burst_window_seconds: 0,
+                            change_class: ProtectionChangeClass::Modified,
+                            file_class: classify_protection_file(Path::new(&record.path)),
+                            priority: classify_protection_priority(
+                                Path::new(&record.path),
+                                classify_protection_file(Path::new(&record.path)),
+                            ),
+                        });
+                    }
+                }
+            }
             self.records.extend(maybe_records);
             self.timing_samples.extend(maybe_timing_samples);
             trim_timing_samples(&mut self.timing_samples);
@@ -722,7 +831,7 @@ impl MyApp {
         }
 
         let mut seen = HashSet::new();
-        let mut queued = 0usize;
+        let mut queued_targets = Vec::new();
         let now = now_epoch();
         let active_candidates = collect_active_downloads(&downloads_dir);
         for path in active_candidates {
@@ -742,18 +851,38 @@ impl MyApp {
 
             if grew && changed_recently {
                 if let Some(target) = build_download_snapshot_target(&path, size) {
-                    queued += 1;
                     entry.last_scanned_size = size;
-                    self.start_scan(vec![target]);
+                    queued_targets.push(target);
                 }
             }
         }
 
         self.download_watch.retain(|path, _| seen.contains(path));
-        self.download_status = if queued > 0 {
+        if !queued_targets.is_empty() {
+            self.start_scan(queued_targets.clone());
+            for target in &queued_targets {
+                self.record_protection_event(ProtectionEventInput {
+                    kind: ProtectionEventKind::Queued,
+                    path: target.path.to_string_lossy().to_string(),
+                    note: "Captured an in-progress download snapshot for passive scanning."
+                        .to_string(),
+                    workflow_source: target.origin.label().to_string(),
+                    event_source: "Download snapshot".to_string(),
+                    verdict: None,
+                    storage_state: None,
+                    scan_id: None,
+                    grouped_change_count: 1,
+                    burst_window_seconds: 0,
+                    change_class: ProtectionChangeClass::Modified,
+                    file_class: target.file_class,
+                    priority: target.priority,
+                });
+            }
+        }
+        self.download_status = if !queued_targets.is_empty() {
             format!(
                 "Queued {} download snapshot(s) from {}.",
-                queued,
+                queued_targets.len(),
                 downloads_dir.display()
             )
         } else if seen.is_empty() {
@@ -761,6 +890,774 @@ impl MyApp {
         } else {
             format!("Watching {} active download(s).", seen.len())
         };
+    }
+
+    fn ensure_protection_monitor(&mut self) {
+        let signature = protection_watch_signature(&self.settings.watched_paths);
+        if !self.settings.enable_real_time_protection {
+            self.protection_monitor = ProtectionMonitorRuntime::default();
+            return;
+        }
+
+        if self.settings.watched_paths.is_empty() {
+            self.protection_monitor.mode = ProtectionMonitorMode::Disabled;
+            self.protection_monitor.signature = signature;
+            self.protection_monitor.source_label = os_event_source_label().to_string();
+            self.protection_monitor.health_note =
+                "Protection is enabled, but no watched paths are configured.".to_string();
+            self.protection_monitor.last_error = None;
+            self.protection_monitor.receiver = None;
+            self.protection_monitor.watcher = None;
+            return;
+        }
+
+        if self.protection_monitor.mode == ProtectionMonitorMode::EventDriven
+            && self.protection_monitor.signature == signature
+            && self.protection_monitor.watcher.is_some()
+        {
+            return;
+        }
+
+        let (tx, rx) = crossbeam_channel::unbounded();
+        match create_os_protection_watcher(&self.settings.watched_paths, tx) {
+            Ok(watcher) => {
+                self.protection_monitor = ProtectionMonitorRuntime {
+                    mode: ProtectionMonitorMode::EventDriven,
+                    signature,
+                    source_label: os_event_source_label().to_string(),
+                    health_note: format!(
+                        "Watching {} path(s) using {}.",
+                        self.settings.watched_paths.len(),
+                        os_event_source_label()
+                    ),
+                    last_error: None,
+                    receiver: Some(rx),
+                    watcher: Some(watcher),
+                };
+            }
+            Err(error) => {
+                self.protection_monitor = ProtectionMonitorRuntime {
+                    mode: ProtectionMonitorMode::PollingFallback,
+                    signature,
+                    source_label: "Polling fallback".to_string(),
+                    health_note:
+                        "OS event monitoring is unavailable; using grouped polling fallback."
+                            .to_string(),
+                    last_error: Some(error),
+                    receiver: None,
+                    watcher: None,
+                };
+            }
+        }
+    }
+
+    fn process_protection_monitor(&mut self) {
+        match self.protection_monitor.mode {
+            ProtectionMonitorMode::Disabled => {
+                self.protection_watch.clear();
+                self.protection_status.clear();
+                self.refresh_protection_summary();
+            }
+            ProtectionMonitorMode::PollingFallback => self.poll_real_time_protection(),
+            ProtectionMonitorMode::EventDriven => self.drain_protection_monitor_events(),
+        }
+    }
+
+    fn drain_protection_monitor_events(&mut self) {
+        if !self.settings.enable_real_time_protection {
+            return;
+        }
+        let watched = self
+            .settings
+            .watched_paths
+            .iter()
+            .filter(|entry| !entry.path.trim().is_empty())
+            .cloned()
+            .collect::<Vec<_>>();
+        if watched.is_empty() {
+            self.protection_status =
+                "Protection enabled, but no watched folders or files are configured.".to_string();
+            self.refresh_protection_summary();
+            return;
+        }
+
+        let Some(receiver) = self.protection_monitor.receiver.clone() else {
+            self.protection_monitor.mode = ProtectionMonitorMode::PollingFallback;
+            self.protection_monitor.health_note =
+                "OS event stream was unavailable; using polling fallback.".to_string();
+            self.poll_real_time_protection();
+            return;
+        };
+
+        let mut messages = Vec::new();
+        while messages.len() < 512 {
+            match receiver.try_recv() {
+                Ok(message) => messages.push(message),
+                Err(crossbeam_channel::TryRecvError::Empty) => break,
+                Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                    self.protection_monitor.mode = ProtectionMonitorMode::PollingFallback;
+                    self.protection_monitor.health_note =
+                        "OS event stream disconnected; using polling fallback.".to_string();
+                    self.protection_monitor.last_error =
+                        Some("Watcher channel disconnected".to_string());
+                    self.poll_real_time_protection();
+                    return;
+                }
+            }
+        }
+
+        if messages.is_empty() {
+            self.protection_status = format!(
+                "Protection active using {} across {} watched path(s).",
+                self.protection_monitor.source_label,
+                watched.len()
+            );
+            self.refresh_protection_summary();
+            return;
+        }
+
+        let mut changed_targets = HashMap::<String, ScanTarget>::new();
+        let mut throttled = 0usize;
+        let mut deferred = 0usize;
+        let mut skipped = 0usize;
+        let queue_backlog = self
+            .job
+            .lock()
+            .map(|job| job.pending_targets.len())
+            .unwrap_or_default();
+        let pending_paths = self
+            .job
+            .lock()
+            .map(|job| {
+                job.pending_targets
+                    .iter()
+                    .map(|target| target.path.clone())
+                    .collect::<HashSet<_>>()
+            })
+            .unwrap_or_default();
+        let queue_capacity = self
+            .settings
+            .max_files_per_bulk_scan
+            .saturating_mul(20)
+            .max(200);
+        let now = now_epoch();
+
+        for message in messages {
+            match message {
+                ProtectionMonitorMessage::Error(error) => {
+                    self.protection_monitor.last_error = Some(error.clone());
+                    self.protection_monitor.health_note =
+                        "OS event monitor reported an error; protection will keep using the last healthy configuration."
+                            .to_string();
+                    self.record_protection_event(ProtectionEventInput {
+                        kind: ProtectionEventKind::Error,
+                        path: "(watcher)".to_string(),
+                        note: error,
+                        workflow_source: ScanOrigin::RealTimeProtection.label().to_string(),
+                        event_source: self.protection_monitor.source_label.clone(),
+                        verdict: None,
+                        storage_state: None,
+                        scan_id: None,
+                        grouped_change_count: 1,
+                        burst_window_seconds: 0,
+                        change_class: ProtectionChangeClass::Modified,
+                        file_class: ProtectionFileClass::Other,
+                        priority: ProtectionPriority::Normal,
+                    });
+                }
+                ProtectionMonitorMessage::Event(event) => {
+                    if !is_path_watched(&watched, &event.path) {
+                        continue;
+                    }
+                    let Ok(metadata) = fs::metadata(&event.path) else {
+                        continue;
+                    };
+                    if !metadata.is_file() {
+                        continue;
+                    }
+                    let path_string = event.path.to_string_lossy().to_string();
+                    let file_class = classify_protection_file(&event.path);
+                    let priority = classify_protection_priority(&event.path, file_class);
+                    let target = changed_targets
+                        .entry(path_string)
+                        .or_insert_with(|| ScanTarget {
+                            path: event.path.clone(),
+                            last_modified_epoch: metadata
+                                .modified()
+                                .ok()
+                                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                                .map(|duration| duration.as_secs())
+                                .unwrap_or(now),
+                            size_bytes: metadata.len(),
+                            origin: ScanOrigin::RealTimeProtection,
+                            priority,
+                            file_class,
+                            grouped_change_count: 0,
+                            burst_window_seconds: 0,
+                            change_class: event.change_class,
+                        });
+                    target.last_modified_epoch = target.last_modified_epoch.max(
+                        metadata
+                            .modified()
+                            .ok()
+                            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                            .map(|duration| duration.as_secs())
+                            .unwrap_or(now),
+                    );
+                    target.size_bytes = metadata.len();
+                    target.priority = target.priority.max(priority);
+                    target.file_class = file_class;
+                    target.grouped_change_count = target.grouped_change_count.saturating_add(1);
+                    target.change_class =
+                        if matches!(target.change_class, ProtectionChangeClass::Replaced)
+                            || matches!(event.change_class, ProtectionChangeClass::Replaced)
+                        {
+                            ProtectionChangeClass::Replaced
+                        } else if matches!(target.change_class, ProtectionChangeClass::Created)
+                            || matches!(event.change_class, ProtectionChangeClass::Created)
+                        {
+                            ProtectionChangeClass::Created
+                        } else {
+                            ProtectionChangeClass::Modified
+                        };
+                }
+            }
+        }
+
+        let mut queued_targets = Vec::new();
+        for (key, mut discovered) in changed_targets {
+            let entry = self.protection_watch.entry(key.clone()).or_default();
+            if entry.grouped_change_count == 0 {
+                entry.burst_started_epoch = now;
+            }
+            entry.burst_last_epoch = now;
+            entry.grouped_change_count = entry
+                .grouped_change_count
+                .saturating_add(discovered.grouped_change_count.max(1));
+            entry.last_change_class = discovered.change_class;
+            entry.modified_epoch = discovered.last_modified_epoch;
+            entry.size_bytes = discovered.size_bytes;
+            discovered.grouped_change_count = entry.grouped_change_count.max(1);
+            discovered.burst_window_seconds = entry
+                .burst_last_epoch
+                .saturating_sub(entry.burst_started_epoch);
+
+            if should_skip_as_noise(&discovered) {
+                skipped += 1;
+                entry.needs_rescan = false;
+                entry.grouped_change_count = 0;
+                entry.burst_started_epoch = 0;
+                entry.burst_last_epoch = 0;
+                self.record_protection_event(ProtectionEventInput {
+                    kind: ProtectionEventKind::Skipped,
+                    path: key.clone(),
+                    note: "Skipped a low-value temp/cache change because it matched passive noise heuristics."
+                        .to_string(),
+                    workflow_source: ScanOrigin::RealTimeProtection.label().to_string(),
+                    event_source: self.protection_monitor.source_label.clone(),
+                    verdict: None,
+                    storage_state: None,
+                    scan_id: None,
+                    grouped_change_count: discovered.grouped_change_count,
+                    burst_window_seconds: discovered.burst_window_seconds,
+                    change_class: discovered.change_class,
+                    file_class: discovered.file_class,
+                    priority: discovered.priority,
+                });
+                continue;
+            }
+
+            let cooldown = per_file_cooldown(&discovered);
+            let should_throttle = entry.last_queued_epoch != 0
+                && now.saturating_sub(entry.last_queued_epoch) < cooldown.as_secs();
+            if should_throttle {
+                throttled += 1;
+                self.record_protection_event(ProtectionEventInput {
+                    kind: ProtectionEventKind::Throttled,
+                    path: key.clone(),
+                    note: "Grouped rapid OS file events into the active protection burst instead of queueing another scan immediately."
+                        .to_string(),
+                    workflow_source: ScanOrigin::RealTimeProtection.label().to_string(),
+                    event_source: self.protection_monitor.source_label.clone(),
+                    verdict: None,
+                    storage_state: None,
+                    scan_id: None,
+                    grouped_change_count: discovered.grouped_change_count,
+                    burst_window_seconds: discovered.burst_window_seconds,
+                    change_class: discovered.change_class,
+                    file_class: discovered.file_class,
+                    priority: discovered.priority,
+                });
+                continue;
+            }
+
+            let queue_busy = queue_backlog + queued_targets.len() >= queue_capacity;
+            let already_queued = queued_targets
+                .iter()
+                .any(|target: &ScanTarget| target.path == discovered.path)
+                || pending_paths.contains(&discovered.path);
+            if queue_busy {
+                deferred += 1;
+                entry.last_queued_epoch = now;
+                entry.needs_rescan = false;
+                entry.grouped_change_count = 0;
+                entry.burst_started_epoch = 0;
+                entry.burst_last_epoch = 0;
+                self.defer_protection_target(
+                    discovered.clone(),
+                    "Deferred protection scan because the event-driven queue is busy; the latest file snapshot will be retried when load drops.",
+                    ProtectionEventKind::Deferred,
+                );
+                continue;
+            }
+            if already_queued {
+                deferred += 1;
+                entry.last_queued_epoch = now;
+                entry.needs_rescan = false;
+                entry.grouped_change_count = 0;
+                entry.burst_started_epoch = 0;
+                entry.burst_last_epoch = 0;
+                self.defer_protection_target(
+                    discovered.clone(),
+                    "Grouped additional OS file events into a deferred follow-up because this file already has an active protection scan queued.",
+                    ProtectionEventKind::Deferred,
+                );
+                continue;
+            }
+
+            entry.last_queued_epoch = now;
+            entry.needs_rescan = false;
+            entry.grouped_change_count = 0;
+            entry.burst_started_epoch = 0;
+            entry.burst_last_epoch = 0;
+            queued_targets.push(discovered.clone());
+            self.record_protection_event(ProtectionEventInput {
+                kind: ProtectionEventKind::Queued,
+                path: key.clone(),
+                note: queued_event_note(
+                    discovered.change_class,
+                    discovered.grouped_change_count,
+                    discovered.file_class,
+                ),
+                workflow_source: ScanOrigin::RealTimeProtection.label().to_string(),
+                event_source: self.protection_monitor.source_label.clone(),
+                verdict: None,
+                storage_state: None,
+                scan_id: None,
+                grouped_change_count: discovered.grouped_change_count,
+                burst_window_seconds: discovered.burst_window_seconds,
+                change_class: discovered.change_class,
+                file_class: discovered.file_class,
+                priority: discovered.priority,
+            });
+        }
+
+        let queued_count = queued_targets.len();
+        if !queued_targets.is_empty() {
+            self.start_scan(queued_targets);
+        }
+        self.protection_status = format!(
+            "Protection active using {} across {} watched path(s), queued {} grouped event(s){}{}{}.",
+            self.protection_monitor.source_label,
+            watched.len(),
+            queued_count,
+            if throttled > 0 {
+                format!(", throttled {}", throttled)
+            } else {
+                String::new()
+            },
+            if deferred > 0 {
+                format!(", deferred {}", deferred)
+            } else {
+                String::new()
+            },
+            if skipped > 0 {
+                format!(", skipped {}", skipped)
+            } else {
+                String::new()
+            }
+        );
+        self.refresh_protection_summary();
+    }
+
+    fn poll_real_time_protection(&mut self) {
+        if !self.settings.enable_real_time_protection {
+            self.protection_watch.clear();
+            self.protection_status.clear();
+            self.refresh_protection_summary();
+            return;
+        }
+
+        if self.last_protection_poll.elapsed() < Duration::from_millis(1800) {
+            return;
+        }
+        self.last_protection_poll = Instant::now();
+
+        let watched = self
+            .settings
+            .watched_paths
+            .iter()
+            .filter(|entry| !entry.path.trim().is_empty())
+            .cloned()
+            .collect::<Vec<_>>();
+        if watched.is_empty() {
+            self.protection_status =
+                "Protection enabled, but no watched folders or files are configured.".to_string();
+            self.refresh_protection_summary();
+            return;
+        }
+
+        let max_files = self
+            .settings
+            .max_files_per_bulk_scan
+            .saturating_mul(40)
+            .clamp(200, 5_000);
+        let now = now_epoch();
+        let mut seen_paths = HashSet::new();
+        let mut queued_targets = Vec::new();
+        let mut throttled = 0usize;
+        let mut deferred = 0usize;
+        let mut skipped = 0usize;
+        let queue_backlog = self
+            .job
+            .lock()
+            .map(|job| job.pending_targets.len())
+            .unwrap_or_default();
+        let pending_paths = self
+            .job
+            .lock()
+            .map(|job| {
+                job.pending_targets
+                    .iter()
+                    .map(|target| target.path.clone())
+                    .collect::<HashSet<_>>()
+            })
+            .unwrap_or_default();
+        let queue_capacity = self
+            .settings
+            .max_files_per_bulk_scan
+            .saturating_mul(20)
+            .max(200);
+
+        for watched_path in watched {
+            let mut queued_for_path = 0usize;
+            let path_limit = watched_path_rate_limit(&watched_path.path);
+            for discovered in collect_protection_targets(&watched_path, max_files) {
+                let key = discovered.path.to_string_lossy().to_string();
+                seen_paths.insert(key.clone());
+
+                let (changed, change_class, grouped_change_count, burst_window_seconds) = {
+                    let entry = self.protection_watch.entry(key.clone()).or_default();
+                    let changed = entry.needs_rescan
+                        || entry.modified_epoch != discovered.last_modified_epoch
+                        || entry.size_bytes != discovered.size_bytes;
+                    let change_class = if changed {
+                        classify_change(entry, &discovered)
+                    } else {
+                        entry.last_change_class
+                    };
+
+                    if changed {
+                        if entry.grouped_change_count == 0 {
+                            entry.burst_started_epoch = now;
+                        }
+                        entry.burst_last_epoch = now;
+                        entry.grouped_change_count = entry.grouped_change_count.saturating_add(1);
+                        entry.last_change_class = change_class;
+                        entry.needs_rescan = true;
+                    }
+                    entry.modified_epoch = discovered.last_modified_epoch;
+                    entry.size_bytes = discovered.size_bytes;
+                    (
+                        changed,
+                        change_class,
+                        entry.grouped_change_count.max(1),
+                        entry
+                            .burst_last_epoch
+                            .saturating_sub(entry.burst_started_epoch),
+                    )
+                };
+
+                if !changed {
+                    continue;
+                }
+
+                let mut discovered = discovered;
+                discovered.grouped_change_count = grouped_change_count;
+                discovered.burst_window_seconds = burst_window_seconds;
+                discovered.change_class = change_class;
+
+                if should_skip_as_noise(&discovered) {
+                    skipped += 1;
+                    if let Some(entry) = self.protection_watch.get_mut(&key) {
+                        entry.needs_rescan = false;
+                        entry.grouped_change_count = 0;
+                        entry.burst_started_epoch = 0;
+                        entry.burst_last_epoch = 0;
+                    }
+                    self.record_protection_event(ProtectionEventInput {
+                        kind: ProtectionEventKind::Skipped,
+                        path: key.clone(),
+                        note: "Skipped a low-value temp/cache change because it matched passive noise heuristics."
+                            .to_string(),
+                        workflow_source: ScanOrigin::RealTimeProtection.label().to_string(),
+                        event_source: "Polling fallback".to_string(),
+                        verdict: None,
+                        storage_state: None,
+                        scan_id: None,
+                        grouped_change_count,
+                        burst_window_seconds,
+                        change_class,
+                        file_class: discovered.file_class,
+                        priority: discovered.priority,
+                    });
+                    continue;
+                }
+
+                let cooldown = per_file_cooldown(&discovered);
+                let should_throttle = self.protection_watch.get(&key).is_some_and(|entry| {
+                    entry.last_queued_epoch != 0
+                        && now.saturating_sub(entry.last_queued_epoch) < cooldown.as_secs()
+                });
+                let over_path_limit = queued_for_path >= path_limit;
+                let queue_busy = queue_backlog + queued_targets.len() >= queue_capacity;
+                let already_queued = queued_targets
+                    .iter()
+                    .any(|target: &ScanTarget| target.path == discovered.path)
+                    || pending_paths.contains(&discovered.path);
+
+                if should_throttle {
+                    throttled += 1;
+                    self.record_protection_event(ProtectionEventInput {
+                        kind: ProtectionEventKind::Throttled,
+                        path: key.clone(),
+                        note: "Grouped rapid repeat file changes into the active protection burst instead of queueing another scan immediately."
+                            .to_string(),
+                        workflow_source: ScanOrigin::RealTimeProtection.label().to_string(),
+                        event_source: "Polling fallback".to_string(),
+                        verdict: None,
+                        storage_state: None,
+                        scan_id: None,
+                        grouped_change_count,
+                        burst_window_seconds,
+                        change_class,
+                        file_class: discovered.file_class,
+                        priority: discovered.priority,
+                    });
+                    continue;
+                }
+
+                if over_path_limit || queue_busy || already_queued {
+                    deferred += 1;
+                    if let Some(entry) = self.protection_watch.get_mut(&key) {
+                        entry.last_queued_epoch = now;
+                        entry.needs_rescan = false;
+                        entry.grouped_change_count = 0;
+                        entry.burst_started_epoch = 0;
+                        entry.burst_last_epoch = 0;
+                    }
+                    let note = if already_queued {
+                        "Grouped additional changes into a deferred follow-up because this file already has an active protection scan queued."
+                    } else if queue_busy {
+                        "Deferred protection scan because the queue is busy; the latest file snapshot will be retried when load drops."
+                    } else {
+                        "Deferred extra changes for this watched path into the protection backlog to avoid flooding the active queue."
+                    };
+                    self.defer_protection_target(
+                        discovered.clone(),
+                        note,
+                        ProtectionEventKind::Deferred,
+                    );
+                    continue;
+                }
+
+                if let Some(entry) = self.protection_watch.get_mut(&key) {
+                    entry.last_queued_epoch = now;
+                    entry.needs_rescan = false;
+                    entry.grouped_change_count = 0;
+                    entry.burst_started_epoch = 0;
+                    entry.burst_last_epoch = 0;
+                }
+                queued_for_path = queued_for_path.saturating_add(1);
+                queued_targets.push(discovered.clone());
+                self.record_protection_event(ProtectionEventInput {
+                    kind: ProtectionEventKind::Queued,
+                    path: key.clone(),
+                    note: queued_event_note(
+                        change_class,
+                        grouped_change_count,
+                        discovered.file_class,
+                    ),
+                    workflow_source: ScanOrigin::RealTimeProtection.label().to_string(),
+                    event_source: "Polling fallback".to_string(),
+                    verdict: None,
+                    storage_state: None,
+                    scan_id: None,
+                    grouped_change_count,
+                    burst_window_seconds,
+                    change_class,
+                    file_class: discovered.file_class,
+                    priority: discovered.priority,
+                });
+            }
+        }
+
+        self.protection_watch
+            .retain(|path, _| seen_paths.contains(path));
+
+        let queued_count = queued_targets.len();
+        if !queued_targets.is_empty() {
+            self.start_scan(queued_targets);
+        }
+
+        self.protection_status = format!(
+            "Protection watching {} location(s), tracking {} file(s), queued {} grouped event(s){}{}{}.",
+            self.settings.watched_paths.len(),
+            self.protection_watch.len(),
+            queued_count,
+            if throttled > 0 {
+                format!(", throttled {}", throttled)
+            } else {
+                String::new()
+            },
+            if deferred > 0 {
+                format!(", deferred {}", deferred)
+            } else {
+                String::new()
+            },
+            if skipped > 0 {
+                format!(", skipped {}", skipped)
+            } else {
+                String::new()
+            }
+        );
+        self.refresh_protection_summary();
+    }
+
+    fn defer_protection_target(
+        &mut self,
+        target: ScanTarget,
+        note: &str,
+        kind: ProtectionEventKind,
+    ) {
+        if let Some(existing) = self
+            .protection_backlog
+            .iter_mut()
+            .find(|queued| queued.path == target.path)
+        {
+            existing.last_modified_epoch =
+                existing.last_modified_epoch.max(target.last_modified_epoch);
+            existing.size_bytes = target.size_bytes;
+            existing.priority = existing.priority.max(target.priority);
+            existing.file_class = target.file_class;
+            existing.grouped_change_count = existing
+                .grouped_change_count
+                .saturating_add(target.grouped_change_count.max(1));
+            existing.burst_window_seconds = existing
+                .burst_window_seconds
+                .max(target.burst_window_seconds);
+            existing.change_class = target.change_class;
+        } else {
+            self.protection_backlog.push_back(target.clone());
+        }
+        save_protection_backlog(&self.protection_backlog);
+        self.record_protection_event(ProtectionEventInput {
+            kind,
+            path: target.path.to_string_lossy().to_string(),
+            note: note.to_string(),
+            workflow_source: target.origin.label().to_string(),
+            event_source: if matches!(
+                self.protection_monitor.mode,
+                ProtectionMonitorMode::EventDriven
+            ) {
+                self.protection_monitor.source_label.clone()
+            } else {
+                "Polling fallback".to_string()
+            },
+            verdict: None,
+            storage_state: None,
+            scan_id: None,
+            grouped_change_count: target.grouped_change_count.max(1),
+            burst_window_seconds: target.burst_window_seconds,
+            change_class: target.change_class,
+            file_class: target.file_class,
+            priority: target.priority,
+        });
+    }
+
+    fn drain_protection_backlog(&mut self) {
+        if !self.settings.enable_real_time_protection || self.protection_backlog.is_empty() {
+            return;
+        }
+        let queue_backlog = self
+            .job
+            .lock()
+            .map(|job| job.pending_targets.len())
+            .unwrap_or_default();
+        let queue_capacity = self
+            .settings
+            .max_files_per_bulk_scan
+            .saturating_mul(20)
+            .max(200);
+        let pending_paths = self
+            .job
+            .lock()
+            .map(|job| {
+                job.pending_targets
+                    .iter()
+                    .map(|target| target.path.clone())
+                    .collect::<HashSet<_>>()
+            })
+            .unwrap_or_default();
+        let available = queue_capacity.saturating_sub(queue_backlog);
+        if available == 0 {
+            self.refresh_protection_summary();
+            return;
+        }
+
+        let mut resumed = Vec::new();
+        let retry_budget = available.min(24);
+        while resumed.len() < retry_budget {
+            let Some(index) =
+                highest_priority_backlog_index(&self.protection_backlog, &pending_paths)
+            else {
+                break;
+            };
+            let Some(target) = self.protection_backlog.remove(index) else {
+                break;
+            };
+            resumed.push(target);
+        }
+        if resumed.is_empty() {
+            return;
+        }
+        save_protection_backlog(&self.protection_backlog);
+        for target in &resumed {
+            self.record_protection_event(ProtectionEventInput {
+                kind: ProtectionEventKind::Queued,
+                path: target.path.to_string_lossy().to_string(),
+                note: "Queued a previously deferred protection event after queue pressure dropped."
+                    .to_string(),
+                workflow_source: target.origin.label().to_string(),
+                event_source: if matches!(
+                    self.protection_monitor.mode,
+                    ProtectionMonitorMode::EventDriven
+                ) {
+                    self.protection_monitor.source_label.clone()
+                } else {
+                    "Polling fallback".to_string()
+                },
+                verdict: None,
+                storage_state: None,
+                scan_id: None,
+                grouped_change_count: target.grouped_change_count.max(1),
+                burst_window_seconds: target.burst_window_seconds,
+                change_class: target.change_class,
+                file_class: target.file_class,
+                priority: target.priority,
+            });
+        }
+        self.start_scan(resumed);
     }
 
     fn remove_report_files(&self, report_path: Option<&str>) -> bool {
@@ -859,6 +1756,247 @@ impl MyApp {
         });
     }
 
+    pub(crate) fn add_watched_path(&mut self, path: PathBuf, recursive: bool) {
+        let normalized = path.to_string_lossy().to_string();
+        if normalized.is_empty() {
+            return;
+        }
+        if self
+            .settings
+            .watched_paths
+            .iter()
+            .any(|entry| entry.path == normalized)
+        {
+            self.status_message = "That path is already being watched.".to_string();
+            return;
+        }
+        self.settings.watched_paths.push(WatchedPathConfig {
+            path: normalized.clone(),
+            recursive,
+        });
+        save_gui_settings(&self.settings);
+        self.refresh_protection_summary();
+        self.status_message = format!("Added watched path: {normalized}");
+    }
+
+    pub(crate) fn remove_watched_path(&mut self, path: &str) {
+        self.settings
+            .watched_paths
+            .retain(|entry| entry.path != path);
+        self.protection_watch
+            .retain(|tracked, _| !tracked.starts_with(path));
+        self.protection_backlog
+            .retain(|target| !target.path.to_string_lossy().starts_with(path));
+        save_protection_backlog(&self.protection_backlog);
+        save_gui_settings(&self.settings);
+        self.refresh_protection_summary();
+        self.status_message = format!("Removed watched path: {path}");
+    }
+
+    fn record_protection_event(&mut self, input: ProtectionEventInput) {
+        let timestamp = now_epoch();
+        let kind_label = input.kind.label().to_string();
+        if let Some(existing) = self.protection_events.iter_mut().rev().find(|event| {
+            event.path == input.path
+                && event.kind == kind_label
+                && event.workflow_source == input.workflow_source
+                && event.event_source == input.event_source
+                && timestamp.saturating_sub(event.timestamp_epoch) <= 10
+        }) {
+            existing.timestamp_epoch = timestamp;
+            existing.grouped_change_count = existing
+                .grouped_change_count
+                .max(1)
+                .saturating_add(input.grouped_change_count.saturating_sub(1));
+            existing.burst_window_seconds = existing
+                .burst_window_seconds
+                .max(input.burst_window_seconds);
+            existing.note = input.note;
+            existing.event_source = input.event_source;
+            existing.change_class = input.change_class;
+            existing.file_class = input.file_class;
+            existing.priority = input.priority;
+            if let Some(verdict) = input.verdict {
+                existing.verdict = Some(verdict);
+            }
+            if let Some(storage_state) = input.storage_state {
+                existing.storage_state = Some(storage_state);
+            }
+            if input.scan_id.is_some() {
+                existing.scan_id = input.scan_id;
+            }
+        } else {
+            self.protection_events.push(ProtectionEvent {
+                id: format!("{}::{}", timestamp, input.path),
+                timestamp_epoch: timestamp,
+                path: input.path,
+                kind: kind_label,
+                note: input.note,
+                workflow_source: input.workflow_source,
+                event_source: input.event_source,
+                verdict: input.verdict,
+                storage_state: input.storage_state,
+                scan_id: input.scan_id,
+                grouped_change_count: input.grouped_change_count.max(1),
+                burst_window_seconds: input.burst_window_seconds,
+                change_class: input.change_class,
+                file_class: input.file_class,
+                priority: input.priority,
+            });
+        }
+        trim_protection_events(&mut self.protection_events);
+        save_protection_events(&self.protection_events);
+        self.refresh_protection_summary();
+    }
+
+    pub(crate) fn refresh_protection_summary(&mut self) {
+        let queued_event_count = self
+            .protection_events
+            .iter()
+            .filter(|event| event.kind == ProtectionEventKind::Queued.label())
+            .count();
+        let deferred_event_count = self
+            .protection_events
+            .iter()
+            .filter(|event| event.kind == ProtectionEventKind::Deferred.label())
+            .count();
+        let throttled_event_count = self
+            .protection_events
+            .iter()
+            .filter(|event| event.kind == ProtectionEventKind::Throttled.label())
+            .count();
+        let skipped_event_count = self
+            .protection_events
+            .iter()
+            .filter(|event| event.kind == ProtectionEventKind::Skipped.label())
+            .count();
+        let queue_capacity = self
+            .settings
+            .max_files_per_bulk_scan
+            .saturating_mul(20)
+            .max(200);
+        let live_queue_backlog = self
+            .job
+            .lock()
+            .map(|job| job.pending_targets.len())
+            .unwrap_or_default();
+        let recent_window_start = now_epoch().saturating_sub(120);
+        let recent_deferred = self
+            .protection_events
+            .iter()
+            .filter(|event| {
+                event.timestamp_epoch >= recent_window_start
+                    && event.kind == ProtectionEventKind::Deferred.label()
+            })
+            .count();
+        let recent_throttled = self
+            .protection_events
+            .iter()
+            .filter(|event| {
+                event.timestamp_epoch >= recent_window_start
+                    && event.kind == ProtectionEventKind::Throttled.label()
+            })
+            .count();
+        let last_event_label = self
+            .protection_events
+            .last()
+            .map(|event| {
+                format!(
+                    "{} {} [{} | {}]",
+                    event.kind,
+                    format_timestamp_compact(event.timestamp_epoch),
+                    event.change_class.label(),
+                    event.file_class.label()
+                )
+            })
+            .unwrap_or_else(|| "No recent protection events".to_string());
+        let (queue_health, queue_health_detail) = protection_queue_health(
+            self.protection_backlog.len(),
+            live_queue_backlog,
+            queue_capacity,
+            recent_deferred,
+            recent_throttled,
+        );
+        let dropped_events = self
+            .protection_events
+            .iter()
+            .filter(|event| event.kind == ProtectionEventKind::Skipped.label())
+            .count();
+        let event_drop_rate = percent_label(dropped_events, self.protection_events.len());
+        let grouped_change_total = self
+            .protection_events
+            .iter()
+            .map(|event| event.grouped_change_count.max(1))
+            .sum::<usize>();
+        let dedupe_efficiency = if grouped_change_total == 0 {
+            "0%".to_string()
+        } else {
+            percent_label(
+                grouped_change_total.saturating_sub(self.protection_events.len()),
+                grouped_change_total,
+            )
+        };
+        let recovered_backlog = self
+            .protection_events
+            .iter()
+            .filter(|event| {
+                event.kind == ProtectionEventKind::Queued.label()
+                    && event.note.contains("previously deferred")
+            })
+            .count();
+        let backlog_recovery_rate = percent_label(recovered_backlog, deferred_event_count.max(1));
+
+        self.protection_summary = ProtectionSummary {
+            enabled: self.settings.enable_real_time_protection,
+            monitor_mode: self.protection_monitor.mode.label().to_string(),
+            monitor_state: if !self.settings.enable_real_time_protection {
+                "Inactive".to_string()
+            } else if matches!(
+                self.protection_monitor.mode,
+                ProtectionMonitorMode::PollingFallback
+            ) {
+                "Degraded".to_string()
+            } else if self.protection_monitor.last_error.is_some()
+                && matches!(
+                    self.protection_monitor.mode,
+                    ProtectionMonitorMode::Disabled
+                )
+            {
+                "Unavailable".to_string()
+            } else {
+                "Active".to_string()
+            },
+            watched_path_count: self.settings.watched_paths.len(),
+            tracked_file_count: self.protection_watch.len(),
+            recent_event_count: self.protection_events.len().min(25),
+            queued_event_count,
+            deferred_event_count,
+            throttled_event_count,
+            skipped_event_count,
+            backlog_count: self.protection_backlog.len(),
+            queue_health,
+            queue_health_detail,
+            event_drop_rate,
+            dedupe_efficiency,
+            backlog_recovery_rate,
+            active_status: if !self.settings.enable_real_time_protection {
+                "Protection disabled.".to_string()
+            } else if !self.protection_monitor.health_note.is_empty() {
+                format!(
+                    "{} {}",
+                    self.protection_monitor.health_note, self.protection_status
+                )
+                .trim()
+                .to_string()
+            } else if self.protection_status.is_empty() {
+                "Protection active and waiting for file changes.".to_string()
+            } else {
+                self.protection_status.clone()
+            },
+            last_event_label,
+        };
+    }
+
     pub(crate) fn start_scan_from_roots(&mut self, roots: Vec<PathBuf>) {
         if roots.is_empty() {
             self.status_message = "No valid path was supplied.".to_string();
@@ -875,7 +2013,11 @@ impl MyApp {
             return;
         }
 
-        let targets = collect_scan_targets(&roots, self.settings.max_files_per_bulk_scan);
+        let targets = collect_scan_targets(
+            &roots,
+            self.settings.max_files_per_bulk_scan,
+            ScanOrigin::Manual,
+        );
         self.start_scan(targets);
     }
 
@@ -953,6 +2095,9 @@ impl eframe::App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.apply_responsive_scaling(ctx);
         self.poll_finished_job();
+        self.ensure_protection_monitor();
+        self.drain_protection_backlog();
+        self.process_protection_monitor();
         self.poll_download_monitor();
 
         if self.is_booting() {
@@ -980,7 +2125,10 @@ impl eframe::App for MyApp {
         self.render_pending_confirmation(ctx);
         self.render_loading_indicator(ctx);
 
-        if self.is_loading() || self.settings.enable_download_monitoring {
+        if self.is_loading()
+            || self.settings.enable_download_monitoring
+            || self.settings.enable_real_time_protection
+        {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
     }
@@ -1104,7 +2252,12 @@ fn run_scan_worker(
                             historical_bytes_per_ms: timing_profile.average_bytes_per_ms,
                         },
                     );
-                    reused_cached_record(previous, target.last_modified_epoch, target.size_bytes)
+                    reused_cached_record(
+                        previous,
+                        target.last_modified_epoch,
+                        target.size_bytes,
+                        target.origin,
+                    )
                 } else {
                     let current_file_started = Instant::now();
                     let mut record = run_scan(&target, &config, |update| {
@@ -1298,6 +2451,7 @@ fn reused_cached_record(
     previous: &ScanRecord,
     modified_epoch: u64,
     file_size_bytes: u64,
+    origin: ScanOrigin,
 ) -> ScanRecord {
     let mut record = previous.clone();
     record.last_modified_epoch = modified_epoch;
@@ -1312,6 +2466,7 @@ fn reused_cached_record(
             previous.summary_text
         )
     };
+    record.workflow_origin = Some(origin.label().to_string());
     record
 }
 
@@ -1352,6 +2507,7 @@ where
         severity: SeverityLevel::Error,
         summary_text: message,
         action_note: String::new(),
+        workflow_origin: Some(target.origin.label().to_string()),
         risk_score: None,
         safety_score: None,
         signal_sources: vec!["scanner".to_string()],
@@ -1374,6 +2530,9 @@ where
         Ok(outcome) => {
             let warning_count = outcome.reason_entries.len();
             let mut note_parts = vec![outcome.summary];
+            if !matches!(target.origin, ScanOrigin::Manual) {
+                note_parts.insert(0, format!("Triggered by {}", target.origin.label()));
+            }
             if !outcome.findings.is_empty() {
                 note_parts.push(
                     outcome
@@ -1411,6 +2570,7 @@ where
                 severity: outcome.normalized_severity,
                 summary_text: note_parts.join(" | "),
                 action_note: String::new(),
+                workflow_origin: Some(target.origin.label().to_string()),
                 risk_score: Some(outcome.risk_score),
                 safety_score: Some(outcome.safety_score),
                 signal_sources: outcome.signal_sources,
@@ -1451,6 +2611,23 @@ fn latest_record_map(records: &[ScanRecord]) -> HashMap<String, ScanRecord> {
     latest_by_path
 }
 
+#[derive(Debug)]
+struct ProtectionEventInput {
+    kind: ProtectionEventKind,
+    path: String,
+    note: String,
+    workflow_source: String,
+    event_source: String,
+    verdict: Option<String>,
+    storage_state: Option<String>,
+    scan_id: Option<String>,
+    grouped_change_count: usize,
+    burst_window_seconds: u64,
+    change_class: ProtectionChangeClass,
+    file_class: ProtectionFileClass,
+    priority: ProtectionPriority,
+}
+
 fn queue_targets_into_job(job: &mut ScanJobState, targets: Vec<ScanTarget>) -> (usize, u64) {
     let mut known_paths = HashSet::new();
     if !job.current_path.is_empty() {
@@ -1462,11 +2639,23 @@ fn queue_targets_into_job(job: &mut ScanJobState, targets: Vec<ScanTarget>) -> (
 
     let mut added_count = 0usize;
     let mut added_bytes = 0u64;
-    for target in targets {
+    let mut prioritized = targets;
+    prioritized.sort_by(|left, right| {
+        right
+            .priority
+            .cmp(&left.priority)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+
+    for target in prioritized {
         if known_paths.insert(target.path.clone()) {
             added_count += 1;
             added_bytes = added_bytes.saturating_add(target.size_bytes);
-            job.pending_targets.push_back(target);
+            if target.priority == ProtectionPriority::High {
+                job.pending_targets.push_front(target);
+            } else {
+                job.pending_targets.push_back(target);
+            }
         }
     }
 
@@ -1480,6 +2669,273 @@ fn queue_targets_into_job(job: &mut ScanJobState, targets: Vec<ScanTarget>) -> (
         .sum::<u64>();
 
     (added_count, added_bytes)
+}
+
+fn protection_watch_signature(paths: &[WatchedPathConfig]) -> String {
+    let mut entries = paths
+        .iter()
+        .map(|entry| format!("{}::{}", entry.path, entry.recursive))
+        .collect::<Vec<_>>();
+    entries.sort();
+    entries.join("|")
+}
+
+fn os_event_source_label() -> &'static str {
+    match std::env::consts::OS {
+        "windows" => "Windows file events",
+        "macos" => "macOS file events",
+        "linux" => "Linux file events",
+        _ => "OS file events",
+    }
+}
+
+fn create_os_protection_watcher(
+    watched_paths: &[WatchedPathConfig],
+    sender: crossbeam_channel::Sender<ProtectionMonitorMessage>,
+) -> Result<RecommendedWatcher, String> {
+    let mut watcher = RecommendedWatcher::new(
+        move |result: Result<Event, notify::Error>| match result {
+            Ok(event) => {
+                for protection_event in translate_notify_event(event) {
+                    let _ = sender.send(ProtectionMonitorMessage::Event(protection_event));
+                }
+            }
+            Err(error) => {
+                let _ = sender.send(ProtectionMonitorMessage::Error(error.to_string()));
+            }
+        },
+        NotifyConfig::default(),
+    )
+    .map_err(|error| error.to_string())?;
+
+    for watched in watched_paths
+        .iter()
+        .filter(|entry| !entry.path.trim().is_empty())
+    {
+        watcher
+            .watch(
+                Path::new(&watched.path),
+                if watched.recursive {
+                    RecursiveMode::Recursive
+                } else {
+                    RecursiveMode::NonRecursive
+                },
+            )
+            .map_err(|error| format!("{} ({})", error, watched.path))?;
+    }
+
+    Ok(watcher)
+}
+
+fn translate_notify_event(event: Event) -> Vec<ProtectionMonitorEvent> {
+    let Some(change_class) = notify_change_class(&event.kind) else {
+        return Vec::new();
+    };
+    event
+        .paths
+        .into_iter()
+        .filter(|path| path.is_file() || path.extension().is_some())
+        .map(|path| ProtectionMonitorEvent {
+            path,
+            change_class,
+            source_label: os_event_source_label().to_string(),
+        })
+        .collect()
+}
+
+fn notify_change_class(kind: &EventKind) -> Option<ProtectionChangeClass> {
+    use notify::event::{CreateKind, ModifyKind, RenameMode};
+
+    match kind {
+        EventKind::Create(CreateKind::Any | CreateKind::File | CreateKind::Folder) => {
+            Some(ProtectionChangeClass::Created)
+        }
+        EventKind::Modify(ModifyKind::Name(RenameMode::Any))
+        | EventKind::Modify(ModifyKind::Name(RenameMode::Both))
+        | EventKind::Modify(ModifyKind::Name(RenameMode::From))
+        | EventKind::Modify(ModifyKind::Name(RenameMode::To))
+        | EventKind::Modify(ModifyKind::Name(RenameMode::Other)) => {
+            Some(ProtectionChangeClass::Replaced)
+        }
+        EventKind::Modify(_) => Some(ProtectionChangeClass::Modified),
+        _ => None,
+    }
+}
+
+fn is_path_watched(watched: &[WatchedPathConfig], path: &Path) -> bool {
+    watched.iter().any(|entry| {
+        let root = Path::new(&entry.path);
+        if entry.recursive {
+            path.starts_with(root)
+        } else {
+            path == root || path.parent().is_some_and(|parent| parent == root)
+        }
+    })
+}
+
+fn protection_queue_health(
+    backlog: usize,
+    queued: usize,
+    capacity: usize,
+    recent_deferred: usize,
+    recent_throttled: usize,
+) -> (String, String) {
+    let safe_capacity = capacity.max(1);
+    let load_ratio = queued as f32 / safe_capacity as f32;
+    if backlog >= safe_capacity / 8 || load_ratio >= 0.8 || recent_deferred >= 3 {
+        (
+            "Backed up".to_string(),
+            format!(
+                "{} queued of {}, {} backlog, {} recent deferrals, {} recent throttles",
+                queued, safe_capacity, backlog, recent_deferred, recent_throttled
+            ),
+        )
+    } else if backlog > 0 || load_ratio >= 0.4 || recent_throttled >= 4 || recent_deferred > 0 {
+        (
+            "Busy".to_string(),
+            format!(
+                "{} queued of {}, {} backlog, {} recent deferrals, {} recent throttles",
+                queued, safe_capacity, backlog, recent_deferred, recent_throttled
+            ),
+        )
+    } else {
+        (
+            "Healthy".to_string(),
+            format!(
+                "{} queued of {}, no deferred backlog, {} recent throttles",
+                queued, safe_capacity, recent_throttled
+            ),
+        )
+    }
+}
+
+fn highest_priority_backlog_index(
+    backlog: &VecDeque<ScanTarget>,
+    pending_paths: &HashSet<PathBuf>,
+) -> Option<usize> {
+    backlog
+        .iter()
+        .enumerate()
+        .filter(|(_, target)| !pending_paths.contains(&target.path))
+        .max_by_key(|(index, target)| (target.priority, std::cmp::Reverse(*index)))
+        .map(|(index, _)| index)
+}
+
+fn classify_change(
+    previous: &ProtectionWatchEntry,
+    discovered: &ScanTarget,
+) -> ProtectionChangeClass {
+    if previous.modified_epoch == 0 && previous.size_bytes == 0 {
+        ProtectionChangeClass::Created
+    } else if discovered.size_bytes.saturating_add(4_096) < previous.size_bytes
+        || discovered.last_modified_epoch < previous.modified_epoch
+    {
+        ProtectionChangeClass::Replaced
+    } else {
+        ProtectionChangeClass::Modified
+    }
+}
+
+fn classify_protection_file(path: &Path) -> ProtectionFileClass {
+    let lowered = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let path_lower = path.to_string_lossy().to_ascii_lowercase();
+
+    if is_temp_or_cache_path(&path_lower) {
+        return ProtectionFileClass::TempCache;
+    }
+
+    match lowered.as_str() {
+        "tmp" | "temp" | "cache" | "crdownload" | "download" | "partial" | "part" => {
+            ProtectionFileClass::TempCache
+        }
+        "exe" | "dll" | "sys" | "msi" | "com" | "app" | "pkg" | "dmg" | "deb" | "rpm" | "bin"
+        | "so" | "dylib" => ProtectionFileClass::Executable,
+        "ps1" | "psm1" | "js" | "jse" | "vbs" | "vba" | "bat" | "cmd" | "sh" | "zsh" | "py"
+        | "rb" => ProtectionFileClass::Script,
+        "zip" | "rar" | "7z" | "tar" | "gz" | "tgz" | "xz" => ProtectionFileClass::Archive,
+        "doc" | "docm" | "docx" | "xls" | "xlsm" | "xlsx" | "ppt" | "pptm" | "pdf" | "rtf" => {
+            ProtectionFileClass::Document
+        }
+        _ => ProtectionFileClass::Other,
+    }
+}
+
+fn should_skip_as_noise(target: &ScanTarget) -> bool {
+    matches!(target.file_class, ProtectionFileClass::TempCache)
+        && target.size_bytes <= 2_048
+        && matches!(target.change_class, ProtectionChangeClass::Created)
+}
+
+fn classify_protection_priority(path: &Path, class: ProtectionFileClass) -> ProtectionPriority {
+    let path_lower = path.to_string_lossy().to_ascii_lowercase();
+    if is_downloads_path(&path_lower)
+        || matches!(
+            class,
+            ProtectionFileClass::Executable | ProtectionFileClass::Script
+        )
+    {
+        ProtectionPriority::High
+    } else if matches!(class, ProtectionFileClass::TempCache) {
+        ProtectionPriority::Low
+    } else {
+        ProtectionPriority::Normal
+    }
+}
+
+fn per_file_cooldown(target: &ScanTarget) -> Duration {
+    match (target.priority, target.file_class) {
+        (ProtectionPriority::High, _) => Duration::from_secs(2),
+        (_, ProtectionFileClass::TempCache) => Duration::from_secs(12),
+        (_, ProtectionFileClass::Archive | ProtectionFileClass::Document) => Duration::from_secs(6),
+        _ => Duration::from_secs(5),
+    }
+}
+
+fn watched_path_rate_limit(path: &str) -> usize {
+    let lowered = path.to_ascii_lowercase();
+    if is_downloads_path(&lowered) {
+        12
+    } else if is_temp_or_cache_path(&lowered) {
+        2
+    } else {
+        6
+    }
+}
+
+fn is_downloads_path(path: &str) -> bool {
+    path.contains("/downloads") || path.contains("\\downloads")
+}
+
+fn is_temp_or_cache_path(path: &str) -> bool {
+    path.contains("/cache/")
+        || path.contains("\\cache\\")
+        || path.contains("/.cache/")
+        || path.contains("/logs/")
+}
+
+fn queued_event_note(
+    change_class: ProtectionChangeClass,
+    grouped_change_count: usize,
+    file_class: ProtectionFileClass,
+) -> String {
+    if grouped_change_count > 1 {
+        format!(
+            "Queued one passive scan after {} {} change(s) were grouped for this {} file.",
+            grouped_change_count,
+            change_class.label().to_ascii_lowercase(),
+            file_class.label().to_ascii_lowercase()
+        )
+    } else {
+        format!(
+            "Queued an automatic passive scan after the watched {} file was {}.",
+            file_class.label().to_ascii_lowercase(),
+            change_class.label().to_ascii_lowercase()
+        )
+    }
 }
 
 fn record_matches_query(record: &ScanRecord, query: &str) -> bool {
@@ -1503,6 +2959,11 @@ fn record_matches_query(record: &ScanRecord, query: &str) -> bool {
             .to_ascii_lowercase(),
         record.summary_text.to_ascii_lowercase(),
         record.action_note.to_ascii_lowercase(),
+        record
+            .workflow_origin
+            .as_deref()
+            .unwrap_or_default()
+            .to_ascii_lowercase(),
         record.verdict.label().to_ascii_lowercase(),
         record.severity.label().to_ascii_lowercase(),
         record.resolved_storage_state().label().to_ascii_lowercase(),
@@ -1565,6 +3026,14 @@ fn reveal_in_file_manager(path: &Path) -> Result<(), String> {
     }
 }
 
+fn percent_label(part: usize, total: usize) -> String {
+    if total == 0 {
+        "0%".to_string()
+    } else {
+        format!("{:.1}%", (part as f64 / total as f64) * 100.0)
+    }
+}
+
 fn dedupe_targets(targets: Vec<ScanTarget>) -> Vec<ScanTarget> {
     let mut seen = HashSet::new();
     let mut deduped = Vec::new();
@@ -1575,10 +3044,21 @@ fn dedupe_targets(targets: Vec<ScanTarget>) -> Vec<ScanTarget> {
         }
     }
 
+    deduped.sort_by(|left, right| {
+        right
+            .priority
+            .cmp(&left.priority)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+
     deduped
 }
 
-fn collect_scan_targets(roots: &[PathBuf], max_files: usize) -> Vec<ScanTarget> {
+fn collect_scan_targets(
+    roots: &[PathBuf],
+    max_files: usize,
+    origin: ScanOrigin,
+) -> Vec<ScanTarget> {
     let mut files = Vec::new();
     let mut seen = HashSet::new();
     let mut stack: Vec<PathBuf> = roots.to_vec();
@@ -1601,6 +3081,8 @@ fn collect_scan_targets(roots: &[PathBuf], max_files: usize) -> Vec<ScanTarget> 
 
         if metadata.is_file() {
             files.push(ScanTarget {
+                file_class: classify_protection_file(&path),
+                priority: classify_protection_priority(&path, classify_protection_file(&path)),
                 path,
                 last_modified_epoch: metadata
                     .modified()
@@ -1609,6 +3091,10 @@ fn collect_scan_targets(roots: &[PathBuf], max_files: usize) -> Vec<ScanTarget> 
                     .map(|duration| duration.as_secs())
                     .unwrap_or(0),
                 size_bytes: metadata.len(),
+                origin,
+                grouped_change_count: 1,
+                burst_window_seconds: 0,
+                change_class: ProtectionChangeClass::Modified,
             });
             continue;
         }
@@ -1630,6 +3116,91 @@ fn collect_scan_targets(roots: &[PathBuf], max_files: usize) -> Vec<ScanTarget> 
     }
 
     files
+}
+
+fn collect_protection_targets(watched: &WatchedPathConfig, max_files: usize) -> Vec<ScanTarget> {
+    let root = PathBuf::from(&watched.path);
+    let Ok(metadata) = fs::symlink_metadata(&root) else {
+        return Vec::new();
+    };
+    if metadata.file_type().is_symlink() {
+        return Vec::new();
+    }
+
+    if metadata.is_file() {
+        return vec![ScanTarget {
+            file_class: classify_protection_file(&root),
+            priority: classify_protection_priority(&root, classify_protection_file(&root)),
+            path: root,
+            last_modified_epoch: metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map(|duration| duration.as_secs())
+                .unwrap_or(0),
+            size_bytes: metadata.len(),
+            origin: ScanOrigin::RealTimeProtection,
+            grouped_change_count: 1,
+            burst_window_seconds: 0,
+            change_class: ProtectionChangeClass::Created,
+        }];
+    }
+
+    if !metadata.is_dir() {
+        return Vec::new();
+    }
+
+    if watched.recursive {
+        return crate::r#static::collect_scan_inputs(&[root], max_files)
+            .into_iter()
+            .filter_map(|path| fs::metadata(&path).ok().map(|metadata| (path, metadata)))
+            .filter(|(_, metadata)| metadata.is_file())
+            .map(|(path, metadata)| ScanTarget {
+                file_class: classify_protection_file(&path),
+                priority: classify_protection_priority(&path, classify_protection_file(&path)),
+                path,
+                last_modified_epoch: metadata
+                    .modified()
+                    .ok()
+                    .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                    .map(|duration| duration.as_secs())
+                    .unwrap_or(0),
+                size_bytes: metadata.len(),
+                origin: ScanOrigin::RealTimeProtection,
+                grouped_change_count: 1,
+                burst_window_seconds: 0,
+                change_class: ProtectionChangeClass::Created,
+            })
+            .collect();
+    }
+
+    let Ok(entries) = fs::read_dir(&root) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .take(max_files)
+        .filter_map(|entry| {
+            let path = entry.path();
+            let metadata = entry.metadata().ok()?;
+            metadata.is_file().then_some(ScanTarget {
+                file_class: classify_protection_file(&path),
+                priority: classify_protection_priority(&path, classify_protection_file(&path)),
+                path,
+                last_modified_epoch: metadata
+                    .modified()
+                    .ok()
+                    .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                    .map(|duration| duration.as_secs())
+                    .unwrap_or(0),
+                size_bytes: metadata.len(),
+                origin: ScanOrigin::RealTimeProtection,
+                grouped_change_count: 1,
+                burst_window_seconds: 0,
+                change_class: ProtectionChangeClass::Created,
+            })
+        })
+        .collect()
 }
 
 fn collect_active_downloads(root: &Path) -> Vec<PathBuf> {
@@ -1683,6 +3254,8 @@ fn build_download_snapshot_target(path: &Path, size: u64) -> Option<ScanTarget> 
     let snapshot = write_download_snapshot(path)?;
     let metadata = fs::metadata(&snapshot).ok()?;
     Some(ScanTarget {
+        file_class: ProtectionFileClass::TempCache,
+        priority: ProtectionPriority::High,
         path: snapshot,
         last_modified_epoch: metadata
             .modified()
@@ -1691,6 +3264,10 @@ fn build_download_snapshot_target(path: &Path, size: u64) -> Option<ScanTarget> 
             .map(|duration| duration.as_secs())
             .unwrap_or_else(now_epoch),
         size_bytes: metadata.len(),
+        origin: ScanOrigin::DownloadMonitor,
+        grouped_change_count: 1,
+        burst_window_seconds: 0,
+        change_class: ProtectionChangeClass::Modified,
     })
 }
 
@@ -1728,17 +3305,25 @@ pub(crate) fn draw_pie_chart(
     let painter = ui.painter_at(rect);
     let center = rect.center();
     let radius = rect.width().min(rect.height()) * 0.42;
+    let inner_radius = radius * 0.42;
     let mut start_angle = -std::f32::consts::FRAC_PI_2;
 
-    for (idx, (_, value, color)) in segments.iter().enumerate() {
+    painter.circle_filled(center, radius, egui::Color32::from_rgb(20, 24, 29));
+
+    for (_, value, color) in segments.iter() {
         let sweep = (*value as f32 / total) * std::f32::consts::TAU;
-        let end_angle = start_angle + sweep.max(0.001);
-        let mut points = vec![center];
-        let steps = ((sweep / std::f32::consts::TAU) * 48.0).ceil() as usize + 2;
+        let end_angle = start_angle + sweep.max(0.001).min(std::f32::consts::TAU);
+        let steps = ((sweep / std::f32::consts::TAU) * 64.0).ceil() as usize + 4;
+        let mut points = Vec::with_capacity(steps * 2 + 2);
         for step in 0..=steps {
             let t = step as f32 / steps as f32;
             let angle = start_angle + (end_angle - start_angle) * t;
             points.push(center + Vec2::angled(angle) * radius);
+        }
+        for step in (0..=steps).rev() {
+            let t = step as f32 / steps as f32;
+            let angle = start_angle + (end_angle - start_angle) * t;
+            points.push(center + Vec2::angled(angle) * inner_radius);
         }
         painter.add(egui::Shape::convex_polygon(
             points,
@@ -1746,15 +3331,17 @@ pub(crate) fn draw_pie_chart(
             egui::Stroke::NONE,
         ));
         start_angle = end_angle;
-
-        if idx == segments.len() - 1 {
-            painter.circle_stroke(
-                center,
-                radius,
-                egui::Stroke::new(1.0, egui::Color32::from_rgb(52, 52, 54)),
-            );
-        }
     }
+    painter.circle_filled(
+        center,
+        inner_radius - 1.0,
+        egui::Color32::from_rgb(23, 28, 34),
+    );
+    painter.circle_stroke(
+        center,
+        radius,
+        egui::Stroke::new(1.0, egui::Color32::from_rgb(52, 52, 54)),
+    );
     let _ = id_source;
 }
 
@@ -1970,6 +3557,69 @@ fn load_history() -> PersistedHistory {
     }
 }
 
+pub(crate) fn load_gui_settings() -> SettingsState {
+    fs::read_to_string(SETTINGS_PATH)
+        .ok()
+        .and_then(|text| serde_json::from_str::<PersistedGuiSettings>(&text).ok())
+        .map(|persisted| persisted.settings)
+        .unwrap_or_default()
+}
+
+pub(crate) fn save_gui_settings(settings: &SettingsState) {
+    let payload = PersistedGuiSettings {
+        settings: settings.clone(),
+    };
+    let Ok(text) = serde_json::to_string_pretty(&payload) else {
+        return;
+    };
+    if let Some(parent) = Path::new(SETTINGS_PATH).parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(SETTINGS_PATH, text);
+}
+
+fn load_protection_events() -> Vec<ProtectionEvent> {
+    fs::read_to_string(PROTECTION_EVENTS_PATH)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Vec<ProtectionEvent>>(&text).ok())
+        .unwrap_or_default()
+}
+
+fn load_protection_backlog() -> VecDeque<ScanTarget> {
+    load_protection_backlog_from(Path::new(PROTECTION_BACKLOG_PATH))
+}
+
+fn load_protection_backlog_from(path: &Path) -> VecDeque<ScanTarget> {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<VecDeque<ScanTarget>>(&text).ok())
+        .unwrap_or_default()
+}
+
+fn save_protection_events(events: &[ProtectionEvent]) {
+    let Ok(text) = serde_json::to_string_pretty(events) else {
+        return;
+    };
+    if let Some(parent) = Path::new(PROTECTION_EVENTS_PATH).parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(PROTECTION_EVENTS_PATH, text);
+}
+
+fn save_protection_backlog(backlog: &VecDeque<ScanTarget>) {
+    save_protection_backlog_to(Path::new(PROTECTION_BACKLOG_PATH), backlog);
+}
+
+fn save_protection_backlog_to(path: &Path, backlog: &VecDeque<ScanTarget>) {
+    let Ok(text) = serde_json::to_string_pretty(backlog) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(path, text);
+}
+
 fn save_history(records: &[ScanRecord], timing_samples: &[TimingSample]) {
     let mut retained_samples = timing_samples.to_vec();
     trim_timing_samples(&mut retained_samples);
@@ -1992,6 +3642,13 @@ fn trim_timing_samples(samples: &mut Vec<TimingSample>) {
     if samples.len() > TIMING_SAMPLE_LIMIT {
         let drain_count = samples.len() - TIMING_SAMPLE_LIMIT;
         samples.drain(0..drain_count);
+    }
+}
+
+fn trim_protection_events(events: &mut Vec<ProtectionEvent>) {
+    if events.len() > PROTECTION_EVENT_LIMIT {
+        let drain_count = events.len() - PROTECTION_EVENT_LIMIT;
+        events.drain(0..drain_count);
     }
 }
 
@@ -2089,6 +3746,8 @@ fn severity_level_from_label(label: &str) -> SeverityLevel {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
 
     #[test]
@@ -2131,6 +3790,7 @@ mod tests {
             severity: SeverityLevel::High,
             summary_text: "flagged".to_string(),
             action_note: String::new(),
+            workflow_origin: None,
             risk_score: Some(8.1),
             safety_score: Some(0.2),
             signal_sources: vec!["heuristic".to_string(), "rule".to_string()],
@@ -2209,6 +3869,7 @@ mod tests {
             severity: SeverityLevel::Low,
             summary_text: String::new(),
             action_note: String::new(),
+            workflow_origin: None,
             risk_score: None,
             safety_score: None,
             signal_sources: Vec::new(),
@@ -2282,6 +3943,7 @@ mod tests {
             severity: SeverityLevel::Clean,
             summary_text: "flagged".to_string(),
             action_note: String::new(),
+            workflow_origin: None,
             risk_score: Some(1.0),
             safety_score: Some(0.9),
             signal_sources: vec!["heuristic".to_string()],
@@ -2290,5 +3952,923 @@ mod tests {
             error_count: 0,
             quarantine: QuarantineMetadata::default(),
         }
+    }
+
+    #[test]
+    fn realtime_protection_queues_changed_file_once() {
+        let watch_path =
+            std::env::temp_dir().join(format!("projectx_watch_{}.txt", std::process::id()));
+        std::fs::write(&watch_path, b"hello").unwrap();
+
+        let mut app = MyApp::new();
+        app.protection_events.clear();
+        app.settings.enable_real_time_protection = true;
+        app.settings.watched_paths = vec![WatchedPathConfig {
+            path: watch_path.to_string_lossy().to_string(),
+            recursive: false,
+        }];
+        app.last_protection_poll = Instant::now() - Duration::from_secs(3);
+        if let Ok(mut job) = app.job.lock() {
+            job.running = true;
+        }
+
+        app.poll_real_time_protection();
+        let queued = app
+            .job
+            .lock()
+            .map(|job| job.pending_targets.len())
+            .unwrap_or_default();
+        assert_eq!(queued, 1);
+        assert!(app
+            .protection_events
+            .iter()
+            .any(|event| event.kind == "Queued"));
+
+        app.last_protection_poll = Instant::now() - Duration::from_secs(3);
+        app.poll_real_time_protection();
+        let queued_after_second_poll = app
+            .job
+            .lock()
+            .map(|job| job.pending_targets.len())
+            .unwrap_or_default();
+        assert_eq!(queued_after_second_poll, 1);
+
+        let _ = std::fs::remove_file(watch_path);
+    }
+
+    #[test]
+    fn realtime_protection_throttles_rapid_repeat_changes() {
+        let watch_path =
+            std::env::temp_dir().join(format!("projectx_watch_repeat_{}.txt", std::process::id()));
+        std::fs::write(&watch_path, b"hello").unwrap();
+
+        let mut app = MyApp::new();
+        app.protection_events.clear();
+        app.settings.enable_real_time_protection = true;
+        app.settings.watched_paths = vec![WatchedPathConfig {
+            path: watch_path.to_string_lossy().to_string(),
+            recursive: false,
+        }];
+        if let Ok(mut job) = app.job.lock() {
+            job.running = true;
+        }
+        app.last_protection_poll = Instant::now() - Duration::from_secs(3);
+        app.poll_real_time_protection();
+
+        std::fs::write(&watch_path, b"hello world").unwrap();
+        app.last_protection_poll = Instant::now() - Duration::from_secs(3);
+        app.poll_real_time_protection();
+
+        assert!(app
+            .protection_events
+            .iter()
+            .any(|event| event.kind == "Throttled"));
+
+        let _ = std::fs::remove_file(watch_path);
+    }
+
+    #[test]
+    fn realtime_protection_groups_repeated_throttled_events() {
+        let watch_path =
+            std::env::temp_dir().join(format!("projectx_watch_grouped_{}.ps1", std::process::id()));
+        std::fs::write(&watch_path, b"Write-Host hi").unwrap();
+
+        let mut app = MyApp::new();
+        app.protection_events.clear();
+        app.settings.enable_real_time_protection = true;
+        app.settings.watched_paths = vec![WatchedPathConfig {
+            path: watch_path.to_string_lossy().to_string(),
+            recursive: false,
+        }];
+        if let Ok(mut job) = app.job.lock() {
+            job.running = true;
+        }
+        app.last_protection_poll = Instant::now() - Duration::from_secs(3);
+        app.poll_real_time_protection();
+
+        std::fs::write(&watch_path, b"Write-Host changed").unwrap();
+        app.last_protection_poll = Instant::now() - Duration::from_secs(3);
+        app.poll_real_time_protection();
+        std::fs::write(&watch_path, b"Write-Host changed again").unwrap();
+        app.last_protection_poll = Instant::now() - Duration::from_secs(3);
+        app.poll_real_time_protection();
+
+        let throttled = app
+            .protection_events
+            .iter()
+            .filter(|event| event.kind == "Throttled")
+            .collect::<Vec<_>>();
+        assert_eq!(throttled.len(), 1);
+        assert!(throttled[0].grouped_change_count >= 2);
+        assert_eq!(throttled[0].file_class, ProtectionFileClass::Script);
+        assert_eq!(throttled[0].priority, ProtectionPriority::High);
+
+        let _ = std::fs::remove_file(watch_path);
+    }
+
+    #[test]
+    fn realtime_protection_classifies_created_files_and_path_limits_temp_noise() {
+        let watch_dir = std::env::temp_dir()
+            .join("cache")
+            .join(format!("projectx_watch_dir_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&watch_dir);
+        let first = watch_dir.join("a.ps1");
+        let second = watch_dir.join("b.tmp");
+        let third = watch_dir.join("c.tmp");
+        std::fs::write(&first, b"1").unwrap();
+        std::fs::write(&second, b"2").unwrap();
+        std::fs::write(&third, b"3").unwrap();
+
+        let mut app = MyApp::new();
+        app.protection_events.clear();
+        app.protection_backlog.clear();
+        app.settings.enable_real_time_protection = true;
+        app.settings.watched_paths = vec![WatchedPathConfig {
+            path: watch_dir.to_string_lossy().to_string(),
+            recursive: false,
+        }];
+        if let Ok(mut job) = app.job.lock() {
+            job.running = true;
+        }
+        app.last_protection_poll = Instant::now() - Duration::from_secs(3);
+        app.poll_real_time_protection();
+
+        let skipped = app
+            .protection_events
+            .iter()
+            .filter(|event| event.kind == ProtectionEventKind::Skipped.label())
+            .collect::<Vec<_>>();
+        assert!(skipped.len() >= 1);
+        assert!(skipped
+            .iter()
+            .all(|event| event.file_class == ProtectionFileClass::TempCache));
+
+        let _ = std::fs::remove_file(first);
+        let _ = std::fs::remove_file(second);
+        let _ = std::fs::remove_file(third);
+        let _ = std::fs::remove_dir(watch_dir);
+    }
+
+    #[test]
+    fn realtime_protection_defers_to_backlog_when_queue_is_busy() {
+        let watch_path =
+            std::env::temp_dir().join(format!("projectx_watch_defer_{}.ps1", std::process::id()));
+        std::fs::write(&watch_path, b"Start-Process calc").unwrap();
+
+        let mut app = MyApp::new();
+        app.protection_events.clear();
+        app.protection_backlog.clear();
+        app.settings.enable_real_time_protection = true;
+        app.settings.max_files_per_bulk_scan = 1;
+        app.settings.watched_paths = vec![WatchedPathConfig {
+            path: watch_path.to_string_lossy().to_string(),
+            recursive: false,
+        }];
+        if let Ok(mut job) = app.job.lock() {
+            job.running = true;
+            for index in 0..220 {
+                job.pending_targets.push_back(ScanTarget {
+                    path: std::env::temp_dir().join(format!("busy_{index}.tmp")),
+                    last_modified_epoch: 0,
+                    size_bytes: 10,
+                    origin: ScanOrigin::RealTimeProtection,
+                    priority: ProtectionPriority::Normal,
+                    file_class: ProtectionFileClass::TempCache,
+                    grouped_change_count: 1,
+                    burst_window_seconds: 0,
+                    change_class: ProtectionChangeClass::Modified,
+                });
+            }
+        }
+        app.last_protection_poll = Instant::now() - Duration::from_secs(3);
+        app.poll_real_time_protection();
+
+        assert_eq!(app.protection_backlog.len(), 1);
+        assert!(app
+            .protection_events
+            .iter()
+            .any(|event| event.kind == ProtectionEventKind::Deferred.label()));
+
+        let _ = std::fs::remove_file(watch_path);
+    }
+
+    #[test]
+    fn deferred_backlog_is_queued_when_capacity_returns() {
+        let mut app = MyApp::new();
+        app.protection_events.clear();
+        app.protection_backlog.clear();
+        app.settings.enable_real_time_protection = true;
+        let target = ScanTarget {
+            path: std::env::temp_dir().join(format!("resume_{}.ps1", std::process::id())),
+            last_modified_epoch: 1,
+            size_bytes: 120,
+            origin: ScanOrigin::RealTimeProtection,
+            priority: ProtectionPriority::High,
+            file_class: ProtectionFileClass::Script,
+            grouped_change_count: 3,
+            burst_window_seconds: 4,
+            change_class: ProtectionChangeClass::Modified,
+        };
+        app.protection_backlog.push_back(target.clone());
+        if let Ok(mut job) = app.job.lock() {
+            job.running = true;
+        }
+
+        app.drain_protection_backlog();
+
+        assert!(app.protection_backlog.is_empty());
+        let queued = app
+            .job
+            .lock()
+            .map(|job| job.pending_targets.len())
+            .unwrap_or_default();
+        assert_eq!(queued, 1);
+        assert!(app.protection_events.iter().any(|event| {
+            event.kind == ProtectionEventKind::Queued.label()
+                && event.path == target.path.to_string_lossy()
+        }));
+    }
+
+    #[test]
+    fn protection_history_filters_match_expected_event_subset() {
+        let mut app = MyApp::new();
+        app.protection_events = vec![
+            ProtectionEvent {
+                id: "one".to_string(),
+                timestamp_epoch: 10,
+                path: "/tmp/a.ps1".to_string(),
+                kind: ProtectionEventKind::Deferred.label().to_string(),
+                note: "Deferred".to_string(),
+                workflow_source: ScanOrigin::RealTimeProtection.label().to_string(),
+                event_source: "Polling fallback".to_string(),
+                verdict: None,
+                storage_state: None,
+                scan_id: None,
+                grouped_change_count: 2,
+                burst_window_seconds: 3,
+                change_class: ProtectionChangeClass::Modified,
+                file_class: ProtectionFileClass::Script,
+                priority: ProtectionPriority::High,
+            },
+            ProtectionEvent {
+                id: "two".to_string(),
+                timestamp_epoch: 11,
+                path: "/tmp/a.tmp".to_string(),
+                kind: ProtectionEventKind::Skipped.label().to_string(),
+                note: "Skipped".to_string(),
+                workflow_source: ScanOrigin::RealTimeProtection.label().to_string(),
+                event_source: "Polling fallback".to_string(),
+                verdict: None,
+                storage_state: None,
+                scan_id: None,
+                grouped_change_count: 1,
+                burst_window_seconds: 0,
+                change_class: ProtectionChangeClass::Created,
+                file_class: ProtectionFileClass::TempCache,
+                priority: ProtectionPriority::Low,
+            },
+        ];
+        app.protection_kind_filter = ProtectionEventKindFilter::Deferred;
+        app.protection_file_filter = ProtectionFileClassFilter::Script;
+        app.protection_priority_filter = ProtectionPriorityFilter::High;
+        app.protection_origin_filter = ProtectionOriginFilter::RealTimeProtection;
+
+        let indices = app.filtered_protection_event_indices(20);
+        assert_eq!(indices.len(), 1);
+        assert_eq!(
+            app.protection_events[indices[0]].kind,
+            ProtectionEventKind::Deferred.label()
+        );
+    }
+
+    #[test]
+    fn protection_history_filters_can_match_result_and_action() {
+        let mut app = MyApp::new();
+        app.protection_events = vec![
+            ProtectionEvent {
+                id: "one".to_string(),
+                timestamp_epoch: 10,
+                path: "/tmp/a.ps1".to_string(),
+                kind: ProtectionEventKind::Completed.label().to_string(),
+                note: "Completed".to_string(),
+                workflow_source: ScanOrigin::RealTimeProtection.label().to_string(),
+                event_source: "Automatic scan result".to_string(),
+                verdict: Some("Malicious".to_string()),
+                storage_state: Some("In quarantine".to_string()),
+                scan_id: Some("scan-1".to_string()),
+                grouped_change_count: 2,
+                burst_window_seconds: 4,
+                change_class: ProtectionChangeClass::Modified,
+                file_class: ProtectionFileClass::Script,
+                priority: ProtectionPriority::High,
+            },
+            ProtectionEvent {
+                id: "two".to_string(),
+                timestamp_epoch: 11,
+                path: "/tmp/b.txt".to_string(),
+                kind: ProtectionEventKind::Completed.label().to_string(),
+                note: "Completed".to_string(),
+                workflow_source: ScanOrigin::RealTimeProtection.label().to_string(),
+                event_source: "Automatic scan result".to_string(),
+                verdict: Some("Clean".to_string()),
+                storage_state: Some("Unknown".to_string()),
+                scan_id: Some("scan-2".to_string()),
+                grouped_change_count: 1,
+                burst_window_seconds: 0,
+                change_class: ProtectionChangeClass::Created,
+                file_class: ProtectionFileClass::Other,
+                priority: ProtectionPriority::Normal,
+            },
+        ];
+        app.protection_verdict_filter = ProtectionVerdictFilter::Malicious;
+        app.protection_action_filter = ProtectionActionFilter::Quarantined;
+
+        let indices = app.filtered_protection_event_indices(20);
+        assert_eq!(indices.len(), 1);
+        assert_eq!(
+            app.protection_events[indices[0]].scan_id.as_deref(),
+            Some("scan-1")
+        );
+    }
+
+    #[test]
+    fn backlog_roundtrip_preserves_grouped_target_metadata() {
+        let path = std::env::temp_dir().join(format!(
+            "projectx_backlog_roundtrip_{}.json",
+            std::process::id()
+        ));
+        let mut backlog = VecDeque::new();
+        backlog.push_back(ScanTarget {
+            path: std::env::temp_dir().join("queued_sample.ps1"),
+            last_modified_epoch: 42,
+            size_bytes: 512,
+            origin: ScanOrigin::RealTimeProtection,
+            priority: ProtectionPriority::High,
+            file_class: ProtectionFileClass::Script,
+            grouped_change_count: 5,
+            burst_window_seconds: 8,
+            change_class: ProtectionChangeClass::Replaced,
+        });
+
+        save_protection_backlog_to(&path, &backlog);
+        let loaded = load_protection_backlog_from(&path);
+
+        assert_eq!(loaded.len(), 1);
+        let loaded_target = loaded.front().unwrap();
+        assert_eq!(loaded_target.grouped_change_count, 5);
+        assert_eq!(loaded_target.burst_window_seconds, 8);
+        assert_eq!(loaded_target.change_class, ProtectionChangeClass::Replaced);
+        assert_eq!(loaded_target.priority, ProtectionPriority::High);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn backlog_retry_prefers_high_priority_targets() {
+        let mut app = MyApp::new();
+        app.protection_events.clear();
+        app.protection_backlog.clear();
+        app.settings.enable_real_time_protection = true;
+        app.protection_backlog.push_back(ScanTarget {
+            path: std::env::temp_dir().join("normal_target.txt"),
+            last_modified_epoch: 1,
+            size_bytes: 40,
+            origin: ScanOrigin::RealTimeProtection,
+            priority: ProtectionPriority::Normal,
+            file_class: ProtectionFileClass::Other,
+            grouped_change_count: 1,
+            burst_window_seconds: 0,
+            change_class: ProtectionChangeClass::Modified,
+        });
+        app.protection_backlog.push_back(ScanTarget {
+            path: std::env::temp_dir().join("high_target.ps1"),
+            last_modified_epoch: 2,
+            size_bytes: 80,
+            origin: ScanOrigin::RealTimeProtection,
+            priority: ProtectionPriority::High,
+            file_class: ProtectionFileClass::Script,
+            grouped_change_count: 3,
+            burst_window_seconds: 5,
+            change_class: ProtectionChangeClass::Modified,
+        });
+        if let Ok(mut job) = app.job.lock() {
+            job.running = true;
+            job.pending_targets.clear();
+        }
+
+        app.drain_protection_backlog();
+
+        let queued_paths = app
+            .job
+            .lock()
+            .map(|job| {
+                job.pending_targets
+                    .iter()
+                    .map(|target| target.path.to_string_lossy().to_string())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        assert!(!queued_paths.is_empty());
+        assert!(queued_paths[0].contains("high_target.ps1"));
+    }
+
+    #[test]
+    fn backlog_retry_skips_paths_already_pending() {
+        let mut app = MyApp::new();
+        app.protection_events.clear();
+        app.protection_backlog.clear();
+        app.settings.enable_real_time_protection = true;
+        let blocked = std::env::temp_dir().join("blocked_target.ps1");
+        let ready = std::env::temp_dir().join("ready_target.ps1");
+        app.protection_backlog.push_back(ScanTarget {
+            path: blocked.clone(),
+            last_modified_epoch: 1,
+            size_bytes: 40,
+            origin: ScanOrigin::RealTimeProtection,
+            priority: ProtectionPriority::High,
+            file_class: ProtectionFileClass::Script,
+            grouped_change_count: 2,
+            burst_window_seconds: 3,
+            change_class: ProtectionChangeClass::Modified,
+        });
+        app.protection_backlog.push_back(ScanTarget {
+            path: ready.clone(),
+            last_modified_epoch: 2,
+            size_bytes: 55,
+            origin: ScanOrigin::RealTimeProtection,
+            priority: ProtectionPriority::Normal,
+            file_class: ProtectionFileClass::Script,
+            grouped_change_count: 1,
+            burst_window_seconds: 1,
+            change_class: ProtectionChangeClass::Modified,
+        });
+        if let Ok(mut job) = app.job.lock() {
+            job.running = true;
+            job.pending_targets = vec![ScanTarget {
+                path: blocked.clone(),
+                last_modified_epoch: 1,
+                size_bytes: 40,
+                origin: ScanOrigin::RealTimeProtection,
+                priority: ProtectionPriority::High,
+                file_class: ProtectionFileClass::Script,
+                grouped_change_count: 1,
+                burst_window_seconds: 1,
+                change_class: ProtectionChangeClass::Modified,
+            }]
+            .into();
+        }
+
+        app.drain_protection_backlog();
+
+        let queued_paths = app
+            .job
+            .lock()
+            .map(|job| {
+                job.pending_targets
+                    .iter()
+                    .map(|target| target.path.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        assert!(queued_paths.contains(&blocked));
+        assert!(queued_paths.contains(&ready));
+        assert!(app
+            .protection_backlog
+            .iter()
+            .any(|target| target.path == blocked));
+    }
+
+    #[test]
+    fn backlog_retry_under_larger_burst_prioritizes_high_without_starving_normal() {
+        let mut app = MyApp::new();
+        app.protection_events.clear();
+        app.protection_backlog.clear();
+        app.settings.enable_real_time_protection = true;
+
+        for index in 0..24 {
+            app.protection_backlog.push_back(ScanTarget {
+                path: std::env::temp_dir().join(format!("normal_burst_target_{index}.txt")),
+                last_modified_epoch: index,
+                size_bytes: 40,
+                origin: ScanOrigin::RealTimeProtection,
+                priority: ProtectionPriority::Normal,
+                file_class: ProtectionFileClass::Other,
+                grouped_change_count: 1,
+                burst_window_seconds: 1,
+                change_class: ProtectionChangeClass::Modified,
+            });
+        }
+        let high_path = std::env::temp_dir().join("high_burst_target.ps1");
+        app.protection_backlog.push_back(ScanTarget {
+            path: high_path.clone(),
+            last_modified_epoch: 100,
+            size_bytes: 80,
+            origin: ScanOrigin::RealTimeProtection,
+            priority: ProtectionPriority::High,
+            file_class: ProtectionFileClass::Script,
+            grouped_change_count: 6,
+            burst_window_seconds: 8,
+            change_class: ProtectionChangeClass::Replaced,
+        });
+
+        if let Ok(mut job) = app.job.lock() {
+            job.running = true;
+            job.pending_targets.clear();
+        }
+
+        app.drain_protection_backlog();
+
+        let queued = app
+            .job
+            .lock()
+            .map(|job| job.pending_targets.iter().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        assert!(!queued.is_empty());
+        assert_eq!(queued[0].path, high_path);
+        assert!(queued.len() > 1);
+        assert!(queued
+            .iter()
+            .any(|target| target.priority == ProtectionPriority::Normal));
+    }
+
+    #[test]
+    fn protection_summary_reports_load_metrics() {
+        let mut app = MyApp::new();
+        app.protection_events.clear();
+        app.settings.enable_real_time_protection = true;
+        app.protection_events.push(ProtectionEvent {
+            id: "grouped".to_string(),
+            timestamp_epoch: now_epoch(),
+            path: "/tmp/grouped.ps1".to_string(),
+            kind: ProtectionEventKind::Queued.label().to_string(),
+            note: "Queued grouped burst".to_string(),
+            workflow_source: ScanOrigin::RealTimeProtection.label().to_string(),
+            event_source: "Test OS events".to_string(),
+            verdict: None,
+            storage_state: None,
+            scan_id: None,
+            grouped_change_count: 8,
+            burst_window_seconds: 2,
+            change_class: ProtectionChangeClass::Modified,
+            file_class: ProtectionFileClass::Script,
+            priority: ProtectionPriority::High,
+        });
+        app.protection_events.push(ProtectionEvent {
+            id: "skipped".to_string(),
+            timestamp_epoch: now_epoch(),
+            path: "/tmp/cache.tmp".to_string(),
+            kind: ProtectionEventKind::Skipped.label().to_string(),
+            note: "Skipped temp/cache noise".to_string(),
+            workflow_source: ScanOrigin::RealTimeProtection.label().to_string(),
+            event_source: "Test OS events".to_string(),
+            verdict: None,
+            storage_state: None,
+            scan_id: None,
+            grouped_change_count: 1,
+            burst_window_seconds: 0,
+            change_class: ProtectionChangeClass::Created,
+            file_class: ProtectionFileClass::TempCache,
+            priority: ProtectionPriority::Low,
+        });
+
+        app.refresh_protection_summary();
+
+        assert_ne!(app.protection_summary.dedupe_efficiency, "0%");
+        assert_ne!(app.protection_summary.event_drop_rate, "0%");
+        assert!(app.protection_summary.backlog_recovery_rate.ends_with('%'));
+    }
+
+    #[test]
+    fn event_monitor_messages_queue_grouped_scan_once() {
+        let watch_path =
+            std::env::temp_dir().join(format!("projectx_event_watch_{}.ps1", std::process::id()));
+        std::fs::write(&watch_path, b"Start-Process calc").unwrap();
+        let (tx, rx) = crossbeam_channel::unbounded();
+
+        let mut app = MyApp::new();
+        app.protection_events.clear();
+        app.settings.enable_real_time_protection = true;
+        app.settings.watched_paths = vec![WatchedPathConfig {
+            path: watch_path.to_string_lossy().to_string(),
+            recursive: false,
+        }];
+        app.protection_monitor.mode = ProtectionMonitorMode::EventDriven;
+        app.protection_monitor.source_label = "Test OS events".to_string();
+        app.protection_monitor.receiver = Some(rx);
+        if let Ok(mut job) = app.job.lock() {
+            job.running = true;
+        }
+
+        tx.send(ProtectionMonitorMessage::Event(ProtectionMonitorEvent {
+            path: watch_path.clone(),
+            change_class: ProtectionChangeClass::Modified,
+            source_label: "Test OS events".to_string(),
+        }))
+        .unwrap();
+        tx.send(ProtectionMonitorMessage::Event(ProtectionMonitorEvent {
+            path: watch_path.clone(),
+            change_class: ProtectionChangeClass::Modified,
+            source_label: "Test OS events".to_string(),
+        }))
+        .unwrap();
+
+        app.drain_protection_monitor_events();
+
+        let queued = app
+            .job
+            .lock()
+            .map(|job| job.pending_targets.len())
+            .unwrap_or_default();
+        assert_eq!(queued, 1);
+        assert!(app.protection_events.iter().any(|event| {
+            event.kind == ProtectionEventKind::Queued.label()
+                && event.event_source == "Test OS events"
+                && event.grouped_change_count >= 2
+        }));
+
+        let _ = std::fs::remove_file(watch_path);
+    }
+
+    #[test]
+    fn event_monitor_large_burst_still_queues_one_grouped_scan() {
+        let watch_path =
+            std::env::temp_dir().join(format!("projectx_event_burst_{}.ps1", std::process::id()));
+        std::fs::write(&watch_path, b"Start-Process calc").unwrap();
+        let (tx, rx) = crossbeam_channel::unbounded();
+
+        let mut app = MyApp::new();
+        app.protection_events.clear();
+        app.settings.enable_real_time_protection = true;
+        app.settings.watched_paths = vec![WatchedPathConfig {
+            path: watch_path.to_string_lossy().to_string(),
+            recursive: false,
+        }];
+        app.protection_monitor.mode = ProtectionMonitorMode::EventDriven;
+        app.protection_monitor.source_label = "Burst OS events".to_string();
+        app.protection_monitor.receiver = Some(rx);
+        if let Ok(mut job) = app.job.lock() {
+            job.running = true;
+        }
+
+        for _ in 0..24 {
+            tx.send(ProtectionMonitorMessage::Event(ProtectionMonitorEvent {
+                path: watch_path.clone(),
+                change_class: ProtectionChangeClass::Modified,
+                source_label: "Burst OS events".to_string(),
+            }))
+            .unwrap();
+        }
+
+        app.drain_protection_monitor_events();
+
+        let queued_events = app
+            .protection_events
+            .iter()
+            .filter(|event| event.kind == ProtectionEventKind::Queued.label())
+            .collect::<Vec<_>>();
+        assert_eq!(queued_events.len(), 1);
+        assert!(queued_events[0].grouped_change_count >= 24);
+
+        let queued_targets = app
+            .job
+            .lock()
+            .map(|job| job.pending_targets.len())
+            .unwrap_or_default();
+        assert_eq!(queued_targets, 1);
+
+        let _ = std::fs::remove_file(watch_path);
+    }
+
+    #[test]
+    fn event_monitor_groups_replace_then_modify_as_one_replaced_scan() {
+        let watch_path =
+            std::env::temp_dir().join(format!("projectx_event_replace_{}.ps1", std::process::id()));
+        std::fs::write(&watch_path, b"Start-Process placeholder").unwrap();
+        let (tx, rx) = crossbeam_channel::unbounded();
+
+        let mut app = MyApp::new();
+        app.protection_events.clear();
+        app.settings.enable_real_time_protection = true;
+        app.settings.watched_paths = vec![WatchedPathConfig {
+            path: watch_path.to_string_lossy().to_string(),
+            recursive: false,
+        }];
+        app.protection_monitor.mode = ProtectionMonitorMode::EventDriven;
+        app.protection_monitor.source_label = "Test OS events".to_string();
+        app.protection_monitor.receiver = Some(rx);
+        if let Ok(mut job) = app.job.lock() {
+            job.running = true;
+        }
+
+        tx.send(ProtectionMonitorMessage::Event(ProtectionMonitorEvent {
+            path: watch_path.clone(),
+            change_class: ProtectionChangeClass::Replaced,
+            source_label: "Test OS events".to_string(),
+        }))
+        .unwrap();
+        tx.send(ProtectionMonitorMessage::Event(ProtectionMonitorEvent {
+            path: watch_path.clone(),
+            change_class: ProtectionChangeClass::Modified,
+            source_label: "Test OS events".to_string(),
+        }))
+        .unwrap();
+
+        app.drain_protection_monitor_events();
+
+        let queued = app
+            .protection_events
+            .iter()
+            .find(|event| event.kind == ProtectionEventKind::Queued.label())
+            .unwrap();
+        assert_eq!(queued.change_class, ProtectionChangeClass::Replaced);
+        assert!(queued.grouped_change_count >= 2);
+
+        let _ = std::fs::remove_file(watch_path);
+    }
+
+    #[test]
+    fn event_monitor_burst_respects_busy_queue_without_duplicate_scan_flood() {
+        let watch_path = std::env::temp_dir().join(format!(
+            "projectx_event_burst_pending_{}.ps1",
+            std::process::id()
+        ));
+        std::fs::write(&watch_path, b"Start-Process placeholder").unwrap();
+        let (tx, rx) = crossbeam_channel::unbounded();
+
+        let mut app = MyApp::new();
+        app.protection_events.clear();
+        app.protection_backlog.clear();
+        app.settings.enable_real_time_protection = true;
+        app.settings.watched_paths = vec![WatchedPathConfig {
+            path: watch_path.to_string_lossy().to_string(),
+            recursive: false,
+        }];
+        app.protection_monitor.mode = ProtectionMonitorMode::EventDriven;
+        app.protection_monitor.source_label = "Burst OS events".to_string();
+        app.protection_monitor.receiver = Some(rx);
+        if let Ok(mut job) = app.job.lock() {
+            job.running = true;
+            job.pending_targets.push_back(ScanTarget {
+                path: watch_path.clone(),
+                last_modified_epoch: 1,
+                size_bytes: 12,
+                origin: ScanOrigin::RealTimeProtection,
+                priority: ProtectionPriority::High,
+                file_class: ProtectionFileClass::Script,
+                grouped_change_count: 1,
+                burst_window_seconds: 0,
+                change_class: ProtectionChangeClass::Modified,
+            });
+        }
+
+        for _ in 0..12 {
+            tx.send(ProtectionMonitorMessage::Event(ProtectionMonitorEvent {
+                path: watch_path.clone(),
+                change_class: ProtectionChangeClass::Modified,
+                source_label: "Burst OS events".to_string(),
+            }))
+            .unwrap();
+        }
+
+        app.drain_protection_monitor_events();
+
+        assert_eq!(app.protection_backlog.len(), 1);
+        let deferred = app
+            .protection_events
+            .iter()
+            .filter(|event| {
+                event.kind == ProtectionEventKind::Deferred.label()
+                    && event.path == watch_path.to_string_lossy()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(deferred.len(), 1);
+        assert!(deferred[0].grouped_change_count >= 12);
+
+        let queued_targets = app
+            .job
+            .lock()
+            .map(|job| job.pending_targets.len())
+            .unwrap_or_default();
+        assert_eq!(queued_targets, 1);
+
+        let _ = std::fs::remove_file(watch_path);
+    }
+
+    #[test]
+    fn event_monitor_defers_follow_up_when_target_is_already_pending() {
+        let watch_path =
+            std::env::temp_dir().join(format!("projectx_event_pending_{}.ps1", std::process::id()));
+        std::fs::write(&watch_path, b"Start-Process placeholder").unwrap();
+        let (tx, rx) = crossbeam_channel::unbounded();
+
+        let mut app = MyApp::new();
+        app.protection_events.clear();
+        app.protection_backlog.clear();
+        app.settings.enable_real_time_protection = true;
+        app.settings.watched_paths = vec![WatchedPathConfig {
+            path: watch_path.to_string_lossy().to_string(),
+            recursive: false,
+        }];
+        app.protection_monitor.mode = ProtectionMonitorMode::EventDriven;
+        app.protection_monitor.source_label = "Test OS events".to_string();
+        app.protection_monitor.receiver = Some(rx);
+        if let Ok(mut job) = app.job.lock() {
+            job.running = true;
+            job.pending_targets.push_back(ScanTarget {
+                path: watch_path.clone(),
+                last_modified_epoch: 1,
+                size_bytes: 12,
+                origin: ScanOrigin::RealTimeProtection,
+                priority: ProtectionPriority::High,
+                file_class: ProtectionFileClass::Script,
+                grouped_change_count: 1,
+                burst_window_seconds: 0,
+                change_class: ProtectionChangeClass::Modified,
+            });
+        }
+
+        tx.send(ProtectionMonitorMessage::Event(ProtectionMonitorEvent {
+            path: watch_path.clone(),
+            change_class: ProtectionChangeClass::Modified,
+            source_label: "Test OS events".to_string(),
+        }))
+        .unwrap();
+
+        app.drain_protection_monitor_events();
+
+        assert_eq!(app.protection_backlog.len(), 1);
+        assert!(app.protection_events.iter().any(|event| {
+            event.kind == ProtectionEventKind::Deferred.label()
+                && event.path == watch_path.to_string_lossy()
+        }));
+
+        let _ = std::fs::remove_file(watch_path);
+    }
+
+    #[test]
+    fn watcher_init_failure_uses_polling_fallback() {
+        let mut app = MyApp::new();
+        app.settings.enable_real_time_protection = true;
+        app.settings.watched_paths = vec![WatchedPathConfig {
+            path: std::env::temp_dir()
+                .join(format!("missing_watch_root_{}", std::process::id()))
+                .join("does_not_exist")
+                .to_string_lossy()
+                .to_string(),
+            recursive: true,
+        }];
+
+        app.ensure_protection_monitor();
+
+        assert_eq!(
+            app.protection_monitor.mode,
+            ProtectionMonitorMode::PollingFallback
+        );
+        assert!(app.protection_monitor.last_error.is_some());
+    }
+
+    #[test]
+    fn notify_rename_events_map_to_replaced() {
+        let kind = EventKind::Modify(notify::event::ModifyKind::Name(
+            notify::event::RenameMode::Both,
+        ));
+        assert_eq!(
+            notify_change_class(&kind),
+            Some(ProtectionChangeClass::Replaced)
+        );
+    }
+
+    #[test]
+    fn backlog_priority_index_ignores_pending_paths() {
+        let blocked = std::env::temp_dir().join("blocked_target.ps1");
+        let ready = std::env::temp_dir().join("ready_target.ps1");
+        let backlog = VecDeque::from([
+            ScanTarget {
+                path: blocked.clone(),
+                last_modified_epoch: 1,
+                size_bytes: 40,
+                origin: ScanOrigin::RealTimeProtection,
+                priority: ProtectionPriority::High,
+                file_class: ProtectionFileClass::Script,
+                grouped_change_count: 1,
+                burst_window_seconds: 0,
+                change_class: ProtectionChangeClass::Modified,
+            },
+            ScanTarget {
+                path: ready,
+                last_modified_epoch: 1,
+                size_bytes: 40,
+                origin: ScanOrigin::RealTimeProtection,
+                priority: ProtectionPriority::Normal,
+                file_class: ProtectionFileClass::Script,
+                grouped_change_count: 1,
+                burst_window_seconds: 0,
+                change_class: ProtectionChangeClass::Modified,
+            },
+        ]);
+        let pending = HashSet::from([blocked]);
+
+        let index = highest_priority_backlog_index(&backlog, &pending);
+        assert_eq!(index, Some(1));
     }
 }

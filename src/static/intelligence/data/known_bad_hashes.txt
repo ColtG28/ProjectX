@@ -1,0 +1,3 @@
+# Local known-bad hash entries for passive testing and analyst overrides.
+# Format:
+# <sha256> <note>

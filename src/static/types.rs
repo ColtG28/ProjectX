@@ -160,4 +160,57 @@ pub struct ThreatSeveritySummary {
     pub contributing_signals: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IntelligenceRecord {
+    pub kind: String,
+    pub category: String,
+    pub source: String,
+    pub confidence: String,
+    pub trust_level: Option<String>,
+    pub note: String,
+    pub platform: Option<String>,
+    pub version: Option<String>,
+    pub expires: Option<String>,
+    pub allowed_dampen: Vec<String>,
+    pub matched_markers: Vec<String>,
+    pub vendor: Option<String>,
+    pub ecosystem: Option<String>,
+    pub rationale: Option<String>,
+    pub version_range: Option<String>,
+    pub typical_files: Vec<String>,
+    #[serde(default)]
+    pub signer_hint: Option<String>,
+    #[serde(default)]
+    pub package_source: Option<String>,
+    #[serde(default)]
+    pub distribution_channel: Option<String>,
+    #[serde(default)]
+    pub confidence_weight: Option<f64>,
+    #[serde(default)]
+    pub trust_scope: Vec<String>,
+    #[serde(default)]
+    pub confidence_score: Option<f64>,
+    #[serde(default)]
+    pub source_quality: Option<f64>,
+    #[serde(default)]
+    pub last_verified: Option<String>,
+    #[serde(default)]
+    pub decay_factor: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IntelligenceSummary {
+    pub store_version: Option<String>,
+    pub reputation_hits: Vec<String>,
+    pub trust_reasons: Vec<String>,
+    pub confidence_notes: Vec<String>,
+    pub records: Vec<IntelligenceRecord>,
+    pub policy_effects: Vec<String>,
+    pub trust_categories: Vec<String>,
+    pub trust_ecosystems: Vec<String>,
+    pub trust_vendors: Vec<String>,
+    pub external_intelligence_status: String,
+    pub external_intelligence_enabled: bool,
+}
+
 pub type Weights = HashMap<String, f64>;

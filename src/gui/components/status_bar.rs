@@ -53,6 +53,7 @@ pub fn signal_badge(ui: &mut egui::Ui, source: &str) {
     let (label, color) = match source {
         "heuristic" => ("H", Color32::from_rgb(224, 185, 105)),
         "rule" => ("R", Color32::from_rgb(110, 170, 214)),
+        "intelligence" => ("I", Color32::from_rgb(126, 196, 148)),
         "emulation" => ("E", Color32::from_rgb(194, 142, 214)),
         "ml" => ("ML", Color32::from_rgb(132, 205, 168)),
         "cache" => ("C", Color32::from_rgb(140, 150, 160)),

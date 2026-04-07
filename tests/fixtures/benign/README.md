@@ -10,6 +10,7 @@ Each file is harmless and intentionally shaped to resemble patterns that can loo
 - `office/`: harmless macro-like automation markers and document workflows
 - `encoded/`: base64 or encoded configuration/data blobs
 - `archives/`: source content used to build valid nested or dense archives during tests
+- newer additions broaden this slice with CI/admin sync helpers, transpiled runtime chunks, package restore notes, mixed archive inventories, encoded theme maps, and office template notes
 
 The fixtures are small, readable where practical, and must remain free of:
 
@@ -20,8 +21,9 @@ The fixtures are small, readable where practical, and must remain free of:
 - execution or detonation behavior
 
 Tests may combine these fixture files into temporary archive or Office-like containers, but the source content itself stays inert and local.
-Benign parser guardrails may also use deterministic PE/ELF byte builders from `tests/support/parser_fixtures.rs` to exercise parsed section, import, interpreter, or ELF symbol layouts without storing executable samples.
-Some parser guardrails intentionally mix weak parsed binary cues with harmless text so threshold-edge behavior stays stable as PE and ELF support evolve.
+Benign parser guardrails may also use deterministic PE/ELF/Mach-O byte builders from `tests/support/parser_fixtures.rs` to exercise parsed section, entrypoint, import, interpreter, symbol, static-symbol, or linked-library layouts without storing executable samples.
+Some parser guardrails intentionally mix weak parsed binary cues with harmless text so threshold-edge behavior stays stable as PE, ELF, and Mach-O support evolve.
+The intelligence-layer guardrails also verify that trusted framework, tooling, vendor/package, and updater contexts from the structured local intelligence store dampen only the weak signal classes they are allowed to dampen without hiding stronger corroborated findings.
 
 ## Fixture Notes
 
@@ -34,6 +36,11 @@ Some parser guardrails intentionally mix weak parsed binary cues with harmless t
   Simulates scheduled cleanup and archive maintenance.
   Triggers: file and archive workflow terms.
   Should remain clean because it lacks obfuscation, hidden content recovery, or corroborating rule hits.
+
+- `admin/ci_release_sync.ps1`
+  Simulates CI release synchronization and manifest verification.
+  Triggers: deployment and update-oriented wording.
+  Should remain clean because it is routine automation without hidden launch or decode behavior.
 
 - `developer/minified_bundle.js`
   Simulates a production frontend bundle.
@@ -55,6 +62,11 @@ Some parser guardrails intentionally mix weak parsed binary cues with harmless t
   Triggers: encoded strings and JavaScript reconstruction.
   Should remain clean because it is a benign configuration pattern.
 
+- `developer/transpiled_runtime_chunk.js`
+  Simulates a transpiled runtime/bootstrap bundle that decodes inert configuration.
+  Triggers: bundled frontend and encoded asset markers.
+  Should remain clean because it reflects normal production runtime scaffolding.
+
 - `installers/update_checker.ps1`
   Simulates an update checker with download-style text.
   Triggers: PowerShell web request markers.
@@ -69,6 +81,11 @@ Some parser guardrails intentionally mix weak parsed binary cues with harmless t
   Simulates environment probing before install compatibility checks.
   Triggers: web request and system inspection markers.
   Should remain clean because it is normal environment validation.
+
+- `installers/package_restore.ps1`
+  Simulates a package restore helper reading cached manifest and lock data.
+  Triggers: package-workflow and installer wording.
+  Should remain clean because it lacks launcher, hidden window, or downloader correlation.
 
 - `office/macro_notes.txt`
   Simulates macro container storage and auto-run labels.
@@ -95,7 +112,13 @@ Some parser guardrails intentionally mix weak parsed binary cues with harmless t
   Triggers: base64 decoding paths.
   Should remain clean because it decodes to inert template data.
 
+- `encoded/theme_asset_map.txt`
+  Simulates encoded theme assets and template references.
+  Triggers: base64-like asset blobs.
+  Should remain clean because the content is static asset metadata only.
+
 - `archives/readme.txt`, `archives/update_manifest.txt`, `archives/script_notes.txt`
+- `archives/readme.txt`, `archives/update_manifest.txt`, `archives/script_notes.txt`, `archives/mixed_bundle_inventory.txt`
   Simulate harmless archive contents used to build nested or dense archives in tests.
   Triggers: archive complexity only when combined in generated containers.
   Should remain clean because the contents are documentation and manifests, not payloads.

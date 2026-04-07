@@ -154,6 +154,10 @@ fn matches_container_family(bytes: &[u8], ext_upper: &str) -> bool {
         return matches!(ext_upper, "ELF" | "SO");
     }
 
+    if looks_like_macho(bytes) {
+        return matches!(ext_upper, "" | "MACHO" | "DYLIB" | "BUNDLE" | "O");
+    }
+
     if bytes.starts_with(b"%PDF") {
         return matches!(ext_upper, "PDF" | "FDF");
     }
@@ -197,6 +201,20 @@ fn matches_text_family(bytes: &[u8], ext_upper: &str) -> bool {
         )
 }
 
+fn looks_like_macho(bytes: &[u8]) -> bool {
+    matches!(
+        bytes.get(0..4),
+        Some([0xFE, 0xED, 0xFA, 0xCE])
+            | Some([0xCE, 0xFA, 0xED, 0xFE])
+            | Some([0xFE, 0xED, 0xFA, 0xCF])
+            | Some([0xCF, 0xFA, 0xED, 0xFE])
+            | Some([0xCA, 0xFE, 0xBA, 0xBE])
+            | Some([0xBE, 0xBA, 0xFE, 0xCA])
+            | Some([0xCA, 0xFE, 0xBA, 0xBF])
+            | Some([0xBF, 0xBA, 0xFE, 0xCA])
+    )
+}
+
 fn seems_text(bytes: &[u8]) -> bool {
     if std::str::from_utf8(bytes).is_ok() {
         return true;
@@ -229,6 +247,19 @@ mod tests {
     fn accepts_elf_family_headers() {
         assert!(find_header_bytes(b"\x7fELF\x02\x01\x01\x00", "elf"));
         assert!(find_header_bytes(b"\x7fELF\x02\x01\x01\x00", "so"));
+    }
+
+    #[test]
+    fn accepts_macho_family_headers() {
+        assert!(find_header_bytes(
+            b"\xCF\xFA\xED\xFE\x07\x00\x00\x01",
+            "dylib"
+        ));
+        assert!(find_header_bytes(b"\xCF\xFA\xED\xFE\x07\x00\x00\x01", ""));
+        assert!(find_header_bytes(
+            b"\xCA\xFE\xBA\xBE\x00\x00\x00\x01",
+            "macho"
+        ));
     }
 
     #[test]

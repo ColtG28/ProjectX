@@ -15,7 +15,11 @@ pub fn run(ctx: &mut ScanContext) {
     let mut assessment = model::score(&feature_vector);
     let mut intel_score = 0.0f64;
 
-    let threat_matches = threat_intel::lookup_hash(&ctx.sha256);
+    let threat_matches = if ctx.config.features.enable_external_intelligence {
+        threat_intel::lookup_external_hashes(&ctx.sha256)
+    } else {
+        Vec::new()
+    };
     if !threat_matches.is_empty() {
         let providers = threat_matches
             .iter()

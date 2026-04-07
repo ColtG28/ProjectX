@@ -17,6 +17,12 @@ fn http_client() -> &'static reqwest::blocking::Client {
 }
 
 pub fn lookup_hash(sha256: &str) -> Vec<ThreatIntelMatch> {
+    let mut matches = lookup_local_hashes(sha256);
+    matches.extend(lookup_external_hashes(sha256));
+    matches
+}
+
+pub fn lookup_local_hashes(sha256: &str) -> Vec<ThreatIntelMatch> {
     let mut matches = Vec::new();
 
     if let Some(detail) = lookup_local_feed(sha256) {
@@ -33,6 +39,11 @@ pub fn lookup_hash(sha256: &str) -> Vec<ThreatIntelMatch> {
         });
     }
 
+    matches
+}
+
+pub fn lookup_external_hashes(sha256: &str) -> Vec<ThreatIntelMatch> {
+    let mut matches = Vec::new();
     if std::env::var("MALWAREBAZAAR_KEY").is_ok() {
         match check_malware_hash(sha256) {
             MalwareHashStatus::Match => matches.push(ThreatIntelMatch {

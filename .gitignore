@@ -1,4 +1,34 @@
-/target
-/Planning
+# Local build output
+/target/
+
+# Local planning/scratch files
+/Planning/
+
+# Local secrets/config
 /.env
-/quarantine
+
+# Runtime scanner state, quarantine, reports, and generated validation corpora
+/quarantine/
+
+# Generated fixture payloads should stay local, but keep their README docs trackable.
+/tests/fixtures/generated/**
+!/tests/fixtures/generated/**/
+!/tests/fixtures/generated/**/README.md
+
+# Optional large benchmark/download workspaces
+/ember_benchmark/
+/raw_benchmark/
+/ml_train/downloads/
+
+# Test/coverage/cache artifacts
+*.profraw
+*.profdata
+/coverage/
+/tarpaulin-report.html
+/.pytest_cache/
+__pycache__/
+
+# OS/editor noise
+.DS_Store
+*.swp
+*.swo

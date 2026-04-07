@@ -98,6 +98,157 @@ impl MyApp {
         }
 
         ui.separator();
+        ui.group(|ui| {
+            ui.label(egui::RichText::new("Real-time protection").strong());
+            ui.horizontal_wrapped(|ui| {
+                stat_chip(
+                    ui,
+                    "Status",
+                    if self.protection_summary.enabled {
+                        self.protection_summary.monitor_state.clone()
+                    } else {
+                        "Disabled".to_string()
+                    },
+                    if self.protection_summary.enabled {
+                        Color32::from_rgb(127, 191, 127)
+                    } else {
+                        Color32::from_rgb(170, 170, 180)
+                    },
+                );
+                stat_chip(
+                    ui,
+                    "Watched paths",
+                    self.protection_summary.watched_path_count.to_string(),
+                    Color32::from_rgb(176, 221, 255),
+                );
+                stat_chip(
+                    ui,
+                    "Recent events",
+                    self.protection_summary.recent_event_count.to_string(),
+                    Color32::from_rgb(132, 170, 214),
+                );
+                stat_chip(
+                    ui,
+                    "Grouped queue",
+                    self.protection_summary.queued_event_count.to_string(),
+                    Color32::from_rgb(127, 191, 127),
+                );
+                stat_chip(
+                    ui,
+                    "Backlog",
+                    self.protection_summary.backlog_count.to_string(),
+                    Color32::from_rgb(224, 185, 105),
+                );
+                stat_chip(
+                    ui,
+                    "Throttled",
+                    self.protection_summary.throttled_event_count.to_string(),
+                    Color32::from_rgb(224, 185, 105),
+                );
+                stat_chip(
+                    ui,
+                    "Health",
+                    self.protection_summary.queue_health.clone(),
+                    Color32::from_rgb(176, 221, 255),
+                );
+                stat_chip(
+                    ui,
+                    "Monitor",
+                    self.protection_summary.monitor_mode.clone(),
+                    Color32::from_rgb(132, 170, 214),
+                );
+                stat_chip(
+                    ui,
+                    "Dedupe",
+                    self.protection_summary.dedupe_efficiency.clone(),
+                    Color32::from_rgb(127, 191, 127),
+                );
+                stat_chip(
+                    ui,
+                    "Drop rate",
+                    self.protection_summary.event_drop_rate.clone(),
+                    Color32::from_rgb(224, 185, 105),
+                );
+                stat_chip(
+                    ui,
+                    "Backlog recovery",
+                    self.protection_summary.backlog_recovery_rate.clone(),
+                    Color32::from_rgb(176, 221, 255),
+                );
+                stat_chip(
+                    ui,
+                    "Download snapshots",
+                    if self.settings.enable_download_monitoring {
+                        "On".to_string()
+                    } else {
+                        "Off".to_string()
+                    },
+                    Color32::from_rgb(224, 185, 105),
+                );
+            });
+            if !self.protection_summary.active_status.is_empty() {
+                ui.label(&self.protection_summary.active_status);
+            } else {
+                ui.label("Automatic protection scans will appear here when watched files change.");
+            }
+            if !self.protection_summary.queue_health_detail.is_empty() {
+                ui.label(format!(
+                    "Queue detail: {}",
+                    self.protection_summary.queue_health_detail
+                ));
+            }
+            ui.label(format!(
+                "Last event: {}",
+                self.protection_summary.last_event_label
+            ));
+            if self.protection_summary.backlog_count > 0 {
+                ui.label(format!(
+                    "Deferred protection backlog: {} item(s) waiting for queue capacity.",
+                    self.protection_summary.backlog_count
+                ));
+            }
+            if !self.settings.watched_paths.is_empty() {
+                ui.label("Watched locations");
+                for watched in self.settings.watched_paths.iter().take(4) {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.monospace(&watched.path);
+                        ui.label(if watched.recursive {
+                            "Recursive"
+                        } else {
+                            "Top level only"
+                        });
+                    });
+                }
+            }
+            if !self.protection_events.is_empty() {
+                ui.add_space(6.0);
+                ui.label("Recent protection events");
+                for event in self.protection_events.iter().rev().take(5) {
+                    ui.group(|ui| {
+                        ui.label(format!(
+                            "{} | {} | {} | {} | {}",
+                            event.kind,
+                            crate::gui::app::format_timestamp_compact(event.timestamp_epoch),
+                            event.workflow_source,
+                            event.change_class.label(),
+                            event.file_class.label()
+                        ));
+                        ui.monospace(&event.path);
+                        if event.grouped_change_count > 1 || event.burst_window_seconds > 0 {
+                            ui.label(format!(
+                                "Grouped {} change(s) across {}s | priority {}",
+                                event.grouped_change_count,
+                                event.burst_window_seconds,
+                                event.priority.label()
+                            ));
+                        }
+                        ui.label(&event.note);
+                    });
+                }
+            }
+        });
+
+        ui.separator();
         let snapshot = self.job.lock().map(|job| job.clone()).unwrap_or_default();
         ui.group(|ui| {
             ui.label(egui::RichText::new("Live job status").strong());

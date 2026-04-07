@@ -44,6 +44,14 @@ fn scan_parallel_still_returns_json_report_for_gui_history() {
     assert!(report["verdict"]["normalized_severity"].is_string());
     assert!(report["reasons"].is_array());
     assert!(report["summary"]["warning_count"].is_u64());
+    assert!(report["intelligence"].is_object() || report["intelligence"].is_null());
+    assert!(report["summary"]["intelligence_status"].is_string());
+    assert!(report["summary"]["intelligence_store_version"].is_string());
+    assert!(report["summary"]["reputation_hit_count"].is_u64());
+    assert!(report["summary"]["trust_reason_count"].is_u64());
+    assert!(report["summary"]["trust_category_count"].is_u64());
+    assert!(report["summary"]["trust_ecosystem_count"].is_u64());
+    assert!(report["summary"]["trust_vendor_count"].is_u64());
     assert!(report.get("sandbox_plan").is_none());
     assert!(report.get("dynamic_analysis").is_none());
     assert!(outcome.report_path.is_file());
@@ -68,6 +76,30 @@ fn ml_assessment_accepts_legacy_dynamic_score_field() {
 
     let assessment: MlAssessment = serde_json::from_value(value).unwrap();
     assert_eq!(assessment.runtime_signal_score, 0.4);
+}
+
+#[test]
+fn json_report_preserves_intelligence_provenance_metadata() {
+    let path = unique_path("framework_chunk.min.js");
+    fs::write(
+        &path,
+        "(()=>{var __webpack_require__={};console.log('react.production.min');})();",
+    )
+    .unwrap();
+
+    let outcome = r#static::scan_path(path.to_str().unwrap(), Some(ScanConfig::default())).unwrap();
+    let report = serde_json::from_str::<serde_json::Value>(&outcome.json_report).unwrap();
+
+    assert!(report["intelligence"].is_object() || report["intelligence"].is_null());
+    assert!(report["summary"]["trust_ecosystem_count"].is_u64());
+    assert!(report["summary"]["trust_vendor_count"].is_u64());
+    if let Some(records) = report["intelligence"]["records"].as_array() {
+        if let Some(record) = records.first() {
+            assert!(record.get("allowed_dampen").is_some());
+        }
+    }
+
+    cleanup_outcome(&path, &outcome);
 }
 
 fn unique_path(name: &str) -> PathBuf {

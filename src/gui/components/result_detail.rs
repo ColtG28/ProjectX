@@ -7,10 +7,15 @@ use crate::gui::app::{format_elapsed_ms, format_timestamp_with_relative};
 use crate::gui::components::status_bar::{
     badge, count_badge, severity_color, signal_badge, storage_badge, verdict_color,
 };
-use crate::gui::state::ScanRecord;
+use crate::gui::state::{ProtectionEvent, ScanRecord};
 use crate::r#static::report::source_label;
 
-pub fn render_result_detail(ui: &mut egui::Ui, scale: f32, record: &ScanRecord) {
+pub fn render_result_detail(
+    ui: &mut egui::Ui,
+    scale: f32,
+    record: &ScanRecord,
+    protection_event: Option<&ProtectionEvent>,
+) {
     ui.heading("Detection Detail");
     ui.label("Pinned result metadata, signal sources, and safe follow-up context.");
     ui.separator();
@@ -62,11 +67,53 @@ pub fn render_result_detail(ui: &mut egui::Ui, scale: f32, record: &ScanRecord) 
         if let Some(format_name) = record.detected_format.as_deref() {
             ui.label(format!("Detected format: {format_name}"));
         }
+        if let Some(origin) = record.workflow_origin.as_deref() {
+            ui.label(format!("Workflow: {origin}"));
+        }
+        if let Some(event) = protection_event {
+            ui.label(format!(
+                "Protection event: {} | {} | {} | {} priority",
+                event.kind,
+                event.change_class.label(),
+                event.file_class.label(),
+                event.priority.label()
+            ));
+            ui.label(format!(
+                "Protection path: {}",
+                if event.workflow_source.is_empty() {
+                    "Automatic scan".to_string()
+                } else {
+                    event.workflow_source.clone()
+                }
+            ));
+            if event.grouped_change_count > 1 || event.burst_window_seconds > 0 {
+                ui.label(format!(
+                    "Grouped {} change(s) across {}s before this scan.",
+                    event.grouped_change_count, event.burst_window_seconds
+                ));
+            }
+            if let Some(verdict) = event.verdict.as_deref() {
+                ui.label(format!("Protection result: {verdict}"));
+            }
+            if let Some(action) = event.storage_state.as_deref() {
+                ui.label(format!("Protection action: {action}"));
+            }
+            if !event.event_source.is_empty() {
+                ui.label(format!("Event source: {}", event.event_source));
+            }
+        }
         if let Some(risk) = record.risk_score {
             ui.label(format!("Risk score: {risk:.2}"));
         }
         if let Some(safety) = record.safety_score {
             ui.label(format!("Safety score: {safety:.2}"));
+        }
+        if record
+            .signal_sources
+            .iter()
+            .any(|source| source == "intelligence")
+        {
+            ui.label("Local intelligence influenced confidence for this result.");
         }
     });
 
@@ -121,6 +168,21 @@ pub fn render_result_detail(ui: &mut egui::Ui, scale: f32, record: &ScanRecord) 
             ui.label(&record.summary_text);
         } else {
             ui.label("No summary note recorded.");
+        }
+        if let Some(event) = protection_event {
+            ui.add_space(4.0 * scale);
+            ui.label(RichText::new("Protection event").strong());
+            ui.label(&event.note);
+            ui.label(format!(
+                "Origin: {} | Event type: {}{}",
+                event.workflow_source,
+                event.kind,
+                if event.event_source.is_empty() {
+                    String::new()
+                } else {
+                    format!(" | Source: {}", event.event_source)
+                }
+            ));
         }
         if !record.action_note.is_empty() {
             ui.add_space(4.0 * scale);
