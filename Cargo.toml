@@ -27,6 +27,9 @@ eframe = { version = "0.24.1", optional = true, default-features = false, featur
 rfd = { version = "0.14", optional = true }
 notify = { version = "6.1", optional = true }
 
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["winuser", "windef", "winbase", "libloaderapi"] }
+
 [profile.release]
 codegen-units = 1
 lto = "fat"
