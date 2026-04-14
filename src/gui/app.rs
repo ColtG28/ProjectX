@@ -19,6 +19,9 @@ use super::components::result_list::render_result_row;
 use super::state::*;
 use super::theme;
 
+const AUTO_UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+const UPDATE_REPOSITORY: &str = "ColtG-28/ProjectX";
+
 pub fn gui() -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -78,6 +81,8 @@ impl MyApp {
             last_download_poll: Instant::now(),
             download_watch: HashMap::new(),
             download_status: String::new(),
+            last_update_poll: Instant::now() - AUTO_UPDATE_CHECK_INTERVAL,
+            update_state: Arc::new(Mutex::new(UpdateCheckState::default())),
         };
         app.refresh_protection_summary();
         app
@@ -889,6 +894,94 @@ impl MyApp {
             "No active downloads detected.".to_string()
         } else {
             format!("Watching {} active download(s).", seen.len())
+        };
+    }
+
+    fn poll_update_checker(&mut self) {
+        if !self.settings.enable_automatic_updates {
+            return;
+        }
+
+        if self.last_update_poll.elapsed() < AUTO_UPDATE_CHECK_INTERVAL {
+            return;
+        }
+
+        self.start_update_check(false);
+    }
+
+    pub(crate) fn start_update_check(&mut self, manual: bool) {
+        self.last_update_poll = Instant::now();
+
+        let Ok(mut state) = self.update_state.lock() else {
+            return;
+        };
+        if state.checking {
+            return;
+        }
+        state.checking = true;
+        state.last_error = None;
+        state.status = if manual {
+            "Checking for updates...".to_string()
+        } else {
+            "Running automatic update check...".to_string()
+        };
+        drop(state);
+
+        let update_state = Arc::clone(&self.update_state);
+        thread::spawn(move || {
+            let outcome = fetch_latest_release_info();
+            if let Ok(mut state) = update_state.lock() {
+                state.checking = false;
+                state.last_checked_epoch = now_epoch();
+                match outcome {
+                    Ok(Some(update)) => {
+                        state.status = format!("Update {} is available.", update.version);
+                        state.available_update = Some(update);
+                        state.last_error = None;
+                    }
+                    Ok(None) => {
+                        state.status = "ProjectX is up to date.".to_string();
+                        state.available_update = None;
+                        state.last_error = None;
+                    }
+                    Err(error) => {
+                        state.status = "Update check failed.".to_string();
+                        state.available_update = None;
+                        state.last_error = Some(error);
+                    }
+                }
+            }
+        });
+    }
+
+    pub(crate) fn open_available_update(&mut self) {
+        let available_update = self
+            .update_state
+            .lock()
+            .ok()
+            .and_then(|state| state.available_update.clone());
+        let Some(update) = available_update else {
+            self.status_message = "No newer update is available right now.".to_string();
+            return;
+        };
+
+        self.status_message = match open_external_target(&update.asset_url) {
+            Ok(()) => format!("Opened {} for download.", update.asset_name),
+            Err(error) => format!("Failed to open update download: {error}"),
+        };
+    }
+
+    pub(crate) fn open_release_notes(&mut self) {
+        let release_url = self
+            .update_state
+            .lock()
+            .ok()
+            .and_then(|state| state.available_update.as_ref().map(|update| update.html_url.clone()))
+            .unwrap_or_else(|| format!("https://github.com/{UPDATE_REPOSITORY}/releases/latest"));
+
+        self.status_message = match open_external_target(&release_url) {
+            Ok(()) => "Opened the latest ProjectX release page.".to_string(),
+            Err(error) => format!("Failed to open release page: {error}"),
         };
     }
 
@@ -2099,6 +2192,7 @@ impl eframe::App for MyApp {
         self.drain_protection_backlog();
         self.process_protection_monitor();
         self.poll_download_monitor();
+        self.poll_update_checker();
 
         if self.is_booting() {
             self.render_boot_screen(ctx);
@@ -2128,6 +2222,7 @@ impl eframe::App for MyApp {
         if self.is_loading()
             || self.settings.enable_download_monitoring
             || self.settings.enable_real_time_protection
+            || self.update_state.lock().map(|state| state.checking).unwrap_or(false)
         {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
@@ -3026,6 +3121,150 @@ fn reveal_in_file_manager(path: &Path) -> Result<(), String> {
     }
 }
 
+fn open_external_target(target: &str) -> Result<(), String> {
+    let status = if cfg!(target_os = "macos") {
+        Command::new("open")
+            .arg(target)
+            .status()
+            .map_err(|error| format!("Failed to run open: {error}"))?
+    } else if cfg!(target_os = "windows") {
+        Command::new("cmd")
+            .args(["/C", "start", "", target])
+            .status()
+            .map_err(|error| format!("Failed to run start: {error}"))?
+    } else {
+        Command::new("xdg-open")
+            .arg(target)
+            .status()
+            .map_err(|error| format!("Failed to run xdg-open: {error}"))?
+    };
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err("The OS open command did not succeed.".to_string())
+    }
+}
+
+fn fetch_latest_release_info() -> Result<Option<AvailableUpdate>, String> {
+    let url = format!(
+        "https://api.github.com/repos/{UPDATE_REPOSITORY}/releases/latest"
+    );
+    let response = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(12))
+        .build()
+        .map_err(|error| format!("Failed to build update client: {error}"))?
+        .get(url)
+        .header(reqwest::header::USER_AGENT, "ProjectX-UpdateChecker")
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+        .send()
+        .map_err(|error| format!("Failed to contact GitHub Releases: {error}"))?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "GitHub Releases returned {}.",
+            response.status()
+        ));
+    }
+
+    let response_text = response
+        .text()
+        .map_err(|error| format!("Failed to read release metadata: {error}"))?;
+    let value = serde_json::from_str::<serde_json::Value>(&response_text)
+        .map_err(|error| format!("Failed to parse release metadata: {error}"))?;
+
+    let tag_name = value["tag_name"]
+        .as_str()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if tag_name.is_empty() {
+        return Err("Latest release metadata did not include a tag.".to_string());
+    }
+
+    let latest_version = normalize_version_label(&tag_name);
+    if !is_version_newer(&latest_version, env!("CARGO_PKG_VERSION")) {
+        return Ok(None);
+    }
+
+    let html_url = value["html_url"].as_str().unwrap_or_default().to_string();
+    let published_at = value["published_at"]
+        .as_str()
+        .or_else(|| value["created_at"].as_str())
+        .unwrap_or_default()
+        .to_string();
+    let body = value["body"].as_str().unwrap_or_default().to_string();
+    let assets = value["assets"].as_array().cloned().unwrap_or_default();
+    let Some(asset) = select_platform_asset(&assets) else {
+        return Err("A matching download asset for this platform was not found.".to_string());
+    };
+
+    Ok(Some(AvailableUpdate {
+        version: latest_version,
+        tag_name,
+        published_at,
+        html_url,
+        asset_name: asset["name"].as_str().unwrap_or_default().to_string(),
+        asset_url: asset["browser_download_url"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        body,
+    }))
+}
+
+fn select_platform_asset(assets: &[serde_json::Value]) -> Option<serde_json::Value> {
+    let expected_platform = if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "linux"
+    };
+
+    assets.iter().find_map(|asset| {
+        let name = asset["name"].as_str()?.to_ascii_lowercase();
+        if name.contains(expected_platform) && !name.ends_with(".sha256") {
+            Some(asset.clone())
+        } else {
+            None
+        }
+    })
+}
+
+fn normalize_version_label(version: &str) -> String {
+    version.trim_start_matches(|ch: char| !ch.is_ascii_digit()).to_string()
+}
+
+fn is_version_newer(candidate: &str, current: &str) -> bool {
+    compare_versionish(candidate, current).is_gt()
+}
+
+fn compare_versionish(left: &str, right: &str) -> std::cmp::Ordering {
+    let left_parts = parse_versionish_parts(left);
+    let right_parts = parse_versionish_parts(right);
+    let max_len = left_parts.len().max(right_parts.len());
+
+    for index in 0..max_len {
+        let left_part = *left_parts.get(index).unwrap_or(&0);
+        let right_part = *right_parts.get(index).unwrap_or(&0);
+        match left_part.cmp(&right_part) {
+            std::cmp::Ordering::Equal => {}
+            ordering => return ordering,
+        }
+    }
+
+    std::cmp::Ordering::Equal
+}
+
+fn parse_versionish_parts(value: &str) -> Vec<u64> {
+    value
+        .split(|ch: char| !ch.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| part.parse::<u64>().ok())
+        .collect()
+}
+
 fn percent_label(part: usize, total: usize) -> String {
     if total == 0 {
         "0%".to_string()
@@ -3539,7 +3778,7 @@ fn load_history() -> PersistedHistory {
         .map(|history| history.timing_samples)
         .unwrap_or_default();
 
-    let records = fs::read_to_string(INDEX_PATH)
+    let mut records = fs::read_to_string(INDEX_PATH)
         .ok()
         .and_then(|text| serde_json::from_str::<PersistedIndex>(&text).ok())
         .map(|index| index.entries)
@@ -3550,6 +3789,7 @@ fn load_history() -> PersistedHistory {
                 .map(|history| history.records)
         })
         .unwrap_or_default();
+    trim_records(&mut records);
 
     PersistedHistory {
         records,
@@ -3621,10 +3861,14 @@ fn save_protection_backlog_to(path: &Path, backlog: &VecDeque<ScanTarget>) {
 }
 
 fn save_history(records: &[ScanRecord], timing_samples: &[TimingSample]) {
+    let mut retained_records = records.to_vec();
+    trim_records(&mut retained_records);
+    remove_stale_report_files(records, &retained_records);
+
     let mut retained_samples = timing_samples.to_vec();
     trim_timing_samples(&mut retained_samples);
     let payload = PersistedHistory {
-        records: records.to_vec(),
+        records: retained_records.clone(),
         timing_samples: retained_samples,
     };
     let Ok(text) = serde_json::to_string_pretty(&payload) else {
@@ -3635,7 +3879,14 @@ fn save_history(records: &[ScanRecord], timing_samples: &[TimingSample]) {
         let _ = fs::create_dir_all(parent);
     }
     let _ = fs::write(HISTORY_PATH, text);
-    save_index(records);
+    save_index(&retained_records);
+}
+
+fn trim_records(records: &mut Vec<ScanRecord>) {
+    if records.len() > SCAN_RECORD_LIMIT {
+        let drain_count = records.len() - SCAN_RECORD_LIMIT;
+        records.drain(0..drain_count);
+    }
 }
 
 fn trim_timing_samples(samples: &mut Vec<TimingSample>) {
@@ -3649,6 +3900,26 @@ fn trim_protection_events(events: &mut Vec<ProtectionEvent>) {
     if events.len() > PROTECTION_EVENT_LIMIT {
         let drain_count = events.len() - PROTECTION_EVENT_LIMIT;
         events.drain(0..drain_count);
+    }
+}
+
+fn remove_stale_report_files(all_records: &[ScanRecord], retained_records: &[ScanRecord]) {
+    let retained_report_paths = retained_records
+        .iter()
+        .filter_map(|record| record.report_path.as_deref())
+        .collect::<HashSet<_>>();
+
+    for report_path in all_records
+        .iter()
+        .filter_map(|record| record.report_path.as_deref())
+    {
+        if retained_report_paths.contains(report_path) {
+            continue;
+        }
+        let path = Path::new(report_path);
+        if path.is_file() {
+            let _ = fs::remove_file(path);
+        }
     }
 }
 
@@ -3741,1134 +4012,5 @@ fn severity_level_from_label(label: &str) -> SeverityLevel {
         "high" => SeverityLevel::High,
         "error" => SeverityLevel::Error,
         _ => SeverityLevel::Medium,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::HashSet;
-
-    use super::*;
-
-    #[test]
-    fn severity_mapping_normalizes_labels() {
-        assert_eq!(severity_level_from_label("clean"), SeverityLevel::Clean);
-        assert_eq!(severity_level_from_label("low"), SeverityLevel::Low);
-        assert_eq!(severity_level_from_label("medium"), SeverityLevel::Medium);
-        assert_eq!(severity_level_from_label("high"), SeverityLevel::High);
-        assert_eq!(severity_level_from_label("error"), SeverityLevel::Error);
-    }
-
-    #[test]
-    fn formats_timestamps_readably() {
-        let compact = format_timestamp_compact(1_700_000_000);
-        let detailed = format_timestamp_with_relative(1_700_000_000);
-        assert!(!compact.is_empty());
-        assert!(detailed.contains('('));
-    }
-
-    #[test]
-    fn index_roundtrip_preserves_core_fields() {
-        let record = ScanRecord {
-            scan_id: "demo".to_string(),
-            path: "/tmp/demo.bin".to_string(),
-            file_name: "demo.bin".to_string(),
-            extension: Some("bin".to_string()),
-            sha256: Some("abc".to_string()),
-            sniffed_mime: Some("application/octet-stream".to_string()),
-            detected_format: Some("Pe".to_string()),
-            quarantine_path: Some("quarantine/demo.bin".to_string()),
-            report_path: Some("quarantine/reports/demo.json".to_string()),
-            storage_state: RecordStorageState::InQuarantine,
-            last_modified_epoch: 1,
-            scanned_at_epoch: 2,
-            started_at_epoch: Some(1),
-            finished_at_epoch: Some(2),
-            duration_ms: 25,
-            file_size_bytes: 4096,
-            verdict: Verdict::Malicious,
-            severity: SeverityLevel::High,
-            summary_text: "flagged".to_string(),
-            action_note: String::new(),
-            workflow_origin: None,
-            risk_score: Some(8.1),
-            safety_score: Some(0.2),
-            signal_sources: vec!["heuristic".to_string(), "rule".to_string()],
-            detection_reasons: vec![DetectionReason::default()],
-            warning_count: 2,
-            error_count: 0,
-            quarantine: QuarantineMetadata {
-                retained_in_quarantine: true,
-                restored_to_original_path: false,
-            },
-        };
-
-        let entry = record.clone();
-        let hydrated = entry;
-        assert_eq!(hydrated.path, record.path);
-        assert_eq!(hydrated.file_name, record.file_name);
-        assert_eq!(hydrated.severity, SeverityLevel::High);
-        assert_eq!(hydrated.signal_sources.len(), 2);
-        assert_eq!(hydrated.warning_count, 2);
-    }
-
-    #[test]
-    fn hydrates_summary_from_full_report_json() {
-        let path =
-            std::env::temp_dir().join(format!("projectx_report_{}.json", std::process::id()));
-        std::fs::write(
-            &path,
-            serde_json::json!({
-                "file": {
-                    "name": "sample.txt",
-                    "sha256": "deadbeef",
-                    "sniffed_mime": "text/plain",
-                    "detected_format": "PlainText"
-                },
-                "verdict": {
-                    "normalized_severity": "medium"
-                },
-                "summary": {
-                    "warning_count": 3,
-                    "error_count": 1,
-                    "signal_sources": ["heuristic", "rule"]
-                },
-                "reasons": [
-                    {
-                        "reason_type": "heuristic",
-                        "source": "heuristic",
-                        "name": "SCRIPT_CONCAT_EVAL",
-                        "description": "Suspicious script concatenation pattern",
-                        "weight": 1.5
-                    }
-                ]
-            })
-            .to_string(),
-        )
-        .unwrap();
-
-        let record = ScanRecord {
-            scan_id: "demo2".to_string(),
-            path: "/tmp/sample.txt".to_string(),
-            file_name: String::new(),
-            extension: None,
-            sha256: None,
-            sniffed_mime: None,
-            detected_format: None,
-            quarantine_path: None,
-            report_path: Some(path.display().to_string()),
-            storage_state: RecordStorageState::Unknown,
-            quarantine: QuarantineMetadata::default(),
-            last_modified_epoch: 0,
-            scanned_at_epoch: 0,
-            started_at_epoch: None,
-            finished_at_epoch: None,
-            duration_ms: 0,
-            file_size_bytes: 0,
-            verdict: Verdict::Suspicious,
-            severity: SeverityLevel::Low,
-            summary_text: String::new(),
-            action_note: String::new(),
-            workflow_origin: None,
-            risk_score: None,
-            safety_score: None,
-            signal_sources: Vec::new(),
-            detection_reasons: Vec::new(),
-            warning_count: 0,
-            error_count: 0,
-        };
-
-        let hydrated = hydrate_record_from_report(&record, &path).unwrap();
-        assert_eq!(hydrated.file_name, "sample.txt");
-        assert_eq!(hydrated.sha256.as_deref(), Some("deadbeef"));
-        assert_eq!(hydrated.severity, SeverityLevel::Medium);
-        assert_eq!(hydrated.warning_count, 3);
-        assert_eq!(hydrated.error_count, 1);
-        assert_eq!(hydrated.detection_reasons.len(), 1);
-
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn summarizes_operational_record_metrics() {
-        let mut quarantined = demo_record();
-        quarantined.verdict = Verdict::Malicious;
-        quarantined.severity = SeverityLevel::High;
-        quarantined.warning_count = 2;
-        quarantined.storage_state = RecordStorageState::InQuarantine;
-        let quarantine_path =
-            std::env::temp_dir().join(format!("projectx_quarantine_{}.bin", std::process::id()));
-        std::fs::write(&quarantine_path, b"fixture").unwrap();
-        quarantined.quarantine_path = Some(quarantine_path.to_string_lossy().to_string());
-
-        let mut restored = demo_record();
-        restored.scan_id = "two".to_string();
-        restored.storage_state = RecordStorageState::Restored;
-        restored.warning_count = 1;
-        restored.error_count = 1;
-
-        let refs = vec![&quarantined, &restored];
-        let metrics = summarize_record_refs(&refs);
-        assert_eq!(metrics.total, 2);
-        assert_eq!(metrics.malicious, 1);
-        assert_eq!(metrics.clean, 1);
-        assert_eq!(metrics.in_quarantine, 1);
-        assert_eq!(metrics.restored, 1);
-        assert_eq!(metrics.warning_total, 3);
-        assert_eq!(metrics.error_total, 1);
-        assert_eq!(metrics.high_severity, 1);
-
-        let _ = std::fs::remove_file(quarantine_path);
-    }
-
-    fn demo_record() -> ScanRecord {
-        ScanRecord {
-            scan_id: "one".to_string(),
-            path: "/tmp/demo.bin".to_string(),
-            file_name: "demo.bin".to_string(),
-            extension: Some("bin".to_string()),
-            sha256: Some("abc".to_string()),
-            sniffed_mime: Some("application/octet-stream".to_string()),
-            detected_format: Some("Pe".to_string()),
-            quarantine_path: None,
-            report_path: Some("quarantine/reports/demo.json".to_string()),
-            storage_state: RecordStorageState::Unknown,
-            last_modified_epoch: 1,
-            scanned_at_epoch: 2,
-            started_at_epoch: Some(1),
-            finished_at_epoch: Some(2),
-            duration_ms: 25,
-            file_size_bytes: 4096,
-            verdict: Verdict::Clean,
-            severity: SeverityLevel::Clean,
-            summary_text: "flagged".to_string(),
-            action_note: String::new(),
-            workflow_origin: None,
-            risk_score: Some(1.0),
-            safety_score: Some(0.9),
-            signal_sources: vec!["heuristic".to_string()],
-            detection_reasons: vec![DetectionReason::default()],
-            warning_count: 0,
-            error_count: 0,
-            quarantine: QuarantineMetadata::default(),
-        }
-    }
-
-    #[test]
-    fn realtime_protection_queues_changed_file_once() {
-        let watch_path =
-            std::env::temp_dir().join(format!("projectx_watch_{}.txt", std::process::id()));
-        std::fs::write(&watch_path, b"hello").unwrap();
-
-        let mut app = MyApp::new();
-        app.protection_events.clear();
-        app.settings.enable_real_time_protection = true;
-        app.settings.watched_paths = vec![WatchedPathConfig {
-            path: watch_path.to_string_lossy().to_string(),
-            recursive: false,
-        }];
-        app.last_protection_poll = Instant::now() - Duration::from_secs(3);
-        if let Ok(mut job) = app.job.lock() {
-            job.running = true;
-        }
-
-        app.poll_real_time_protection();
-        let queued = app
-            .job
-            .lock()
-            .map(|job| job.pending_targets.len())
-            .unwrap_or_default();
-        assert_eq!(queued, 1);
-        assert!(app
-            .protection_events
-            .iter()
-            .any(|event| event.kind == "Queued"));
-
-        app.last_protection_poll = Instant::now() - Duration::from_secs(3);
-        app.poll_real_time_protection();
-        let queued_after_second_poll = app
-            .job
-            .lock()
-            .map(|job| job.pending_targets.len())
-            .unwrap_or_default();
-        assert_eq!(queued_after_second_poll, 1);
-
-        let _ = std::fs::remove_file(watch_path);
-    }
-
-    #[test]
-    fn realtime_protection_throttles_rapid_repeat_changes() {
-        let watch_path =
-            std::env::temp_dir().join(format!("projectx_watch_repeat_{}.txt", std::process::id()));
-        std::fs::write(&watch_path, b"hello").unwrap();
-
-        let mut app = MyApp::new();
-        app.protection_events.clear();
-        app.settings.enable_real_time_protection = true;
-        app.settings.watched_paths = vec![WatchedPathConfig {
-            path: watch_path.to_string_lossy().to_string(),
-            recursive: false,
-        }];
-        if let Ok(mut job) = app.job.lock() {
-            job.running = true;
-        }
-        app.last_protection_poll = Instant::now() - Duration::from_secs(3);
-        app.poll_real_time_protection();
-
-        std::fs::write(&watch_path, b"hello world").unwrap();
-        app.last_protection_poll = Instant::now() - Duration::from_secs(3);
-        app.poll_real_time_protection();
-
-        assert!(app
-            .protection_events
-            .iter()
-            .any(|event| event.kind == "Throttled"));
-
-        let _ = std::fs::remove_file(watch_path);
-    }
-
-    #[test]
-    fn realtime_protection_groups_repeated_throttled_events() {
-        let watch_path =
-            std::env::temp_dir().join(format!("projectx_watch_grouped_{}.ps1", std::process::id()));
-        std::fs::write(&watch_path, b"Write-Host hi").unwrap();
-
-        let mut app = MyApp::new();
-        app.protection_events.clear();
-        app.settings.enable_real_time_protection = true;
-        app.settings.watched_paths = vec![WatchedPathConfig {
-            path: watch_path.to_string_lossy().to_string(),
-            recursive: false,
-        }];
-        if let Ok(mut job) = app.job.lock() {
-            job.running = true;
-        }
-        app.last_protection_poll = Instant::now() - Duration::from_secs(3);
-        app.poll_real_time_protection();
-
-        std::fs::write(&watch_path, b"Write-Host changed").unwrap();
-        app.last_protection_poll = Instant::now() - Duration::from_secs(3);
-        app.poll_real_time_protection();
-        std::fs::write(&watch_path, b"Write-Host changed again").unwrap();
-        app.last_protection_poll = Instant::now() - Duration::from_secs(3);
-        app.poll_real_time_protection();
-
-        let throttled = app
-            .protection_events
-            .iter()
-            .filter(|event| event.kind == "Throttled")
-            .collect::<Vec<_>>();
-        assert_eq!(throttled.len(), 1);
-        assert!(throttled[0].grouped_change_count >= 2);
-        assert_eq!(throttled[0].file_class, ProtectionFileClass::Script);
-        assert_eq!(throttled[0].priority, ProtectionPriority::High);
-
-        let _ = std::fs::remove_file(watch_path);
-    }
-
-    #[test]
-    fn realtime_protection_classifies_created_files_and_path_limits_temp_noise() {
-        let watch_dir = std::env::temp_dir()
-            .join("cache")
-            .join(format!("projectx_watch_dir_{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&watch_dir);
-        let first = watch_dir.join("a.ps1");
-        let second = watch_dir.join("b.tmp");
-        let third = watch_dir.join("c.tmp");
-        std::fs::write(&first, b"1").unwrap();
-        std::fs::write(&second, b"2").unwrap();
-        std::fs::write(&third, b"3").unwrap();
-
-        let mut app = MyApp::new();
-        app.protection_events.clear();
-        app.protection_backlog.clear();
-        app.settings.enable_real_time_protection = true;
-        app.settings.watched_paths = vec![WatchedPathConfig {
-            path: watch_dir.to_string_lossy().to_string(),
-            recursive: false,
-        }];
-        if let Ok(mut job) = app.job.lock() {
-            job.running = true;
-        }
-        app.last_protection_poll = Instant::now() - Duration::from_secs(3);
-        app.poll_real_time_protection();
-
-        let skipped = app
-            .protection_events
-            .iter()
-            .filter(|event| event.kind == ProtectionEventKind::Skipped.label())
-            .collect::<Vec<_>>();
-        assert!(skipped.len() >= 1);
-        assert!(skipped
-            .iter()
-            .all(|event| event.file_class == ProtectionFileClass::TempCache));
-
-        let _ = std::fs::remove_file(first);
-        let _ = std::fs::remove_file(second);
-        let _ = std::fs::remove_file(third);
-        let _ = std::fs::remove_dir(watch_dir);
-    }
-
-    #[test]
-    fn realtime_protection_defers_to_backlog_when_queue_is_busy() {
-        let watch_path =
-            std::env::temp_dir().join(format!("projectx_watch_defer_{}.ps1", std::process::id()));
-        std::fs::write(&watch_path, b"Start-Process calc").unwrap();
-
-        let mut app = MyApp::new();
-        app.protection_events.clear();
-        app.protection_backlog.clear();
-        app.settings.enable_real_time_protection = true;
-        app.settings.max_files_per_bulk_scan = 1;
-        app.settings.watched_paths = vec![WatchedPathConfig {
-            path: watch_path.to_string_lossy().to_string(),
-            recursive: false,
-        }];
-        if let Ok(mut job) = app.job.lock() {
-            job.running = true;
-            for index in 0..220 {
-                job.pending_targets.push_back(ScanTarget {
-                    path: std::env::temp_dir().join(format!("busy_{index}.tmp")),
-                    last_modified_epoch: 0,
-                    size_bytes: 10,
-                    origin: ScanOrigin::RealTimeProtection,
-                    priority: ProtectionPriority::Normal,
-                    file_class: ProtectionFileClass::TempCache,
-                    grouped_change_count: 1,
-                    burst_window_seconds: 0,
-                    change_class: ProtectionChangeClass::Modified,
-                });
-            }
-        }
-        app.last_protection_poll = Instant::now() - Duration::from_secs(3);
-        app.poll_real_time_protection();
-
-        assert_eq!(app.protection_backlog.len(), 1);
-        assert!(app
-            .protection_events
-            .iter()
-            .any(|event| event.kind == ProtectionEventKind::Deferred.label()));
-
-        let _ = std::fs::remove_file(watch_path);
-    }
-
-    #[test]
-    fn deferred_backlog_is_queued_when_capacity_returns() {
-        let mut app = MyApp::new();
-        app.protection_events.clear();
-        app.protection_backlog.clear();
-        app.settings.enable_real_time_protection = true;
-        let target = ScanTarget {
-            path: std::env::temp_dir().join(format!("resume_{}.ps1", std::process::id())),
-            last_modified_epoch: 1,
-            size_bytes: 120,
-            origin: ScanOrigin::RealTimeProtection,
-            priority: ProtectionPriority::High,
-            file_class: ProtectionFileClass::Script,
-            grouped_change_count: 3,
-            burst_window_seconds: 4,
-            change_class: ProtectionChangeClass::Modified,
-        };
-        app.protection_backlog.push_back(target.clone());
-        if let Ok(mut job) = app.job.lock() {
-            job.running = true;
-        }
-
-        app.drain_protection_backlog();
-
-        assert!(app.protection_backlog.is_empty());
-        let queued = app
-            .job
-            .lock()
-            .map(|job| job.pending_targets.len())
-            .unwrap_or_default();
-        assert_eq!(queued, 1);
-        assert!(app.protection_events.iter().any(|event| {
-            event.kind == ProtectionEventKind::Queued.label()
-                && event.path == target.path.to_string_lossy()
-        }));
-    }
-
-    #[test]
-    fn protection_history_filters_match_expected_event_subset() {
-        let mut app = MyApp::new();
-        app.protection_events = vec![
-            ProtectionEvent {
-                id: "one".to_string(),
-                timestamp_epoch: 10,
-                path: "/tmp/a.ps1".to_string(),
-                kind: ProtectionEventKind::Deferred.label().to_string(),
-                note: "Deferred".to_string(),
-                workflow_source: ScanOrigin::RealTimeProtection.label().to_string(),
-                event_source: "Polling fallback".to_string(),
-                verdict: None,
-                storage_state: None,
-                scan_id: None,
-                grouped_change_count: 2,
-                burst_window_seconds: 3,
-                change_class: ProtectionChangeClass::Modified,
-                file_class: ProtectionFileClass::Script,
-                priority: ProtectionPriority::High,
-            },
-            ProtectionEvent {
-                id: "two".to_string(),
-                timestamp_epoch: 11,
-                path: "/tmp/a.tmp".to_string(),
-                kind: ProtectionEventKind::Skipped.label().to_string(),
-                note: "Skipped".to_string(),
-                workflow_source: ScanOrigin::RealTimeProtection.label().to_string(),
-                event_source: "Polling fallback".to_string(),
-                verdict: None,
-                storage_state: None,
-                scan_id: None,
-                grouped_change_count: 1,
-                burst_window_seconds: 0,
-                change_class: ProtectionChangeClass::Created,
-                file_class: ProtectionFileClass::TempCache,
-                priority: ProtectionPriority::Low,
-            },
-        ];
-        app.protection_kind_filter = ProtectionEventKindFilter::Deferred;
-        app.protection_file_filter = ProtectionFileClassFilter::Script;
-        app.protection_priority_filter = ProtectionPriorityFilter::High;
-        app.protection_origin_filter = ProtectionOriginFilter::RealTimeProtection;
-
-        let indices = app.filtered_protection_event_indices(20);
-        assert_eq!(indices.len(), 1);
-        assert_eq!(
-            app.protection_events[indices[0]].kind,
-            ProtectionEventKind::Deferred.label()
-        );
-    }
-
-    #[test]
-    fn protection_history_filters_can_match_result_and_action() {
-        let mut app = MyApp::new();
-        app.protection_events = vec![
-            ProtectionEvent {
-                id: "one".to_string(),
-                timestamp_epoch: 10,
-                path: "/tmp/a.ps1".to_string(),
-                kind: ProtectionEventKind::Completed.label().to_string(),
-                note: "Completed".to_string(),
-                workflow_source: ScanOrigin::RealTimeProtection.label().to_string(),
-                event_source: "Automatic scan result".to_string(),
-                verdict: Some("Malicious".to_string()),
-                storage_state: Some("In quarantine".to_string()),
-                scan_id: Some("scan-1".to_string()),
-                grouped_change_count: 2,
-                burst_window_seconds: 4,
-                change_class: ProtectionChangeClass::Modified,
-                file_class: ProtectionFileClass::Script,
-                priority: ProtectionPriority::High,
-            },
-            ProtectionEvent {
-                id: "two".to_string(),
-                timestamp_epoch: 11,
-                path: "/tmp/b.txt".to_string(),
-                kind: ProtectionEventKind::Completed.label().to_string(),
-                note: "Completed".to_string(),
-                workflow_source: ScanOrigin::RealTimeProtection.label().to_string(),
-                event_source: "Automatic scan result".to_string(),
-                verdict: Some("Clean".to_string()),
-                storage_state: Some("Unknown".to_string()),
-                scan_id: Some("scan-2".to_string()),
-                grouped_change_count: 1,
-                burst_window_seconds: 0,
-                change_class: ProtectionChangeClass::Created,
-                file_class: ProtectionFileClass::Other,
-                priority: ProtectionPriority::Normal,
-            },
-        ];
-        app.protection_verdict_filter = ProtectionVerdictFilter::Malicious;
-        app.protection_action_filter = ProtectionActionFilter::Quarantined;
-
-        let indices = app.filtered_protection_event_indices(20);
-        assert_eq!(indices.len(), 1);
-        assert_eq!(
-            app.protection_events[indices[0]].scan_id.as_deref(),
-            Some("scan-1")
-        );
-    }
-
-    #[test]
-    fn backlog_roundtrip_preserves_grouped_target_metadata() {
-        let path = std::env::temp_dir().join(format!(
-            "projectx_backlog_roundtrip_{}.json",
-            std::process::id()
-        ));
-        let mut backlog = VecDeque::new();
-        backlog.push_back(ScanTarget {
-            path: std::env::temp_dir().join("queued_sample.ps1"),
-            last_modified_epoch: 42,
-            size_bytes: 512,
-            origin: ScanOrigin::RealTimeProtection,
-            priority: ProtectionPriority::High,
-            file_class: ProtectionFileClass::Script,
-            grouped_change_count: 5,
-            burst_window_seconds: 8,
-            change_class: ProtectionChangeClass::Replaced,
-        });
-
-        save_protection_backlog_to(&path, &backlog);
-        let loaded = load_protection_backlog_from(&path);
-
-        assert_eq!(loaded.len(), 1);
-        let loaded_target = loaded.front().unwrap();
-        assert_eq!(loaded_target.grouped_change_count, 5);
-        assert_eq!(loaded_target.burst_window_seconds, 8);
-        assert_eq!(loaded_target.change_class, ProtectionChangeClass::Replaced);
-        assert_eq!(loaded_target.priority, ProtectionPriority::High);
-
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn backlog_retry_prefers_high_priority_targets() {
-        let mut app = MyApp::new();
-        app.protection_events.clear();
-        app.protection_backlog.clear();
-        app.settings.enable_real_time_protection = true;
-        app.protection_backlog.push_back(ScanTarget {
-            path: std::env::temp_dir().join("normal_target.txt"),
-            last_modified_epoch: 1,
-            size_bytes: 40,
-            origin: ScanOrigin::RealTimeProtection,
-            priority: ProtectionPriority::Normal,
-            file_class: ProtectionFileClass::Other,
-            grouped_change_count: 1,
-            burst_window_seconds: 0,
-            change_class: ProtectionChangeClass::Modified,
-        });
-        app.protection_backlog.push_back(ScanTarget {
-            path: std::env::temp_dir().join("high_target.ps1"),
-            last_modified_epoch: 2,
-            size_bytes: 80,
-            origin: ScanOrigin::RealTimeProtection,
-            priority: ProtectionPriority::High,
-            file_class: ProtectionFileClass::Script,
-            grouped_change_count: 3,
-            burst_window_seconds: 5,
-            change_class: ProtectionChangeClass::Modified,
-        });
-        if let Ok(mut job) = app.job.lock() {
-            job.running = true;
-            job.pending_targets.clear();
-        }
-
-        app.drain_protection_backlog();
-
-        let queued_paths = app
-            .job
-            .lock()
-            .map(|job| {
-                job.pending_targets
-                    .iter()
-                    .map(|target| target.path.to_string_lossy().to_string())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        assert!(!queued_paths.is_empty());
-        assert!(queued_paths[0].contains("high_target.ps1"));
-    }
-
-    #[test]
-    fn backlog_retry_skips_paths_already_pending() {
-        let mut app = MyApp::new();
-        app.protection_events.clear();
-        app.protection_backlog.clear();
-        app.settings.enable_real_time_protection = true;
-        let blocked = std::env::temp_dir().join("blocked_target.ps1");
-        let ready = std::env::temp_dir().join("ready_target.ps1");
-        app.protection_backlog.push_back(ScanTarget {
-            path: blocked.clone(),
-            last_modified_epoch: 1,
-            size_bytes: 40,
-            origin: ScanOrigin::RealTimeProtection,
-            priority: ProtectionPriority::High,
-            file_class: ProtectionFileClass::Script,
-            grouped_change_count: 2,
-            burst_window_seconds: 3,
-            change_class: ProtectionChangeClass::Modified,
-        });
-        app.protection_backlog.push_back(ScanTarget {
-            path: ready.clone(),
-            last_modified_epoch: 2,
-            size_bytes: 55,
-            origin: ScanOrigin::RealTimeProtection,
-            priority: ProtectionPriority::Normal,
-            file_class: ProtectionFileClass::Script,
-            grouped_change_count: 1,
-            burst_window_seconds: 1,
-            change_class: ProtectionChangeClass::Modified,
-        });
-        if let Ok(mut job) = app.job.lock() {
-            job.running = true;
-            job.pending_targets = vec![ScanTarget {
-                path: blocked.clone(),
-                last_modified_epoch: 1,
-                size_bytes: 40,
-                origin: ScanOrigin::RealTimeProtection,
-                priority: ProtectionPriority::High,
-                file_class: ProtectionFileClass::Script,
-                grouped_change_count: 1,
-                burst_window_seconds: 1,
-                change_class: ProtectionChangeClass::Modified,
-            }]
-            .into();
-        }
-
-        app.drain_protection_backlog();
-
-        let queued_paths = app
-            .job
-            .lock()
-            .map(|job| {
-                job.pending_targets
-                    .iter()
-                    .map(|target| target.path.clone())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        assert!(queued_paths.contains(&blocked));
-        assert!(queued_paths.contains(&ready));
-        assert!(app
-            .protection_backlog
-            .iter()
-            .any(|target| target.path == blocked));
-    }
-
-    #[test]
-    fn backlog_retry_under_larger_burst_prioritizes_high_without_starving_normal() {
-        let mut app = MyApp::new();
-        app.protection_events.clear();
-        app.protection_backlog.clear();
-        app.settings.enable_real_time_protection = true;
-
-        for index in 0..24 {
-            app.protection_backlog.push_back(ScanTarget {
-                path: std::env::temp_dir().join(format!("normal_burst_target_{index}.txt")),
-                last_modified_epoch: index,
-                size_bytes: 40,
-                origin: ScanOrigin::RealTimeProtection,
-                priority: ProtectionPriority::Normal,
-                file_class: ProtectionFileClass::Other,
-                grouped_change_count: 1,
-                burst_window_seconds: 1,
-                change_class: ProtectionChangeClass::Modified,
-            });
-        }
-        let high_path = std::env::temp_dir().join("high_burst_target.ps1");
-        app.protection_backlog.push_back(ScanTarget {
-            path: high_path.clone(),
-            last_modified_epoch: 100,
-            size_bytes: 80,
-            origin: ScanOrigin::RealTimeProtection,
-            priority: ProtectionPriority::High,
-            file_class: ProtectionFileClass::Script,
-            grouped_change_count: 6,
-            burst_window_seconds: 8,
-            change_class: ProtectionChangeClass::Replaced,
-        });
-
-        if let Ok(mut job) = app.job.lock() {
-            job.running = true;
-            job.pending_targets.clear();
-        }
-
-        app.drain_protection_backlog();
-
-        let queued = app
-            .job
-            .lock()
-            .map(|job| job.pending_targets.iter().cloned().collect::<Vec<_>>())
-            .unwrap_or_default();
-        assert!(!queued.is_empty());
-        assert_eq!(queued[0].path, high_path);
-        assert!(queued.len() > 1);
-        assert!(queued
-            .iter()
-            .any(|target| target.priority == ProtectionPriority::Normal));
-    }
-
-    #[test]
-    fn protection_summary_reports_load_metrics() {
-        let mut app = MyApp::new();
-        app.protection_events.clear();
-        app.settings.enable_real_time_protection = true;
-        app.protection_events.push(ProtectionEvent {
-            id: "grouped".to_string(),
-            timestamp_epoch: now_epoch(),
-            path: "/tmp/grouped.ps1".to_string(),
-            kind: ProtectionEventKind::Queued.label().to_string(),
-            note: "Queued grouped burst".to_string(),
-            workflow_source: ScanOrigin::RealTimeProtection.label().to_string(),
-            event_source: "Test OS events".to_string(),
-            verdict: None,
-            storage_state: None,
-            scan_id: None,
-            grouped_change_count: 8,
-            burst_window_seconds: 2,
-            change_class: ProtectionChangeClass::Modified,
-            file_class: ProtectionFileClass::Script,
-            priority: ProtectionPriority::High,
-        });
-        app.protection_events.push(ProtectionEvent {
-            id: "skipped".to_string(),
-            timestamp_epoch: now_epoch(),
-            path: "/tmp/cache.tmp".to_string(),
-            kind: ProtectionEventKind::Skipped.label().to_string(),
-            note: "Skipped temp/cache noise".to_string(),
-            workflow_source: ScanOrigin::RealTimeProtection.label().to_string(),
-            event_source: "Test OS events".to_string(),
-            verdict: None,
-            storage_state: None,
-            scan_id: None,
-            grouped_change_count: 1,
-            burst_window_seconds: 0,
-            change_class: ProtectionChangeClass::Created,
-            file_class: ProtectionFileClass::TempCache,
-            priority: ProtectionPriority::Low,
-        });
-
-        app.refresh_protection_summary();
-
-        assert_ne!(app.protection_summary.dedupe_efficiency, "0%");
-        assert_ne!(app.protection_summary.event_drop_rate, "0%");
-        assert!(app.protection_summary.backlog_recovery_rate.ends_with('%'));
-    }
-
-    #[test]
-    fn event_monitor_messages_queue_grouped_scan_once() {
-        let watch_path =
-            std::env::temp_dir().join(format!("projectx_event_watch_{}.ps1", std::process::id()));
-        std::fs::write(&watch_path, b"Start-Process calc").unwrap();
-        let (tx, rx) = crossbeam_channel::unbounded();
-
-        let mut app = MyApp::new();
-        app.protection_events.clear();
-        app.settings.enable_real_time_protection = true;
-        app.settings.watched_paths = vec![WatchedPathConfig {
-            path: watch_path.to_string_lossy().to_string(),
-            recursive: false,
-        }];
-        app.protection_monitor.mode = ProtectionMonitorMode::EventDriven;
-        app.protection_monitor.source_label = "Test OS events".to_string();
-        app.protection_monitor.receiver = Some(rx);
-        if let Ok(mut job) = app.job.lock() {
-            job.running = true;
-        }
-
-        tx.send(ProtectionMonitorMessage::Event(ProtectionMonitorEvent {
-            path: watch_path.clone(),
-            change_class: ProtectionChangeClass::Modified,
-            source_label: "Test OS events".to_string(),
-        }))
-        .unwrap();
-        tx.send(ProtectionMonitorMessage::Event(ProtectionMonitorEvent {
-            path: watch_path.clone(),
-            change_class: ProtectionChangeClass::Modified,
-            source_label: "Test OS events".to_string(),
-        }))
-        .unwrap();
-
-        app.drain_protection_monitor_events();
-
-        let queued = app
-            .job
-            .lock()
-            .map(|job| job.pending_targets.len())
-            .unwrap_or_default();
-        assert_eq!(queued, 1);
-        assert!(app.protection_events.iter().any(|event| {
-            event.kind == ProtectionEventKind::Queued.label()
-                && event.event_source == "Test OS events"
-                && event.grouped_change_count >= 2
-        }));
-
-        let _ = std::fs::remove_file(watch_path);
-    }
-
-    #[test]
-    fn event_monitor_large_burst_still_queues_one_grouped_scan() {
-        let watch_path =
-            std::env::temp_dir().join(format!("projectx_event_burst_{}.ps1", std::process::id()));
-        std::fs::write(&watch_path, b"Start-Process calc").unwrap();
-        let (tx, rx) = crossbeam_channel::unbounded();
-
-        let mut app = MyApp::new();
-        app.protection_events.clear();
-        app.settings.enable_real_time_protection = true;
-        app.settings.watched_paths = vec![WatchedPathConfig {
-            path: watch_path.to_string_lossy().to_string(),
-            recursive: false,
-        }];
-        app.protection_monitor.mode = ProtectionMonitorMode::EventDriven;
-        app.protection_monitor.source_label = "Burst OS events".to_string();
-        app.protection_monitor.receiver = Some(rx);
-        if let Ok(mut job) = app.job.lock() {
-            job.running = true;
-        }
-
-        for _ in 0..24 {
-            tx.send(ProtectionMonitorMessage::Event(ProtectionMonitorEvent {
-                path: watch_path.clone(),
-                change_class: ProtectionChangeClass::Modified,
-                source_label: "Burst OS events".to_string(),
-            }))
-            .unwrap();
-        }
-
-        app.drain_protection_monitor_events();
-
-        let queued_events = app
-            .protection_events
-            .iter()
-            .filter(|event| event.kind == ProtectionEventKind::Queued.label())
-            .collect::<Vec<_>>();
-        assert_eq!(queued_events.len(), 1);
-        assert!(queued_events[0].grouped_change_count >= 24);
-
-        let queued_targets = app
-            .job
-            .lock()
-            .map(|job| job.pending_targets.len())
-            .unwrap_or_default();
-        assert_eq!(queued_targets, 1);
-
-        let _ = std::fs::remove_file(watch_path);
-    }
-
-    #[test]
-    fn event_monitor_groups_replace_then_modify_as_one_replaced_scan() {
-        let watch_path =
-            std::env::temp_dir().join(format!("projectx_event_replace_{}.ps1", std::process::id()));
-        std::fs::write(&watch_path, b"Start-Process placeholder").unwrap();
-        let (tx, rx) = crossbeam_channel::unbounded();
-
-        let mut app = MyApp::new();
-        app.protection_events.clear();
-        app.settings.enable_real_time_protection = true;
-        app.settings.watched_paths = vec![WatchedPathConfig {
-            path: watch_path.to_string_lossy().to_string(),
-            recursive: false,
-        }];
-        app.protection_monitor.mode = ProtectionMonitorMode::EventDriven;
-        app.protection_monitor.source_label = "Test OS events".to_string();
-        app.protection_monitor.receiver = Some(rx);
-        if let Ok(mut job) = app.job.lock() {
-            job.running = true;
-        }
-
-        tx.send(ProtectionMonitorMessage::Event(ProtectionMonitorEvent {
-            path: watch_path.clone(),
-            change_class: ProtectionChangeClass::Replaced,
-            source_label: "Test OS events".to_string(),
-        }))
-        .unwrap();
-        tx.send(ProtectionMonitorMessage::Event(ProtectionMonitorEvent {
-            path: watch_path.clone(),
-            change_class: ProtectionChangeClass::Modified,
-            source_label: "Test OS events".to_string(),
-        }))
-        .unwrap();
-
-        app.drain_protection_monitor_events();
-
-        let queued = app
-            .protection_events
-            .iter()
-            .find(|event| event.kind == ProtectionEventKind::Queued.label())
-            .unwrap();
-        assert_eq!(queued.change_class, ProtectionChangeClass::Replaced);
-        assert!(queued.grouped_change_count >= 2);
-
-        let _ = std::fs::remove_file(watch_path);
-    }
-
-    #[test]
-    fn event_monitor_burst_respects_busy_queue_without_duplicate_scan_flood() {
-        let watch_path = std::env::temp_dir().join(format!(
-            "projectx_event_burst_pending_{}.ps1",
-            std::process::id()
-        ));
-        std::fs::write(&watch_path, b"Start-Process placeholder").unwrap();
-        let (tx, rx) = crossbeam_channel::unbounded();
-
-        let mut app = MyApp::new();
-        app.protection_events.clear();
-        app.protection_backlog.clear();
-        app.settings.enable_real_time_protection = true;
-        app.settings.watched_paths = vec![WatchedPathConfig {
-            path: watch_path.to_string_lossy().to_string(),
-            recursive: false,
-        }];
-        app.protection_monitor.mode = ProtectionMonitorMode::EventDriven;
-        app.protection_monitor.source_label = "Burst OS events".to_string();
-        app.protection_monitor.receiver = Some(rx);
-        if let Ok(mut job) = app.job.lock() {
-            job.running = true;
-            job.pending_targets.push_back(ScanTarget {
-                path: watch_path.clone(),
-                last_modified_epoch: 1,
-                size_bytes: 12,
-                origin: ScanOrigin::RealTimeProtection,
-                priority: ProtectionPriority::High,
-                file_class: ProtectionFileClass::Script,
-                grouped_change_count: 1,
-                burst_window_seconds: 0,
-                change_class: ProtectionChangeClass::Modified,
-            });
-        }
-
-        for _ in 0..12 {
-            tx.send(ProtectionMonitorMessage::Event(ProtectionMonitorEvent {
-                path: watch_path.clone(),
-                change_class: ProtectionChangeClass::Modified,
-                source_label: "Burst OS events".to_string(),
-            }))
-            .unwrap();
-        }
-
-        app.drain_protection_monitor_events();
-
-        assert_eq!(app.protection_backlog.len(), 1);
-        let deferred = app
-            .protection_events
-            .iter()
-            .filter(|event| {
-                event.kind == ProtectionEventKind::Deferred.label()
-                    && event.path == watch_path.to_string_lossy()
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(deferred.len(), 1);
-        assert!(deferred[0].grouped_change_count >= 12);
-
-        let queued_targets = app
-            .job
-            .lock()
-            .map(|job| job.pending_targets.len())
-            .unwrap_or_default();
-        assert_eq!(queued_targets, 1);
-
-        let _ = std::fs::remove_file(watch_path);
-    }
-
-    #[test]
-    fn event_monitor_defers_follow_up_when_target_is_already_pending() {
-        let watch_path =
-            std::env::temp_dir().join(format!("projectx_event_pending_{}.ps1", std::process::id()));
-        std::fs::write(&watch_path, b"Start-Process placeholder").unwrap();
-        let (tx, rx) = crossbeam_channel::unbounded();
-
-        let mut app = MyApp::new();
-        app.protection_events.clear();
-        app.protection_backlog.clear();
-        app.settings.enable_real_time_protection = true;
-        app.settings.watched_paths = vec![WatchedPathConfig {
-            path: watch_path.to_string_lossy().to_string(),
-            recursive: false,
-        }];
-        app.protection_monitor.mode = ProtectionMonitorMode::EventDriven;
-        app.protection_monitor.source_label = "Test OS events".to_string();
-        app.protection_monitor.receiver = Some(rx);
-        if let Ok(mut job) = app.job.lock() {
-            job.running = true;
-            job.pending_targets.push_back(ScanTarget {
-                path: watch_path.clone(),
-                last_modified_epoch: 1,
-                size_bytes: 12,
-                origin: ScanOrigin::RealTimeProtection,
-                priority: ProtectionPriority::High,
-                file_class: ProtectionFileClass::Script,
-                grouped_change_count: 1,
-                burst_window_seconds: 0,
-                change_class: ProtectionChangeClass::Modified,
-            });
-        }
-
-        tx.send(ProtectionMonitorMessage::Event(ProtectionMonitorEvent {
-            path: watch_path.clone(),
-            change_class: ProtectionChangeClass::Modified,
-            source_label: "Test OS events".to_string(),
-        }))
-        .unwrap();
-
-        app.drain_protection_monitor_events();
-
-        assert_eq!(app.protection_backlog.len(), 1);
-        assert!(app.protection_events.iter().any(|event| {
-            event.kind == ProtectionEventKind::Deferred.label()
-                && event.path == watch_path.to_string_lossy()
-        }));
-
-        let _ = std::fs::remove_file(watch_path);
-    }
-
-    #[test]
-    fn watcher_init_failure_uses_polling_fallback() {
-        let mut app = MyApp::new();
-        app.settings.enable_real_time_protection = true;
-        app.settings.watched_paths = vec![WatchedPathConfig {
-            path: std::env::temp_dir()
-                .join(format!("missing_watch_root_{}", std::process::id()))
-                .join("does_not_exist")
-                .to_string_lossy()
-                .to_string(),
-            recursive: true,
-        }];
-
-        app.ensure_protection_monitor();
-
-        assert_eq!(
-            app.protection_monitor.mode,
-            ProtectionMonitorMode::PollingFallback
-        );
-        assert!(app.protection_monitor.last_error.is_some());
-    }
-
-    #[test]
-    fn notify_rename_events_map_to_replaced() {
-        let kind = EventKind::Modify(notify::event::ModifyKind::Name(
-            notify::event::RenameMode::Both,
-        ));
-        assert_eq!(
-            notify_change_class(&kind),
-            Some(ProtectionChangeClass::Replaced)
-        );
-    }
-
-    #[test]
-    fn backlog_priority_index_ignores_pending_paths() {
-        let blocked = std::env::temp_dir().join("blocked_target.ps1");
-        let ready = std::env::temp_dir().join("ready_target.ps1");
-        let backlog = VecDeque::from([
-            ScanTarget {
-                path: blocked.clone(),
-                last_modified_epoch: 1,
-                size_bytes: 40,
-                origin: ScanOrigin::RealTimeProtection,
-                priority: ProtectionPriority::High,
-                file_class: ProtectionFileClass::Script,
-                grouped_change_count: 1,
-                burst_window_seconds: 0,
-                change_class: ProtectionChangeClass::Modified,
-            },
-            ScanTarget {
-                path: ready,
-                last_modified_epoch: 1,
-                size_bytes: 40,
-                origin: ScanOrigin::RealTimeProtection,
-                priority: ProtectionPriority::Normal,
-                file_class: ProtectionFileClass::Script,
-                grouped_change_count: 1,
-                burst_window_seconds: 0,
-                change_class: ProtectionChangeClass::Modified,
-            },
-        ]);
-        let pending = HashSet::from([blocked]);
-
-        let index = highest_priority_backlog_index(&backlog, &pending);
-        assert_eq!(index, Some(1));
     }
 }

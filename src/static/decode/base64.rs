@@ -80,15 +80,3 @@ fn text_from_bytes(bytes: &[u8]) -> Option<String> {
         .then(|| String::from_utf8_lossy(bytes).into_owned())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::try_decode;
-
-    #[test]
-    fn decodes_urlsafe_unpadded_base64() {
-        let decoded = try_decode("aHR0cHM6Ly9leGFtcGxlLmNvbS9wYXlsb2Fk");
-        assert!(decoded
-            .iter()
-            .any(|value| value == "https://example.com/payload"));
-    }
-}

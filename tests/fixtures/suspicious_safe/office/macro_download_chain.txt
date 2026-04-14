@@ -1,8 +1,0 @@
-WordDocument
-vbaProject.bin
-Document_Open
-CreateObject
-MSXML2.XMLHTTP
-ADODB.Stream
-URLDownloadToFile
-This inert macro text simulates a risky auto-run download sequence using placeholder behavior only.

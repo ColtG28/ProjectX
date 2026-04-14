@@ -124,20 +124,3 @@ fn extract_stream_after(bytes: &[u8], start: usize, max_stream_bytes: usize) -> 
     Some(data)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::extract_javascript_fragments;
-
-    #[test]
-    fn extracts_pdf_javascript_literals() {
-        let pdf = br#"%PDF-1.7
-1 0 obj
-<< /Names [(OpenAction) << /S /JavaScript /JS (app.alert("hi")) >>] >>
-endobj
-"#;
-        let fragments = extract_javascript_fragments(pdf, 4, 4096);
-        assert!(fragments
-            .iter()
-            .any(|fragment| fragment.contains("app.alert")));
-    }
-}

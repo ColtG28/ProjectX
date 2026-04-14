@@ -1,6 +1,0 @@
-@loader_path/libstage.dylib
-dlopen
-posix_spawn
-NSURLSession
-
-placeholder relative loader path and network wording only

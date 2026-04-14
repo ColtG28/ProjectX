@@ -1,1 +1,0 @@
-This archive may include scripts, manifests, and encoded notes used for deployment validation.

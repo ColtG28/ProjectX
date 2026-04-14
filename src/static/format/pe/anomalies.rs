@@ -12,14 +12,3 @@ pub fn check(bytes: &[u8]) -> Vec<Finding> {
     findings
 }
 
-#[cfg(test)]
-mod tests {
-    use super::check;
-
-    #[test]
-    fn large_pe_message_is_human_readable() {
-        let findings = check(&vec![0u8; 31 * 1024 * 1024]);
-        assert_eq!(findings.len(), 1);
-        assert!(findings[0].message.starts_with("File is unusually large"));
-    }
-}

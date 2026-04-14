@@ -1,5 +1,7 @@
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
@@ -8,6 +10,9 @@ use crate::r#static::context::ScanContext;
 use crate::r#static::types::{
     CacheMetadata, Finding, IntelligenceSummary, Score, Severity, StringPool, View,
 };
+
+const MAX_CACHE_FILES: usize = 256;
+const MAX_CACHE_BYTES: u64 = 128 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CachedScan {
@@ -91,6 +96,7 @@ pub fn store(key: &str, ctx: &ScanContext, severity: Severity) -> std::io::Resul
     };
     let json = serde_json::to_string_pretty(&entry).unwrap_or_else(|_| "{}".to_string());
     fs::write(&path, json)?;
+    let _ = prune_cache_dir();
     Ok(path)
 }
 
@@ -141,4 +147,38 @@ fn truncate_string(value: &str, max_bytes: usize) -> String {
     let mut truncated = value[..end].to_string();
     truncated.push_str("... [truncated]");
     truncated
+}
+
+fn prune_cache_dir() -> io::Result<()> {
+    let mut entries = fs::read_dir(cache_dir())?
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let metadata = entry.metadata().ok()?;
+            if !metadata.is_file() {
+                return None;
+            }
+            Some((
+                entry.path(),
+                metadata.len(),
+                metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+            ))
+        })
+        .collect::<Vec<_>>();
+
+    entries.sort_by(|a, b| b.2.cmp(&a.2));
+
+    let mut kept_files = 0usize;
+    let mut kept_bytes = 0u64;
+    for (path, len, _) in entries {
+        let would_exceed_files = kept_files >= MAX_CACHE_FILES;
+        let would_exceed_bytes = kept_bytes.saturating_add(len) > MAX_CACHE_BYTES;
+        if would_exceed_files || would_exceed_bytes {
+            let _ = fs::remove_file(path);
+            continue;
+        }
+        kept_files += 1;
+        kept_bytes = kept_bytes.saturating_add(len);
+    }
+
+    Ok(())
 }

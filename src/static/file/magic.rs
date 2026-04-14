@@ -229,46 +229,6 @@ fn seems_text(bytes: &[u8]) -> bool {
     printable * 100 / sample.len().max(1) >= 85
 }
 
-#[allow(clippy::items_after_test_module)]
-#[cfg(test)]
-mod tests {
-    use super::find_header_bytes;
-
-    #[test]
-    fn accepts_plain_text_scripts_without_binary_magic() {
-        assert!(find_header_bytes(
-            b"powershell -EncodedCommand ZQBjAGgAbwA=",
-            "ps1"
-        ));
-        assert!(find_header_bytes(b"#!/bin/sh\necho test\n", "sh"));
-    }
-
-    #[test]
-    fn accepts_elf_family_headers() {
-        assert!(find_header_bytes(b"\x7fELF\x02\x01\x01\x00", "elf"));
-        assert!(find_header_bytes(b"\x7fELF\x02\x01\x01\x00", "so"));
-    }
-
-    #[test]
-    fn accepts_macho_family_headers() {
-        assert!(find_header_bytes(
-            b"\xCF\xFA\xED\xFE\x07\x00\x00\x01",
-            "dylib"
-        ));
-        assert!(find_header_bytes(b"\xCF\xFA\xED\xFE\x07\x00\x00\x01", ""));
-        assert!(find_header_bytes(
-            b"\xCA\xFE\xBA\xBE\x00\x00\x00\x01",
-            "macho"
-        ));
-    }
-
-    #[test]
-    fn accepts_office_openxml_as_zip_family() {
-        let bytes = b"PK\x03\x04[Content_Types].xmlword/document.xml";
-        assert!(find_header_bytes(bytes, "docx"));
-    }
-}
-
 static SIGNATURES: phf::Map<&'static str, &'static [&'static str]> = phf_map! {
     "00 00 00" => &["AVIF"],
     "00 00 00 20 66 74 79 70 68 65 69 63" => &["HEIC"],

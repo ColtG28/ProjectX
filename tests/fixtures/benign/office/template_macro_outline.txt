@@ -1,5 +1,0 @@
-Template notes:
-- AutoOpen updates document headings
-- CreateObject is referenced in legacy migration comments only
-- Shell command examples are placeholders for formatting guides
-- No download, persistence, or launcher behavior is present

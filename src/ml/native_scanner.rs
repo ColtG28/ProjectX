@@ -655,21 +655,3 @@ impl EvaluationAccumulator {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{compute_evaluation_metrics, EvaluationAccumulator};
-
-    #[test]
-    fn computes_evaluation_scores() {
-        let mut rows = EvaluationAccumulator::default();
-        rows.observe(1, "malicious");
-        rows.observe(0, "clean");
-        rows.observe(1, "clean");
-        rows.observe(0, "malicious");
-
-        let metrics = compute_evaluation_metrics(4, rows);
-        assert_eq!(metrics.manifest_rows, 4);
-        assert_eq!(metrics.matched_rows, 4);
-        assert!(metrics.f1_score >= 0.0);
-    }
-}

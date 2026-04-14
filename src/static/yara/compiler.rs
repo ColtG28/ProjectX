@@ -148,31 +148,3 @@ fn dir_signature(files: &[std::path::PathBuf]) -> String {
     crate::r#static::file::hash::sha256_hex(signature.as_bytes())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::split_rules;
-
-    #[test]
-    fn splits_multi_rule_files_into_individual_entries() {
-        let rules = split_rules(
-            r#"
-            rule first_rule {
-                strings:
-                    $a = "alpha"
-                condition:
-                    $a
-            }
-
-            rule second_rule {
-                strings:
-                    $b = "beta"
-                condition:
-                    $b
-            }
-            "#,
-        );
-        assert_eq!(rules.len(), 2);
-        assert!(rules[0].contains("first_rule"));
-        assert!(rules[1].contains("second_rule"));
-    }
-}

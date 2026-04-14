@@ -1,1 +1,0 @@
-(()=>{const cfg={apiBase:"https://docs.example.local",build:"2026.04.05",flags:["metrics","ui"]};const mount=document.getElementById("app");if(!mount){return;}mount.dataset.build=cfg.build;mount.textContent="Bundle ready";window.location.hash="#ready";})();

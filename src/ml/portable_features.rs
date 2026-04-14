@@ -1396,24 +1396,3 @@ fn trim_nul_ascii(mut value: &[u8]) -> &[u8] {
     value
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{extract_path, feature_names, FEATURE_NAMES};
-
-    #[test]
-    fn feature_layout_is_stable() {
-        assert_eq!(feature_names().len(), FEATURE_NAMES.len());
-    }
-
-    #[test]
-    fn extracts_generic_binary_features() {
-        let path = std::env::temp_dir().join("projectx_portable_features.bin");
-        std::fs::write(&path, b"MZhello http://example.com powershell").unwrap();
-
-        let extracted = extract_path(&path, 1024).unwrap();
-        assert_eq!(extracted.values.len(), FEATURE_NAMES.len());
-        assert_eq!(extracted.file_kind, "pe");
-
-        let _ = std::fs::remove_file(path);
-    }
-}

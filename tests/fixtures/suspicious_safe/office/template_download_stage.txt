@@ -1,6 +1,0 @@
-Document_Open
-CreateObject("WScript.Shell")
-FromBase64String("UExBQ0VIT0xERVI=")
-Shell "placeholder.exe"
-
-This is inert text only for passive detection testing.

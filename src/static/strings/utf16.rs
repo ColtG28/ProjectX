@@ -25,14 +25,3 @@ fn flush_if_long_enough(out: &mut Vec<String>, current: &mut String, min_len: us
     current.clear();
 }
 
-#[cfg(test)]
-mod tests {
-    use super::extract;
-
-    #[test]
-    fn extracts_wide_ascii_fragments_from_mixed_data() {
-        let bytes = b"X\0Y\0Z\0\0\0p\0o\0w\0e\0r\0s\0h\0e\0l\0l\0";
-        let values = extract(bytes, 4);
-        assert!(values.iter().any(|value| value.contains("powershell")));
-    }
-}

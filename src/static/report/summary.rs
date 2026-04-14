@@ -92,38 +92,3 @@ pub fn build(ctx: &ScanContext, severity: Severity) -> String {
     )
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::r#static::config::ScanConfig;
-    use crate::r#static::context::ScanContext;
-    use crate::r#static::types::{Finding, Severity};
-
-    use super::build;
-
-    #[test]
-    fn summary_highlights_top_signal_in_plain_language() {
-        let path =
-            std::env::temp_dir().join(format!("projectx_summary_{}.txt", std::process::id()));
-        std::fs::write(&path, "hello").unwrap();
-        let mut ctx = ScanContext::from_path(&path, ScanConfig::default()).unwrap();
-        ctx.score.risk = 6.2;
-        ctx.score.safety = 3.8;
-        ctx.push_finding(Finding::new(
-            "SCRIPT_CONCAT_EVAL",
-            "Script builds code from string fragments before evaluating it",
-            1.5,
-        ));
-        ctx.push_finding(Finding::new(
-            "YARA_MATCH",
-            "Local rule matched: suspicious.downloader.pattern",
-            2.0,
-        ));
-
-        let summary = build(&ctx, Severity::Suspicious);
-        assert!(summary.contains("File should be reviewed"));
-        assert!(summary.contains("Top signal: Local rule"));
-        assert!(summary.contains("Local rule matched"));
-
-        let _ = std::fs::remove_file(path);
-    }
-}

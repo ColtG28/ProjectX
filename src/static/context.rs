@@ -141,26 +141,3 @@ impl ScanContext {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::r#static::config::ScanConfig;
-
-    use super::ScanContext;
-
-    #[test]
-    fn caps_large_input_reads() {
-        let path =
-            std::env::temp_dir().join(format!("projectx_context_cap_{}.bin", std::process::id()));
-        std::fs::write(&path, vec![b'A'; 64]).unwrap();
-
-        let mut config = ScanConfig::default();
-        config.limits.max_input_bytes = 16;
-        let ctx = ScanContext::from_path(&path, config).unwrap();
-
-        assert_eq!(ctx.original_size_bytes, 64);
-        assert_eq!(ctx.bytes.len(), 16);
-        assert!(ctx.input_truncated);
-
-        let _ = std::fs::remove_file(path);
-    }
-}

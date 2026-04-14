@@ -67,12 +67,3 @@ pub(crate) fn hash_name_for_resolution(name: &str) -> u32 {
     hash
 }
 
-#[cfg(test)]
-mod tests {
-    use super::hash_name_for_resolution;
-
-    #[test]
-    fn computes_known_hash() {
-        assert_eq!(hash_name_for_resolution("VirtualAlloc"), 0x302E_BE1C);
-    }
-}

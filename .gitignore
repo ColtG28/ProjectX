@@ -1,19 +1,17 @@
-# Local build output
+# Rust build and packaging output
 /target/
+/dist/
+/release-artifacts/
 
 # Local planning/scratch files
 /Planning/
 
 # Local secrets/config
 /.env
+/.env.*
 
-# Runtime scanner state, quarantine, reports, and generated validation corpora
+# Runtime scanner state
 /quarantine/
-
-# Generated fixture payloads should stay local, but keep their README docs trackable.
-/tests/fixtures/generated/**
-!/tests/fixtures/generated/**/
-!/tests/fixtures/generated/**/README.md
 
 # Optional large benchmark/download workspaces
 /ember_benchmark/
@@ -27,8 +25,11 @@
 /tarpaulin-report.html
 /.pytest_cache/
 __pycache__/
+*.log
 
 # OS/editor noise
 .DS_Store
+.idea/
+.vscode/
 *.swp
 *.swo

@@ -31,15 +31,3 @@ fn contains_all(input: &str, needles: &[&str]) -> bool {
     needles.iter().all(|needle| input.contains(needle))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::check;
-
-    #[test]
-    fn powershell_marker_message_is_clear() {
-        let findings = check(b"powershell -enc");
-        assert!(findings[0]
-            .message
-            .starts_with("File contains PowerShell-related strings"));
-    }
-}

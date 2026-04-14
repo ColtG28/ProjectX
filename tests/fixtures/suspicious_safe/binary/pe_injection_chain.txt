@@ -1,9 +1,0 @@
-MZ
-VirtualAlloc
-WriteProcessMemory
-CreateRemoteThread
-powershell
--enc
-DownloadString
-rundll32
-http://example.invalid/stage

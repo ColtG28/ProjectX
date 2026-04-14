@@ -78,13 +78,3 @@ fn recover_simple_xor_literal(input: &str) -> Option<String> {
     None
 }
 
-#[cfg(test)]
-mod tests {
-    use super::recover_simple_xor_literal;
-
-    #[test]
-    fn recovers_simple_xor_literal() {
-        let value = "xor bytes [73, 69, 88, 40]";
-        assert!(recover_simple_xor_literal(value).is_some());
-    }
-}

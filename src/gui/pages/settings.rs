@@ -171,6 +171,96 @@ impl MyApp {
                     ui.label("External intelligence remains opt-in and is surfaced as a separate confidence input instead of silently overriding local analysis.");
                 });
 
+                ui.add_space(8.0 * self.ui_metrics.scale_factor);
+                ui.group(|ui| {
+                    ui.label(egui::RichText::new("App updates").strong());
+                    ui.label("ProjectX can check GitHub Releases in the background and open the latest platform build when a newer version is available.");
+                    settings_changed |= ui
+                        .checkbox(
+                            &mut self.settings.enable_automatic_updates,
+                            "Enable automatic update checks",
+                        )
+                        .changed();
+
+                    let update_snapshot = self
+                        .update_state
+                        .lock()
+                        .map(|state| state.clone())
+                        .unwrap_or_default();
+
+                    ui.label(format!(
+                        "Current version: {}",
+                        update_snapshot.current_version
+                    ));
+                    ui.label(&update_snapshot.status);
+                    if update_snapshot.last_checked_epoch > 0 {
+                        ui.label(format!(
+                            "Last checked: {}",
+                            update_snapshot.last_checked_epoch
+                        ));
+                    }
+                    if let Some(error) = &update_snapshot.last_error {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(180, 96, 96),
+                            format!("Update check error: {error}"),
+                        );
+                    }
+
+                    ui.horizontal_wrapped(|ui| {
+                        if ui
+                            .add_enabled(!update_snapshot.checking, egui::Button::new("Check now"))
+                            .clicked()
+                        {
+                            self.start_update_check(true);
+                        }
+
+                        if ui
+                            .add_enabled(
+                                update_snapshot.available_update.is_some(),
+                                egui::Button::new("Download latest update"),
+                            )
+                            .clicked()
+                        {
+                            self.open_available_update();
+                        }
+
+                        if ui.button("Open release page").clicked() {
+                            self.open_release_notes();
+                        }
+                    });
+
+                    if let Some(update) = &update_snapshot.available_update {
+                        ui.add_space(4.0 * self.ui_metrics.scale_factor);
+                        ui.label(format!(
+                            "Available version: {} ({})",
+                            update.version, update.tag_name
+                        ));
+                        if !update.published_at.is_empty() {
+                            ui.label(format!("Published: {}", update.published_at));
+                        }
+                        if !update.asset_name.is_empty() {
+                            ui.label(format!("Download asset: {}", update.asset_name));
+                        }
+                        if !update.body.trim().is_empty() {
+                            ui.label("Release notes preview:");
+                            let mut preview = update
+                                .body
+                                .lines()
+                                .take(6)
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            if update.body.lines().count() > 6 {
+                                preview.push_str("\n...");
+                            }
+                            ui.add(
+                                egui::TextEdit::multiline(&mut preview)
+                                    .desired_rows(6)
+                                    .interactive(false),
+                            );
+                        }
+                    }
+                });
+
                 ui.separator();
                 ui.label(format!(
                     "Stored timing samples for ETA learning: {}",

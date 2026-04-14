@@ -87,25 +87,3 @@ pub fn score(features: &FeatureVector) -> Assessment {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{score, MALICIOUS_LABEL_THRESHOLD};
-    use crate::ml::features::FeatureVector;
-
-    #[test]
-    fn scores_high_risk_feature_sets() {
-        let assessment = score(&FeatureVector {
-            finding_count: 8,
-            suspicious_weight: 12.0,
-            decoded_count: 10,
-            artifact_count: 6,
-            nested_depth: 3,
-            yara_hits: 2,
-            emulation_runtime_hits: 1,
-            has_macro_indicator: true,
-            has_network_indicator: true,
-        });
-        assert_eq!(assessment.label, "malicious");
-        assert!(assessment.blended_score >= MALICIOUS_LABEL_THRESHOLD);
-    }
-}

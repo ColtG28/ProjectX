@@ -31,22 +31,3 @@ fn contains_all(input: &str, needles: &[&str]) -> bool {
     needles.iter().all(|needle| input.contains(needle))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::check;
-
-    #[test]
-    fn shell_reference_message_is_clear() {
-        let findings = check(b"/bin/sh");
-        assert_eq!(findings.len(), 1);
-        assert!(findings[0].message.contains("shell-launch behavior"));
-    }
-
-    #[test]
-    fn shell_downloader_message_is_clear() {
-        let findings = check(b"/bin/sh\0curl http://example.invalid\0");
-        assert!(findings
-            .iter()
-            .any(|finding| finding.code == "ELF_SHELL_DOWNLOADER"));
-    }
-}

@@ -1,0 +1,112 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: linux-x86_64
+            binary_name: ProjectX
+            package_name: ProjectX-${{ github.ref_name }}-linux-x86_64.tar.gz
+            artifact_name: projectx-linux-x86_64
+          - os: windows-latest
+            label: windows-x86_64
+            binary_name: ProjectX.exe
+            package_name: ProjectX-${{ github.ref_name }}-windows-x86_64.zip
+            artifact_name: projectx-windows-x86_64
+          - os: macos-13
+            label: macos-x86_64
+            binary_name: ProjectX
+            package_name: ProjectX-${{ github.ref_name }}-macos-x86_64.zip
+            artifact_name: projectx-macos-x86_64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxdo-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev pkg-config
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Package Linux artifact
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          mkdir -p dist/package
+          cp "target/release/${{ matrix.binary_name }}" dist/package/
+          cp README.md LICENSE dist/package/
+          tar -czf "dist/${{ matrix.package_name }}" -C dist/package .
+          sha256sum "dist/${{ matrix.package_name }}" > "dist/${{ matrix.package_name }}.sha256"
+
+      - name: Package macOS artifact
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          mkdir -p dist/package
+          cp "target/release/${{ matrix.binary_name }}" dist/package/
+          cp README.md LICENSE dist/package/
+          ditto -c -k --sequesterRsrc --keepParent dist/package "dist/${{ matrix.package_name }}"
+          shasum -a 256 "dist/${{ matrix.package_name }}" > "dist/${{ matrix.package_name }}.sha256"
+
+      - name: Package Windows artifact
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/package | Out-Null
+          Copy-Item "target/release/${{ matrix.binary_name }}" dist/package/
+          Copy-Item README.md, LICENSE dist/package/
+          Compress-Archive -Path dist/package/* -DestinationPath "dist/${{ matrix.package_name }}" -Force
+          $hash = (Get-FileHash "dist/${{ matrix.package_name }}" -Algorithm SHA256).Hash.ToLower()
+          Set-Content -Path "dist/${{ matrix.package_name }}.sha256" -Value "$hash  ${{ matrix.package_name }}"
+
+      - name: Upload packaged artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/*
+
+  publish:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+
+      - name: Flatten artifact tree
+        run: |
+          mkdir -p dist
+          find release-artifacts -type f -maxdepth 2 -exec cp {} dist/ \;
+          ls -lah dist
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

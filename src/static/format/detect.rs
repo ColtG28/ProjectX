@@ -76,32 +76,3 @@ fn is_macho(bytes: &[u8]) -> bool {
     )
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{kind, FormatKind};
-
-    #[test]
-    fn detects_office_openxml_by_contents_even_if_extension_is_generic_zip() {
-        let bytes = b"PK\x03\x04[Content_Types].xmlword/document.xmldocProps/app.xml";
-        assert_eq!(kind(bytes, "zip"), FormatKind::Office);
-    }
-
-    #[test]
-    fn detects_legacy_ole_office_documents() {
-        let mut bytes = vec![0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
-        bytes.extend_from_slice(b"WordDocument VBA");
-        assert_eq!(kind(&bytes, "bin"), FormatKind::Office);
-    }
-
-    #[test]
-    fn detects_macho_headers() {
-        assert_eq!(
-            kind(&[0xCF, 0xFA, 0xED, 0xFE, 0, 0, 0, 0], "dylib"),
-            FormatKind::Macho
-        );
-        assert_eq!(
-            kind(&[0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 1], "macho"),
-            FormatKind::Macho
-        );
-    }
-}

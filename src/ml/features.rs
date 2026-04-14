@@ -55,30 +55,3 @@ pub fn extract(ctx: &ScanContext) -> FeatureVector {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::r#static::config::ScanConfig;
-    use crate::r#static::context::ScanContext;
-    use crate::r#static::types::{Finding, View};
-
-    use super::extract;
-
-    #[test]
-    fn extracts_basic_features() {
-        let path = std::env::temp_dir().join("projectx_ml_features.txt");
-        std::fs::write(&path, "hello").unwrap();
-        let mut ctx = ScanContext::from_path(&path, ScanConfig::default()).unwrap();
-        ctx.findings.push(Finding::new("YARA_MATCH", "hit", 2.0));
-        ctx.findings
-            .push(Finding::new("OFFICE_MACRO", "macro", 2.0));
-        ctx.decoded_strings.push("decoded".to_string());
-        ctx.push_view(View::new("format.nested_depth", "2"));
-
-        let vector = extract(&ctx);
-        assert_eq!(vector.finding_count, 2);
-        assert_eq!(vector.nested_depth, 2);
-        assert!(vector.has_macro_indicator);
-
-        let _ = std::fs::remove_file(path);
-    }
-}

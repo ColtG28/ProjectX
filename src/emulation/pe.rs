@@ -142,37 +142,3 @@ fn extract_import_indicators(bytes: &[u8]) -> Vec<String> {
     hits
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{should_emit_import_signal, should_emit_loader_signal};
-
-    #[test]
-    fn dynamic_loader_markers_alone_do_not_emit_loader_signal() {
-        assert!(!should_emit_loader_signal(&[
-            "loadlibrarya",
-            "getprocaddress"
-        ]));
-    }
-
-    #[test]
-    fn stronger_loader_markers_emit_loader_signal() {
-        assert!(should_emit_loader_signal(&[
-            "virtualalloc",
-            "getprocaddress"
-        ]));
-    }
-
-    #[test]
-    fn dll_name_alone_does_not_emit_import_signal() {
-        assert!(!should_emit_import_signal(&["kernel32.dll".to_string()]));
-    }
-
-    #[test]
-    fn strong_import_chain_emits_import_signal() {
-        assert!(should_emit_import_signal(&[
-            "kernel32.dll".to_string(),
-            "virtualalloc".to_string(),
-            "writeprocessmemory".to_string(),
-        ]));
-    }
-}

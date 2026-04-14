@@ -1,5 +1,0 @@
-WordDocument
-vbaProject.bin
-Document_Open
-Workbook_Open
-This workbook reformats tables, applies conditional highlighting, and recalculates totals for monthly reporting.

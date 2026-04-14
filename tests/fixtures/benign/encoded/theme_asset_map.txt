@@ -1,7 +1,0 @@
-asset_map = {
-  "logo": "ZGFya190aGVtZV9sb2dvLnN2Zw==",
-  "theme": "ZGFya190aGVtZV9wYWxldHRl",
-  "template": "PHRlbXBsYXRlPkhlbGxvPC90ZW1wbGF0ZT4="
-}
-
-The encoded values represent theme assets and template fragments only.

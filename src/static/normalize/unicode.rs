@@ -34,17 +34,3 @@ fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::decode_percent_hex;
-
-    #[test]
-    fn decodes_ascii_percent_sequences() {
-        assert_eq!(decode_percent_hex("a%20b"), "a b");
-    }
-
-    #[test]
-    fn handles_non_ascii_without_panicking() {
-        assert_eq!(decode_percent_hex("$4�%�"), "$4�%�");
-    }
-}

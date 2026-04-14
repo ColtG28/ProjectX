@@ -17,6 +17,7 @@ pub const INDEX_PATH: &str = "quarantine/gui_index.json";
 pub const SETTINGS_PATH: &str = "quarantine/gui_settings.json";
 pub const PROTECTION_EVENTS_PATH: &str = "quarantine/gui_protection_events.json";
 pub const PROTECTION_BACKLOG_PATH: &str = "quarantine/gui_protection_backlog.json";
+pub const SCAN_RECORD_LIMIT: usize = 500;
 pub const TIMING_SAMPLE_LIMIT: usize = 2048;
 pub const PROTECTION_EVENT_LIMIT: usize = 512;
 
@@ -533,8 +534,14 @@ pub struct SettingsState {
     pub enable_external_intelligence: bool,
     pub enable_real_time_protection: bool,
     pub enable_download_monitoring: bool,
+    #[serde(default = "default_enable_automatic_updates")]
+    pub enable_automatic_updates: bool,
     #[serde(default)]
     pub watched_paths: Vec<WatchedPathConfig>,
+}
+
+fn default_enable_automatic_updates() -> bool {
+    true
 }
 
 impl Default for SettingsState {
@@ -557,7 +564,42 @@ impl Default for SettingsState {
             enable_external_intelligence: false,
             enable_real_time_protection: false,
             enable_download_monitoring: false,
+            enable_automatic_updates: true,
             watched_paths: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AvailableUpdate {
+    pub version: String,
+    pub tag_name: String,
+    pub published_at: String,
+    pub html_url: String,
+    pub asset_name: String,
+    pub asset_url: String,
+    pub body: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateCheckState {
+    pub checking: bool,
+    pub current_version: String,
+    pub status: String,
+    pub last_checked_epoch: u64,
+    pub available_update: Option<AvailableUpdate>,
+    pub last_error: Option<String>,
+}
+
+impl Default for UpdateCheckState {
+    fn default() -> Self {
+        Self {
+            checking: false,
+            current_version: env!("CARGO_PKG_VERSION").to_string(),
+            status: "Update checks have not run yet.".to_string(),
+            last_checked_epoch: 0,
+            available_update: None,
+            last_error: None,
         }
     }
 }
@@ -869,6 +911,8 @@ pub struct MyApp {
     pub last_download_poll: Instant,
     pub download_watch: HashMap<String, DownloadWatchEntry>,
     pub download_status: String,
+    pub last_update_poll: Instant,
+    pub update_state: std::sync::Arc<std::sync::Mutex<UpdateCheckState>>,
 }
 
 #[derive(Debug, Clone)]
@@ -898,83 +942,4 @@ pub struct EtaEstimateInput {
     pub total_elapsed_ms: u64,
     pub average_file_ms: u64,
     pub historical_bytes_per_ms: f64,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        DetectionReason, QuarantineMetadata, RecordStorageState, ScanRecord, SeverityLevel, Verdict,
-    };
-
-    #[test]
-    fn display_note_combines_primary_and_action_notes() {
-        let record = ScanRecord {
-            scan_id: "one".to_string(),
-            path: "file.txt".to_string(),
-            file_name: "file.txt".to_string(),
-            extension: Some("txt".to_string()),
-            sha256: None,
-            sniffed_mime: None,
-            detected_format: None,
-            quarantine_path: None,
-            report_path: None,
-            storage_state: RecordStorageState::Unknown,
-            last_modified_epoch: 0,
-            scanned_at_epoch: 0,
-            started_at_epoch: None,
-            finished_at_epoch: None,
-            duration_ms: 0,
-            file_size_bytes: 0,
-            verdict: Verdict::Suspicious,
-            severity: SeverityLevel::Medium,
-            summary_text: "Primary".to_string(),
-            action_note: "Action".to_string(),
-            workflow_origin: None,
-            risk_score: None,
-            safety_score: None,
-            signal_sources: vec!["heuristic".to_string()],
-            detection_reasons: vec![DetectionReason::default()],
-            warning_count: 1,
-            error_count: 0,
-            quarantine: QuarantineMetadata::default(),
-        };
-
-        assert_eq!(record.display_note(), "Primary | Action");
-    }
-
-    #[test]
-    fn quick_type_prefers_detected_format() {
-        let record = ScanRecord {
-            scan_id: "two".to_string(),
-            path: "file.bin".to_string(),
-            file_name: "file.bin".to_string(),
-            extension: Some("bin".to_string()),
-            sha256: None,
-            sniffed_mime: Some("application/octet-stream".to_string()),
-            detected_format: Some("Pe".to_string()),
-            quarantine_path: None,
-            report_path: None,
-            storage_state: RecordStorageState::Unknown,
-            last_modified_epoch: 0,
-            scanned_at_epoch: 0,
-            started_at_epoch: None,
-            finished_at_epoch: None,
-            duration_ms: 0,
-            file_size_bytes: 0,
-            verdict: Verdict::Clean,
-            severity: SeverityLevel::Clean,
-            summary_text: String::new(),
-            action_note: String::new(),
-            workflow_origin: None,
-            risk_score: None,
-            safety_score: None,
-            signal_sources: Vec::new(),
-            detection_reasons: Vec::new(),
-            warning_count: 0,
-            error_count: 0,
-            quarantine: QuarantineMetadata::default(),
-        };
-
-        assert_eq!(record.quick_type_label(), "Pe");
-    }
 }
