@@ -136,7 +136,9 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.artifact_name }}
-          path: dist/*
+          path: |
+            dist/${{ matrix.package_name }}
+            dist/${{ matrix.package_name }}.sha256
 
   publish:
     name: Publish GitHub release
