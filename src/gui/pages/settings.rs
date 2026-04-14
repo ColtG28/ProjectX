@@ -192,12 +192,26 @@ impl MyApp {
                         "Current version: {}",
                         update_snapshot.current_version
                     ));
+                    ui.label(format!("Release source: {}", update_snapshot.repo_label));
                     ui.label(&update_snapshot.status);
+                    ui.label(format!(
+                        "Update status: {}",
+                        update_snapshot.status_kind.as_str()
+                    ));
                     if update_snapshot.last_checked_epoch > 0 {
                         ui.label(format!(
                             "Last checked: {}",
                             update_snapshot.last_checked_epoch
                         ));
+                    }
+                    if update_snapshot.last_successful_check_epoch > 0 {
+                        ui.label(format!(
+                            "Last successful lookup: {}",
+                            update_snapshot.last_successful_check_epoch
+                        ));
+                    }
+                    if update_snapshot.used_cached_release {
+                        ui.label("Using cached release metadata because the latest network check did not complete cleanly.");
                     }
                     if let Some(error) = &update_snapshot.last_error {
                         ui.colored_label(
@@ -229,10 +243,10 @@ impl MyApp {
                         }
                     });
 
-                    if let Some(update) = &update_snapshot.available_update {
+                    if let Some(update) = &update_snapshot.latest_release {
                         ui.add_space(4.0 * self.ui_metrics.scale_factor);
                         ui.label(format!(
-                            "Available version: {} ({})",
+                            "Latest release: {} ({})",
                             update.version, update.tag_name
                         ));
                         if !update.published_at.is_empty() {
@@ -258,6 +272,10 @@ impl MyApp {
                                     .interactive(false),
                             );
                         }
+                    }
+
+                    if update_snapshot.latest_release.is_none() {
+                        ui.label("Latest stable release metadata is not available yet.");
                     }
                 });
 

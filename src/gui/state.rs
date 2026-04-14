@@ -11,6 +11,7 @@ pub use crate::r#static::report::{
     QuarantineStatus as RecordStorageState, ReportReason as DetectionReason,
     ReportSummary as ScanRecord, SummaryVerdict as Verdict,
 };
+pub use crate::update::{ReleaseInfo as AvailableUpdate, UpdateStatusKind};
 
 pub const SCAN_RECORD_LIMIT: usize = 500;
 pub const TIMING_SAMPLE_LIMIT: usize = 2048;
@@ -585,25 +586,20 @@ impl Default for SettingsState {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct AvailableUpdate {
-    pub version: String,
-    pub tag_name: String,
-    pub published_at: String,
-    pub html_url: String,
-    pub asset_name: String,
-    pub asset_url: String,
-    pub body: String,
-}
-
 #[derive(Debug, Clone)]
 pub struct UpdateCheckState {
     pub checking: bool,
     pub current_version: String,
     pub status: String,
+    pub status_kind: UpdateStatusKind,
     pub last_checked_epoch: u64,
+    pub last_successful_check_epoch: u64,
+    pub latest_release: Option<AvailableUpdate>,
     pub available_update: Option<AvailableUpdate>,
     pub last_error: Option<String>,
+    pub repo_label: String,
+    pub release_page_url: String,
+    pub used_cached_release: bool,
 }
 
 impl Default for UpdateCheckState {
@@ -612,9 +608,22 @@ impl Default for UpdateCheckState {
             checking: false,
             current_version: env!("CARGO_PKG_VERSION").to_string(),
             status: "Update checks have not run yet.".to_string(),
+            status_kind: UpdateStatusKind::Unknown,
             last_checked_epoch: 0,
+            last_successful_check_epoch: 0,
+            latest_release: None,
             available_update: None,
             last_error: None,
+            repo_label: format!(
+                "{}/{}",
+                crate::update::github_release_config().owner,
+                crate::update::github_release_config().repo
+            ),
+            release_page_url: crate::update::releases_page_url(
+                &crate::update::github_release_config().owner,
+                &crate::update::github_release_config().repo,
+            ),
+            used_cached_release: false,
         }
     }
 }

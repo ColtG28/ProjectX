@@ -20,8 +20,6 @@ use super::state::*;
 use super::theme;
 
 const AUTO_UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
-const UPDATE_REPOSITORY: &str = "ColtG-28/ProjectX";
-
 pub fn gui() -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -930,27 +928,20 @@ impl MyApp {
 
         let update_state = Arc::clone(&self.update_state);
         thread::spawn(move || {
-            let outcome = fetch_latest_release_info();
+            let outcome = crate::update::check_for_updates(now_epoch());
             if let Ok(mut state) = update_state.lock() {
                 state.checking = false;
-                state.last_checked_epoch = now_epoch();
-                match outcome {
-                    Ok(Some(update)) => {
-                        state.status = format!("Update {} is available.", update.version);
-                        state.available_update = Some(update);
-                        state.last_error = None;
-                    }
-                    Ok(None) => {
-                        state.status = "ProjectX is up to date.".to_string();
-                        state.available_update = None;
-                        state.last_error = None;
-                    }
-                    Err(error) => {
-                        state.status = "Update check failed.".to_string();
-                        state.available_update = None;
-                        state.last_error = Some(error);
-                    }
-                }
+                state.current_version = outcome.current_version;
+                state.status = outcome.status_label;
+                state.status_kind = outcome.status_kind;
+                state.last_checked_epoch = outcome.last_checked_epoch;
+                state.last_successful_check_epoch = outcome.last_successful_check_epoch;
+                state.latest_release = outcome.latest_release;
+                state.available_update = outcome.available_update;
+                state.last_error = outcome.last_error;
+                state.repo_label = outcome.repo_label;
+                state.release_page_url = outcome.release_page_url;
+                state.used_cached_release = outcome.used_cached_release;
             }
         });
     }
@@ -977,13 +968,17 @@ impl MyApp {
             .update_state
             .lock()
             .ok()
-            .and_then(|state| {
+            .map(|state| {
                 state
-                    .available_update
+                    .latest_release
                     .as_ref()
                     .map(|update| update.html_url.clone())
+                    .unwrap_or_else(|| state.release_page_url.clone())
             })
-            .unwrap_or_else(releases_page_url);
+            .unwrap_or_else(|| {
+                let config = crate::update::github_release_config();
+                crate::update::releases_page_url(&config.owner, &config.repo)
+            });
 
         self.status_message = match open_external_target(&release_url) {
             Ok(()) => "Opened the latest ProjectX release page.".to_string(),
@@ -3311,170 +3306,6 @@ fn open_external_target(target: &str) -> Result<(), String> {
     } else {
         Err("The OS open command did not succeed.".to_string())
     }
-}
-
-fn fetch_latest_release_info() -> Result<Option<AvailableUpdate>, String> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(12))
-        .build()
-        .map_err(|error| format!("Failed to build update client: {error}"))?;
-    let value = fetch_release_json(&client)?;
-
-    let tag_name = value["tag_name"]
-        .as_str()
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    if tag_name.is_empty() {
-        return Err("Latest release metadata did not include a tag.".to_string());
-    }
-
-    let latest_version = normalize_version_label(&tag_name);
-    if !is_version_newer(&latest_version, env!("CARGO_PKG_VERSION")) {
-        return Ok(None);
-    }
-
-    let html_url = value["html_url"].as_str().unwrap_or_default().to_string();
-    let published_at = value["published_at"]
-        .as_str()
-        .or_else(|| value["created_at"].as_str())
-        .unwrap_or_default()
-        .to_string();
-    let body = value["body"].as_str().unwrap_or_default().to_string();
-    let assets = value["assets"].as_array().cloned().unwrap_or_default();
-    let Some(asset) = select_platform_asset(&assets) else {
-        return Err("A matching download asset for this platform was not found.".to_string());
-    };
-
-    Ok(Some(AvailableUpdate {
-        version: latest_version,
-        tag_name,
-        published_at,
-        html_url,
-        asset_name: asset["name"].as_str().unwrap_or_default().to_string(),
-        asset_url: asset["browser_download_url"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string(),
-        body,
-    }))
-}
-
-fn fetch_release_json(client: &reqwest::blocking::Client) -> Result<serde_json::Value, String> {
-    let latest_url = format!("https://api.github.com/repos/{UPDATE_REPOSITORY}/releases/latest");
-    let latest_response = client
-        .get(&latest_url)
-        .header(reqwest::header::USER_AGENT, "ProjectX-UpdateChecker")
-        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
-        .send()
-        .map_err(|error| format!("Failed to contact GitHub Releases: {error}"))?;
-
-    if latest_response.status().is_success() {
-        let text = latest_response
-            .text()
-            .map_err(|error| format!("Failed to read latest release metadata: {error}"))?;
-        return serde_json::from_str::<serde_json::Value>(&text)
-            .map_err(|error| format!("Failed to parse latest release metadata: {error}"));
-    }
-
-    if latest_response.status() != reqwest::StatusCode::NOT_FOUND {
-        return Err(format!(
-            "GitHub Releases returned {}.",
-            latest_response.status()
-        ));
-    }
-
-    let releases_url = format!("https://api.github.com/repos/{UPDATE_REPOSITORY}/releases");
-    let releases_response = client
-        .get(&releases_url)
-        .header(reqwest::header::USER_AGENT, "ProjectX-UpdateChecker")
-        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
-        .send()
-        .map_err(|error| format!("Failed to contact GitHub release list: {error}"))?;
-
-    if !releases_response.status().is_success() {
-        return Err(format!(
-            "GitHub release list returned {}.",
-            releases_response.status()
-        ));
-    }
-
-    let text = releases_response
-        .text()
-        .map_err(|error| format!("Failed to read release list metadata: {error}"))?;
-    let releases = serde_json::from_str::<Vec<serde_json::Value>>(&text)
-        .map_err(|error| format!("Failed to parse release list metadata: {error}"))?;
-
-    releases
-        .into_iter()
-        .find(|release| {
-            !release["draft"].as_bool().unwrap_or(false)
-                && !release["prerelease"].as_bool().unwrap_or(false)
-        })
-        .ok_or_else(|| {
-            format!(
-                "No published GitHub release was found. Open {} to create one.",
-                releases_page_url()
-            )
-        })
-}
-
-fn releases_page_url() -> String {
-    format!("https://github.com/{UPDATE_REPOSITORY}/releases")
-}
-
-fn select_platform_asset(assets: &[serde_json::Value]) -> Option<serde_json::Value> {
-    let expected_platform = if cfg!(target_os = "windows") {
-        "windows"
-    } else if cfg!(target_os = "macos") {
-        "macos"
-    } else {
-        "linux"
-    };
-
-    assets.iter().find_map(|asset| {
-        let name = asset["name"].as_str()?.to_ascii_lowercase();
-        if name.contains(expected_platform) && !name.ends_with(".sha256") {
-            Some(asset.clone())
-        } else {
-            None
-        }
-    })
-}
-
-fn normalize_version_label(version: &str) -> String {
-    version
-        .trim_start_matches(|ch: char| !ch.is_ascii_digit())
-        .to_string()
-}
-
-fn is_version_newer(candidate: &str, current: &str) -> bool {
-    compare_versionish(candidate, current).is_gt()
-}
-
-fn compare_versionish(left: &str, right: &str) -> std::cmp::Ordering {
-    let left_parts = parse_versionish_parts(left);
-    let right_parts = parse_versionish_parts(right);
-    let max_len = left_parts.len().max(right_parts.len());
-
-    for index in 0..max_len {
-        let left_part = *left_parts.get(index).unwrap_or(&0);
-        let right_part = *right_parts.get(index).unwrap_or(&0);
-        match left_part.cmp(&right_part) {
-            std::cmp::Ordering::Equal => {}
-            ordering => return ordering,
-        }
-    }
-
-    std::cmp::Ordering::Equal
-}
-
-fn parse_versionish_parts(value: &str) -> Vec<u64> {
-    value
-        .split(|ch: char| !ch.is_ascii_digit())
-        .filter(|part| !part.is_empty())
-        .filter_map(|part| part.parse::<u64>().ok())
-        .collect()
 }
 
 fn percent_label(part: usize, total: usize) -> String {

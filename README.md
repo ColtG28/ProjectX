@@ -54,6 +54,24 @@ git push origin v1.0.0
 
 GitHub Actions will build optimized release archives for Linux, Windows, and macOS and publish them to GitHub Releases automatically. The repository-local [Downloads](./DOWNLOADS.md) page always points at the latest release assets, so you do not need to make the project public or enable GitHub Pages.
 
+## Update Checks
+
+The desktop app checks GitHub Releases through the official GitHub Releases REST API. It compares the installed app version with the latest stable release tag, ignores drafts by default, and ignores prereleases unless explicitly enabled.
+
+Supported environment variables:
+
+- `PROJECTX_GITHUB_OWNER`
+- `PROJECTX_GITHUB_REPO`
+- `PROJECTX_GITHUB_TOKEN`
+- `PROJECTX_INCLUDE_PRERELEASES`
+
+Behavior notes:
+
+- Public repositories do not require a token.
+- Private repositories can be checked if `PROJECTX_GITHUB_TOKEN` is provided.
+- If GitHub is offline, rate-limited, or misconfigured, the app reports that state explicitly instead of pretending it is up to date.
+- The app stores the last successful release lookup in local app config so it can show cached metadata when the network check fails.
+
 macOS note:
 - The macOS release contains a real `ProjectX.app` bundle inside a DMG.
 - The bundle is ad-hoc signed for local usability, but it is still not notarized.

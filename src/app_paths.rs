@@ -66,6 +66,10 @@ pub fn protection_backlog_path() -> PathBuf {
     data_root().join("gui_protection_backlog.json")
 }
 
+pub fn update_cache_path() -> PathBuf {
+    config_root().join("update_check_cache.json")
+}
+
 pub fn intelligence_dir() -> PathBuf {
     data_root().join("intelligence")
 }
