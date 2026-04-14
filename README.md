@@ -4,7 +4,7 @@ ProjectX is a GUI-first defensive file scanner built in Rust with `egui`/`eframe
 
 ## Downloads
 
-- [Latest downloads page](https://coltg-28.github.io/ProjectX/)
+- [Downloads](./DOWNLOADS.md)
 - [GitHub releases](https://github.com/ColtG-28/ProjectX/releases)
 
 ## Scope
@@ -52,9 +52,7 @@ git tag v1.0.0
 git push origin v1.0.0
 ```
 
-GitHub Actions will build optimized release archives for Linux, Windows, and macOS, publish them to GitHub Releases, and keep the downloads page current automatically.
-
-For the downloads page to publish, enable GitHub Pages once in the repository settings and set the source to GitHub Actions.
+GitHub Actions will build optimized release archives for Linux, Windows, and macOS and publish them to GitHub Releases automatically. The repository-local [Downloads](./DOWNLOADS.md) page always points at the latest release assets, so you do not need to make the project public or enable GitHub Pages.
 
 ## Running Tests
 

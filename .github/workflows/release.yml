@@ -6,6 +6,9 @@ on:
       - "v*"
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 permissions:
   contents: write
 
@@ -20,21 +23,21 @@ jobs:
           - os: ubuntu-latest
             label: linux-x86_64
             binary_name: ProjectX
-            package_name: ProjectX-${{ github.ref_name }}-linux-x86_64.tar.gz
+            package_name: ProjectX-linux-x86_64.tar.gz
             artifact_name: projectx-linux-x86_64
           - os: windows-latest
             label: windows-x86_64
             binary_name: ProjectX.exe
-            package_name: ProjectX-${{ github.ref_name }}-windows-x86_64.zip
+            package_name: ProjectX-windows-x86_64.zip
             artifact_name: projectx-windows-x86_64
           - os: macos-latest
-            label: macos-x86_64
+            label: macos
             binary_name: ProjectX
-            package_name: ProjectX-${{ github.ref_name }}-macos-x86_64.zip
-            artifact_name: projectx-macos-x86_64
+            package_name: ProjectX-macos.zip
+            artifact_name: projectx-macos
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -83,7 +86,7 @@ jobs:
           Set-Content -Path "dist/${{ matrix.package_name }}.sha256" -Value "$hash  ${{ matrix.package_name }}"
 
       - name: Upload packaged artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.artifact_name }}
           path: dist/*
