@@ -360,8 +360,8 @@ pub fn persist(
 }
 
 fn write_report_file(report_json: &str, file_name: &str) -> Result<PathBuf, String> {
-    let reports_dir = Path::new("quarantine/reports");
-    fs::create_dir_all(reports_dir)
+    let reports_dir = crate::app_paths::reports_dir();
+    fs::create_dir_all(&reports_dir)
         .map_err(|error| format!("Failed to create reports directory: {error}"))?;
 
     let timestamp = SystemTime::now()
@@ -385,7 +385,7 @@ fn write_report_file(report_json: &str, file_name: &str) -> Result<PathBuf, Stri
 }
 
 fn append_telemetry(value: &serde_json::Value) -> Result<(), String> {
-    let telemetry_path = Path::new("quarantine/scan_telemetry.jsonl");
+    let telemetry_path = crate::app_paths::telemetry_path();
     if let Some(parent) = telemetry_path.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| format!("Failed to create telemetry directory: {error}"))?;
@@ -402,4 +402,3 @@ fn append_telemetry(value: &serde_json::Value) -> Result<(), String> {
     writeln!(file, "{line}").map_err(|error| format!("Failed to append telemetry log: {error}"))?;
     Ok(())
 }
-

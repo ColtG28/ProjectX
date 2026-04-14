@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 #[derive(Debug, Clone)]
@@ -16,37 +16,25 @@ struct CachedBundle {
 
 static RULE_BUNDLE: OnceLock<Mutex<Option<CachedBundle>>> = OnceLock::new();
 
+const BUNDLED_RULES: &[(&str, &str)] = &[(
+    "passive_triage_rules.yar",
+    include_str!("rules/passive_triage_rules.yar"),
+)];
+
 pub fn load_rule_strings() -> Vec<String> {
     load_rule_bundle().rules
 }
 
 pub fn load_rule_bundle() -> RuleBundle {
-    let rules_dir = Path::new("src/static/yara/rules");
-    if !rules_dir.exists() {
+    let sources = load_rule_sources();
+    if sources.is_empty() {
         return RuleBundle {
             rules: Vec::new(),
             version: "no_rules".to_string(),
         };
     }
 
-    let mut files = Vec::new();
-    let entries = fs::read_dir(rules_dir);
-    let Ok(entries) = entries else {
-        return RuleBundle {
-            rules: Vec::new(),
-            version: "rules_unreadable".to_string(),
-        };
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_file() {
-            files.push(path);
-        }
-    }
-
-    files.sort();
-    let signature = dir_signature(&files);
+    let signature = source_signature(&sources);
     let cache = RULE_BUNDLE.get_or_init(|| Mutex::new(None));
     if let Ok(mut cached) = cache.lock() {
         if let Some(bundle) = cached.as_ref() {
@@ -55,7 +43,7 @@ pub fn load_rule_bundle() -> RuleBundle {
             }
         }
 
-        let bundle = build_bundle(&files);
+        let bundle = build_bundle(&sources);
         *cached = Some(CachedBundle {
             signature,
             bundle: bundle.clone(),
@@ -63,7 +51,7 @@ pub fn load_rule_bundle() -> RuleBundle {
         return bundle;
     }
 
-    build_bundle(&files)
+    build_bundle(&sources)
 }
 
 pub fn refresh_rule_bundle() -> RuleBundle {
@@ -78,18 +66,49 @@ pub fn current_rule_version() -> String {
     load_rule_bundle().version
 }
 
-fn build_bundle(files: &[std::path::PathBuf]) -> RuleBundle {
+fn load_rule_sources() -> Vec<(String, String)> {
+    let override_dir = crate::app_paths::yara_rules_override_dir();
+    let mut files = override_rule_files(&override_dir);
+    if files.is_empty() {
+        return BUNDLED_RULES
+            .iter()
+            .map(|(name, contents)| ((*name).to_string(), (*contents).to_string()))
+            .collect();
+    }
+
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    files
+}
+
+fn override_rule_files(dir: &PathBuf) -> Vec<(String, String)> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let extension = path.extension()?.to_str()?;
+            if extension != "yar" && extension != "yara" {
+                return None;
+            }
+            let contents = fs::read_to_string(&path).ok()?;
+            Some((path.to_string_lossy().to_string(), contents))
+        })
+        .collect()
+}
+
+fn build_bundle(sources: &[(String, String)]) -> RuleBundle {
     let mut rules = Vec::new();
     let mut version_material = String::new();
 
-    for path in files {
-        if let Ok(contents) = fs::read_to_string(path) {
-            version_material.push_str(&path.to_string_lossy());
-            version_material.push('\n');
-            version_material.push_str(&contents);
-            version_material.push('\n');
-            rules.extend(split_rules(&contents));
-        }
+    for (name, contents) in sources {
+        version_material.push_str(name);
+        version_material.push('\n');
+        version_material.push_str(contents);
+        version_material.push('\n');
+        rules.extend(split_rules(contents));
     }
 
     let version = if version_material.is_empty() {
@@ -125,26 +144,17 @@ fn split_rules(contents: &str) -> Vec<String> {
     rules
 }
 
-fn dir_signature(files: &[std::path::PathBuf]) -> String {
-    use std::time::UNIX_EPOCH;
-
+fn source_signature(sources: &[(String, String)]) -> String {
     let mut signature = String::new();
-    for path in files {
-        if let Ok(metadata) = fs::metadata(path) {
-            let modified = metadata
-                .modified()
-                .ok()
-                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-                .map(|duration| duration.as_secs())
-                .unwrap_or(0);
-            signature.push_str(&format!(
-                "{}:{}:{}\n",
-                path.to_string_lossy(),
-                metadata.len(),
-                modified
-            ));
-        }
+    for (name, contents) in sources {
+        signature.push_str(name);
+        signature.push(':');
+        signature.push_str(&contents.len().to_string());
+        signature.push(':');
+        signature.push_str(&crate::r#static::file::hash::sha256_hex(
+            contents.as_bytes(),
+        ));
+        signature.push('\n');
     }
     crate::r#static::file::hash::sha256_hex(signature.as_bytes())
 }
-

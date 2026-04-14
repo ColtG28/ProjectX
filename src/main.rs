@@ -1,6 +1,11 @@
 fn main() {
     dotenvy::dotenv().ok();
 
+    if let Err(error) = projectx::app_paths::ensure_app_dirs() {
+        eprintln!("Failed to initialize ProjectX app directories: {error}");
+        return;
+    }
+
     if let Err(error) = projectx::r#static::init_quarantine() {
         eprintln!("Failed to initialize ProjectX storage: {error}");
         return;

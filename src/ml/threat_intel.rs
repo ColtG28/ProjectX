@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
 use std::sync::OnceLock;
 
 use crate::r#static::file::hash::{check_malware_hash, MalwareHashStatus};
@@ -65,14 +64,14 @@ pub fn lookup_external_hashes(sha256: &str) -> Vec<ThreatIntelMatch> {
 }
 
 fn lookup_local_feed(sha256: &str) -> Option<String> {
-    let path = Path::new("quarantine/threat_intel_iocs.json");
+    let path = crate::app_paths::threat_intel_iocs_path();
     let text = fs::read_to_string(path).ok()?;
     let map = serde_json::from_str::<HashMap<String, String>>(&text).ok()?;
     map.get(sha256).cloned()
 }
 
 fn lookup_known_bad_hashes(sha256: &str) -> Option<String> {
-    let path = Path::new("quarantine/known_bad_hashes.txt");
+    let path = crate::app_paths::known_bad_hashes_override_path();
     let text = fs::read_to_string(path).ok()?;
     text.lines()
         .map(str::trim)

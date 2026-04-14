@@ -189,4 +189,3 @@ fn contains_all(input: &str, needles: &[&str]) -> bool {
 fn contains_any(input: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| input.contains(needle))
 }
-

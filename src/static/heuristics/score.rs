@@ -672,4 +672,3 @@ fn has_structural_content_corroboration(ctx: &ScanContext) -> bool {
         || (has_elf_structure && has_elf_content)
         || (has_macho_structure && has_macho_content)
 }
-

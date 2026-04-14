@@ -55,8 +55,43 @@ git push origin v1.0.0
 GitHub Actions will build optimized release archives for Linux, Windows, and macOS and publish them to GitHub Releases automatically. The repository-local [Downloads](./DOWNLOADS.md) page always points at the latest release assets, so you do not need to make the project public or enable GitHub Pages.
 
 macOS note:
-- The macOS build is currently unsigned.
+- The macOS release contains a real `ProjectX.app` bundle inside a DMG.
+- The bundle is ad-hoc signed for local usability, but it is still not notarized.
 - After dragging `ProjectX.app` into `Applications`, open it with right-click -> `Open` the first time, or allow it from `System Settings` -> `Privacy & Security` if macOS blocks launch.
+- For locally built or manually distributed copies, you can also remove the quarantine attribute with `bash scripts/remove_macos_quarantine.sh /path/to/ProjectX.app`.
+
+## Release Packaging
+
+Local packaging commands:
+
+```bash
+cargo build --release --locked
+bash scripts/package_macos_app.sh
+bash scripts/package_linux_release.sh
+pwsh -File scripts/package_windows_release.ps1
+```
+
+Output locations:
+
+- macOS: `release-artifacts/macos/ProjectX.app` and `release-artifacts/macos/ProjectX-macos.dmg`
+- Windows: `release-artifacts/windows/ProjectX-windows.zip`
+- Linux: `release-artifacts/linux/ProjectX-linux.tar.gz`
+
+Platform packaging notes:
+
+- macOS ships as a Finder-launchable `.app` bundle inside a DMG and uses ad-hoc signing only.
+- Windows ships as a clean portable `ProjectX.exe` layout inside a zip, not an installer.
+- Linux currently ships as a portable bundle with a `.desktop` file, icon, and install helper; AppImage is not part of this branch.
+
+## Runtime Data Paths
+
+ProjectX now stores writable runtime data in per-user application directories instead of assuming the repo root is the working directory.
+
+- macOS: `~/Library/Application Support/ProjectX` and cache under `~/Library/Caches/ProjectX`
+- Windows: `%LOCALAPPDATA%\\ProjectX` for runtime data and `%APPDATA%\\ProjectX` for config
+- Linux: XDG app-data/config/cache directories under `ProjectX`
+
+This covers settings, scan history, reports, quarantine, protection backlog, telemetry, ML feedback, and cache data. You can override the defaults with `PROJECTX_DATA_DIR`, `PROJECTX_CONFIG_DIR`, and `PROJECTX_CACHE_DIR` when needed for local testing.
 
 ## Running Tests
 

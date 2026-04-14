@@ -140,4 +140,3 @@ impl ScanContext {
         values
     }
 }
-

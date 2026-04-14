@@ -12,14 +12,29 @@ pub use crate::r#static::report::{
     ReportSummary as ScanRecord, SummaryVerdict as Verdict,
 };
 
-pub const HISTORY_PATH: &str = "quarantine/gui_scan_history.json";
-pub const INDEX_PATH: &str = "quarantine/gui_index.json";
-pub const SETTINGS_PATH: &str = "quarantine/gui_settings.json";
-pub const PROTECTION_EVENTS_PATH: &str = "quarantine/gui_protection_events.json";
-pub const PROTECTION_BACKLOG_PATH: &str = "quarantine/gui_protection_backlog.json";
 pub const SCAN_RECORD_LIMIT: usize = 500;
 pub const TIMING_SAMPLE_LIMIT: usize = 2048;
 pub const PROTECTION_EVENT_LIMIT: usize = 512;
+
+pub fn history_path() -> PathBuf {
+    crate::app_paths::gui_history_path()
+}
+
+pub fn index_path() -> PathBuf {
+    crate::app_paths::gui_index_path()
+}
+
+pub fn settings_path() -> PathBuf {
+    crate::app_paths::gui_settings_path()
+}
+
+pub fn protection_events_path() -> PathBuf {
+    crate::app_paths::protection_events_path()
+}
+
+pub fn protection_backlog_path() -> PathBuf {
+    crate::app_paths::protection_backlog_path()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {

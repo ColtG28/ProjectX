@@ -79,4 +79,3 @@ fn text_from_bytes(bytes: &[u8]) -> Option<String> {
     (printable * 100 / bytes.len().max(1) >= 85)
         .then(|| String::from_utf8_lossy(bytes).into_owned())
 }
-

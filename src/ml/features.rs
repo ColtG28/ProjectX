@@ -54,4 +54,3 @@ pub fn extract(ctx: &ScanContext) -> FeatureVector {
         has_network_indicator,
     }
 }
-

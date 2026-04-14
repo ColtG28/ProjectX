@@ -142,4 +142,3 @@ fn contains_follow_on_behavior(value: &str) -> bool {
         || lower.contains("mshta");
     has_network && has_launch
 }
-

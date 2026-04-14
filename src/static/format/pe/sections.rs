@@ -171,4 +171,3 @@ fn section_for_rva<'a>(sections: &'a [PeSection], rva: u32) -> Option<&'a PeSect
         rva >= start && rva < end
     })
 }
-

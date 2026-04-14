@@ -11,4 +11,3 @@ pub fn check(bytes: &[u8]) -> Vec<Finding> {
     }
     findings
 }
-

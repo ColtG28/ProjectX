@@ -977,7 +977,12 @@ impl MyApp {
             .update_state
             .lock()
             .ok()
-            .and_then(|state| state.available_update.as_ref().map(|update| update.html_url.clone()))
+            .and_then(|state| {
+                state
+                    .available_update
+                    .as_ref()
+                    .map(|update| update.html_url.clone())
+            })
             .unwrap_or_else(releases_page_url);
 
         self.status_message = match open_external_target(&release_url) {
@@ -2223,7 +2228,11 @@ impl eframe::App for MyApp {
         if self.is_loading()
             || self.settings.enable_download_monitoring
             || self.settings.enable_real_time_protection
-            || self.update_state.lock().map(|state| state.checking).unwrap_or(false)
+            || self
+                .update_state
+                .lock()
+                .map(|state| state.checking)
+                .unwrap_or(false)
         {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
@@ -3216,10 +3225,7 @@ fn fill_rounded_rect(
                 0
             };
 
-            if dx == 0
-                || dy == 0
-                || (dx * dx + dy * dy) as isize <= (radius * radius) as isize
-            {
+            if dx == 0 || dy == 0 || (dx * dx + dy * dy) as isize <= (radius * radius) as isize {
                 set_pixel(rgba, width, xx, yy, color);
             }
         }
@@ -3270,7 +3276,8 @@ fn draw_x(
     let thickness = 5isize;
     for yy in 0..letter_height {
         for xx in 0..letter_width {
-            let dx1 = xx as isize - (yy as isize * (letter_width as isize - 1) / letter_height as isize);
+            let dx1 =
+                xx as isize - (yy as isize * (letter_width as isize - 1) / letter_height as isize);
             let dx2 = xx as isize
                 - ((letter_width as isize - 1)
                     - (yy as isize * (letter_width as isize - 1) / letter_height as isize));
@@ -3353,9 +3360,7 @@ fn fetch_latest_release_info() -> Result<Option<AvailableUpdate>, String> {
     }))
 }
 
-fn fetch_release_json(
-    client: &reqwest::blocking::Client,
-) -> Result<serde_json::Value, String> {
+fn fetch_release_json(client: &reqwest::blocking::Client) -> Result<serde_json::Value, String> {
     let latest_url = format!("https://api.github.com/repos/{UPDATE_REPOSITORY}/releases/latest");
     let latest_response = client
         .get(&latest_url)
@@ -3438,7 +3443,9 @@ fn select_platform_asset(assets: &[serde_json::Value]) -> Option<serde_json::Val
 }
 
 fn normalize_version_label(version: &str) -> String {
-    version.trim_start_matches(|ch: char| !ch.is_ascii_digit()).to_string()
+    version
+        .trim_start_matches(|ch: char| !ch.is_ascii_digit())
+        .to_string()
 }
 
 fn is_version_newer(candidate: &str, current: &str) -> bool {
@@ -3718,7 +3725,7 @@ fn build_download_snapshot_target(path: &Path, size: u64) -> Option<ScanTarget> 
 fn write_download_snapshot(path: &Path) -> Option<PathBuf> {
     let file_name = path.file_name()?.to_string_lossy();
     let safe_name = sanitize_file_name(&file_name);
-    let output_dir = Path::new("quarantine").join("download_monitor");
+    let output_dir = crate::app_paths::download_monitor_dir();
     fs::create_dir_all(&output_dir).ok()?;
     let snapshot = output_dir.join(format!("{}_{}", now_epoch(), safe_name));
     fs::copy(path, &snapshot).ok()?;
@@ -3977,18 +3984,20 @@ pub(crate) fn summarize_record_refs(records: &[&ScanRecord]) -> RecordMetrics {
 }
 
 fn load_history() -> PersistedHistory {
-    let timing_samples = fs::read_to_string(HISTORY_PATH)
+    let history_path = history_path();
+    let index_path = index_path();
+    let timing_samples = fs::read_to_string(&history_path)
         .ok()
         .and_then(|text| serde_json::from_str::<PersistedHistory>(&text).ok())
         .map(|history| history.timing_samples)
         .unwrap_or_default();
 
-    let mut records = fs::read_to_string(INDEX_PATH)
+    let mut records = fs::read_to_string(&index_path)
         .ok()
         .and_then(|text| serde_json::from_str::<PersistedIndex>(&text).ok())
         .map(|index| index.entries)
         .or_else(|| {
-            fs::read_to_string(HISTORY_PATH)
+            fs::read_to_string(&history_path)
                 .ok()
                 .and_then(|text| serde_json::from_str::<PersistedHistory>(&text).ok())
                 .map(|history| history.records)
@@ -4003,7 +4012,7 @@ fn load_history() -> PersistedHistory {
 }
 
 pub(crate) fn load_gui_settings() -> SettingsState {
-    fs::read_to_string(SETTINGS_PATH)
+    fs::read_to_string(settings_path())
         .ok()
         .and_then(|text| serde_json::from_str::<PersistedGuiSettings>(&text).ok())
         .map(|persisted| persisted.settings)
@@ -4017,21 +4026,22 @@ pub(crate) fn save_gui_settings(settings: &SettingsState) {
     let Ok(text) = serde_json::to_string_pretty(&payload) else {
         return;
     };
-    if let Some(parent) = Path::new(SETTINGS_PATH).parent() {
+    let settings_path = settings_path();
+    if let Some(parent) = settings_path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let _ = fs::write(SETTINGS_PATH, text);
+    let _ = fs::write(settings_path, text);
 }
 
 fn load_protection_events() -> Vec<ProtectionEvent> {
-    fs::read_to_string(PROTECTION_EVENTS_PATH)
+    fs::read_to_string(protection_events_path())
         .ok()
         .and_then(|text| serde_json::from_str::<Vec<ProtectionEvent>>(&text).ok())
         .unwrap_or_default()
 }
 
 fn load_protection_backlog() -> VecDeque<ScanTarget> {
-    load_protection_backlog_from(Path::new(PROTECTION_BACKLOG_PATH))
+    load_protection_backlog_from(&protection_backlog_path())
 }
 
 fn load_protection_backlog_from(path: &Path) -> VecDeque<ScanTarget> {
@@ -4045,14 +4055,15 @@ fn save_protection_events(events: &[ProtectionEvent]) {
     let Ok(text) = serde_json::to_string_pretty(events) else {
         return;
     };
-    if let Some(parent) = Path::new(PROTECTION_EVENTS_PATH).parent() {
+    let events_path = protection_events_path();
+    if let Some(parent) = events_path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let _ = fs::write(PROTECTION_EVENTS_PATH, text);
+    let _ = fs::write(events_path, text);
 }
 
 fn save_protection_backlog(backlog: &VecDeque<ScanTarget>) {
-    save_protection_backlog_to(Path::new(PROTECTION_BACKLOG_PATH), backlog);
+    save_protection_backlog_to(&protection_backlog_path(), backlog);
 }
 
 fn save_protection_backlog_to(path: &Path, backlog: &VecDeque<ScanTarget>) {
@@ -4080,10 +4091,11 @@ fn save_history(records: &[ScanRecord], timing_samples: &[TimingSample]) {
         return;
     };
 
-    if let Some(parent) = Path::new(HISTORY_PATH).parent() {
+    let history_path = history_path();
+    if let Some(parent) = history_path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let _ = fs::write(HISTORY_PATH, text);
+    let _ = fs::write(history_path, text);
     save_index(&retained_records);
 }
 
@@ -4135,10 +4147,11 @@ fn save_index(records: &[ScanRecord]) {
     let Ok(text) = serde_json::to_string_pretty(&index) else {
         return;
     };
-    if let Some(parent) = Path::new(INDEX_PATH).parent() {
+    let index_path = index_path();
+    if let Some(parent) = index_path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let _ = fs::write(INDEX_PATH, text);
+    let _ = fs::write(index_path, text);
 }
 
 fn hydrate_record_from_report(record: &ScanRecord, report_path: &Path) -> Option<ScanRecord> {

@@ -1,3 +1,4 @@
+pub mod app_paths;
 pub mod emulation;
 #[cfg(feature = "gui")]
 pub mod gui;

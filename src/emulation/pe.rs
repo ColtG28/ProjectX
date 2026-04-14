@@ -141,4 +141,3 @@ fn extract_import_indicators(bytes: &[u8]) -> Vec<String> {
     }
     hits
 }
-

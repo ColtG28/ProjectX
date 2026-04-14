@@ -1,5 +1,4 @@
 use std::fs;
-use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -77,7 +76,7 @@ fn should_queue_for_retraining(
 }
 
 fn append(record: &FeedbackRecord) -> Result<(), String> {
-    let path = Path::new("quarantine/ml_feedback.jsonl");
+    let path = crate::app_paths::ml_feedback_path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| format!("Failed to create ML feedback directory: {error}"))?;
@@ -95,7 +94,7 @@ fn append(record: &FeedbackRecord) -> Result<(), String> {
 }
 
 fn append_active_learning_candidate(record: &FeedbackRecord) -> Result<(), String> {
-    let path = Path::new("quarantine/ml_active_learning_queue.jsonl");
+    let path = crate::app_paths::ml_active_learning_queue_path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| format!("Failed to create active-learning directory: {error}"))?;

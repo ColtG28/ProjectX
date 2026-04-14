@@ -24,4 +24,3 @@ fn flush_if_long_enough(out: &mut Vec<String>, current: &mut String, min_len: us
     }
     current.clear();
 }
-

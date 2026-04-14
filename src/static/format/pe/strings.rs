@@ -30,4 +30,3 @@ pub fn check(bytes: &[u8]) -> Vec<Finding> {
 fn contains_all(input: &str, needles: &[&str]) -> bool {
     needles.iter().all(|needle| input.contains(needle))
 }
-

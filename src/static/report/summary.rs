@@ -91,4 +91,3 @@ pub fn build(ctx: &ScanContext, severity: Severity) -> String {
         intelligence_note
     )
 }
-

@@ -654,4 +654,3 @@ impl EvaluationAccumulator {
         }
     }
 }
-

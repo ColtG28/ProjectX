@@ -77,4 +77,3 @@ fn recover_simple_xor_literal(input: &str) -> Option<String> {
 
     None
 }
-

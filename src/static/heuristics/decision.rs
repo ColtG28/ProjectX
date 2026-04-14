@@ -221,4 +221,3 @@ fn is_platform_content_signal(code: &str) -> bool {
             | "YARA_MATCH"
     )
 }
-

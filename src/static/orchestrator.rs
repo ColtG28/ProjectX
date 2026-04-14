@@ -264,11 +264,7 @@ where
 }
 
 pub fn init_quarantine() -> Result<(), String> {
-    let path = Path::new("quarantine");
-    if !path.exists() {
-        fs::create_dir(path).map_err(|e| format!("Failed to create quarantine folder: {}", e))?;
-    }
-    Ok(())
+    crate::app_paths::ensure_app_dirs()
 }
 
 pub fn scan_path(file_path: &str, config: Option<ScanConfig>) -> Result<ScanOutcome, String> {
@@ -641,12 +637,11 @@ fn unique_quarantine_path(file_name: &std::ffi::OsStr) -> PathBuf {
         .map(|duration| duration.as_millis())
         .unwrap_or(0);
 
-    Path::new("quarantine").join(format!("{timestamp}_{name}"))
+    crate::app_paths::quarantine_dir().join(format!("{timestamp}_{name}"))
 }
 
 fn is_in_quarantine(path: &Path) -> bool {
-    path.components()
-        .any(|component| component.as_os_str() == "quarantine")
+    path.starts_with(crate::app_paths::quarantine_dir())
 }
 
 fn pipeline_step_count(config: &ScanConfig) -> usize {

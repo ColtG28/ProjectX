@@ -86,4 +86,3 @@ pub fn score(features: &FeatureVector) -> Assessment {
         reasons,
     }
 }
-

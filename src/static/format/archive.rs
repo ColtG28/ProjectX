@@ -354,4 +354,3 @@ fn script_contains_suspicious_marker(script: &str) -> bool {
         .iter()
         .any(|marker| lower.contains(marker))
 }
-

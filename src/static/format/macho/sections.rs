@@ -45,4 +45,3 @@ fn suspicious_name(name: &str) -> bool {
 fn has_write_and_execute(protection: u32) -> bool {
     protection & VM_PROT_WRITE != 0 && protection & VM_PROT_EXECUTE != 0
 }
-

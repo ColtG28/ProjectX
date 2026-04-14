@@ -1,6 +1,6 @@
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
@@ -126,8 +126,8 @@ pub fn apply(ctx: &mut ScanContext, key: &str, cached: CachedScan) -> Severity {
     cached.severity
 }
 
-pub fn cache_dir() -> &'static Path {
-    Path::new("quarantine/cache")
+pub fn cache_dir() -> PathBuf {
+    crate::app_paths::cache_dir()
 }
 
 fn cache_file_path(key: &str) -> PathBuf {

@@ -123,4 +123,3 @@ fn extract_stream_after(bytes: &[u8], start: usize, max_stream_bytes: usize) -> 
     data.truncate(max_stream_bytes);
     Some(data)
 }
-

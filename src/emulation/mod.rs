@@ -174,4 +174,3 @@ pub(crate) fn maybe_push_multiple_outputs<I>(
         push_output(state, format!("{prefix}.{index}"), value, kind);
     }
 }
-

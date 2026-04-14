@@ -6,19 +6,9 @@ use serde::{Deserialize, Serialize};
 use crate::r#static::context::ScanContext;
 use crate::r#static::types::{Finding, IntelligenceRecord, IntelligenceSummary};
 
-const DEFAULT_STORE_PATHS: &[&str] = &[
-    "quarantine/intelligence/store.json",
-    "src/static/intelligence/data/store.json",
-];
-const DEFAULT_KNOWN_BAD_PATHS: &[&str] = &[
-    "quarantine/intelligence/known_bad_hashes.txt",
-    "quarantine/known_bad_hashes.txt",
-    "src/static/intelligence/data/known_bad_hashes.txt",
-];
-const DEFAULT_KNOWN_GOOD_PATHS: &[&str] = &[
-    "quarantine/intelligence/known_good_hashes.txt",
-    "src/static/intelligence/data/known_good_hashes.txt",
-];
+const BUNDLED_STORE_JSON: &str = include_str!("data/store.json");
+const BUNDLED_KNOWN_BAD_HASHES: &str = include_str!("data/known_bad_hashes.txt");
+const BUNDLED_KNOWN_GOOD_HASHES: &str = include_str!("data/known_good_hashes.txt");
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct IntelligenceStore {
@@ -103,17 +93,20 @@ struct LoadedStore {
 pub fn run(ctx: &mut ScanContext) {
     evaluate(
         ctx,
-        DEFAULT_STORE_PATHS,
-        DEFAULT_KNOWN_BAD_PATHS,
-        DEFAULT_KNOWN_GOOD_PATHS,
+        &[crate::app_paths::intelligence_store_override_path()],
+        &[
+            crate::app_paths::intelligence_known_bad_override_path(),
+            crate::app_paths::known_bad_hashes_override_path(),
+        ],
+        &[crate::app_paths::known_good_hashes_override_path()],
     );
 }
 
 fn evaluate(
     ctx: &mut ScanContext,
-    store_paths: &[&str],
-    known_bad_paths: &[&str],
-    known_good_paths: &[&str],
+    store_paths: &[std::path::PathBuf],
+    known_bad_paths: &[std::path::PathBuf],
+    known_good_paths: &[std::path::PathBuf],
 ) {
     let store = load_store(store_paths);
     let mut summary = IntelligenceSummary {
@@ -365,26 +358,31 @@ fn evaluate(
     ctx.intelligence = Some(summary);
 }
 
-fn load_store(paths: &[&str]) -> LoadedStore {
+fn load_store(paths: &[std::path::PathBuf]) -> LoadedStore {
     let mut loaded = LoadedStore {
         version: None,
         entries: Vec::new(),
     };
 
     for path in paths {
-        let Ok(text) = fs::read_to_string(path) else {
-            continue;
-        };
-        let Ok(store) = serde_json::from_str::<IntelligenceStore>(&text) else {
-            continue;
-        };
-        if loaded.version.is_none() && !store.version.is_empty() {
-            loaded.version = Some(store.version.clone());
-        }
-        loaded.entries.extend(store.entries);
+        extend_loaded_store(&mut loaded, fs::read_to_string(path).ok().as_deref());
     }
 
+    extend_loaded_store(&mut loaded, Some(BUNDLED_STORE_JSON));
     loaded
+}
+
+fn extend_loaded_store(loaded: &mut LoadedStore, text: Option<&str>) {
+    let Some(text) = text else {
+        return;
+    };
+    let Ok(store) = serde_json::from_str::<IntelligenceStore>(text) else {
+        return;
+    };
+    if loaded.version.is_none() && !store.version.is_empty() {
+        loaded.version = Some(store.version.clone());
+    }
+    loaded.entries.extend(store.entries);
 }
 
 fn finding_from_entry(
@@ -869,18 +867,31 @@ fn sha256(ctx: &ScanContext) -> &str {
     &ctx.sha256
 }
 
-fn lookup_hash_note(sha256: &str, paths: &[&str]) -> Option<String> {
+fn lookup_hash_note(sha256: &str, paths: &[std::path::PathBuf]) -> Option<String> {
     for path in paths {
-        let Some(detail) = lookup_hash_note_in_path(sha256, Path::new(path)) else {
+        let Some(detail) = lookup_hash_note_in_path(sha256, path) else {
             continue;
         };
         return Some(detail);
     }
-    None
+
+    let bundled = if paths
+        .iter()
+        .any(|path| path == &crate::app_paths::known_good_hashes_override_path())
+    {
+        BUNDLED_KNOWN_GOOD_HASHES
+    } else {
+        BUNDLED_KNOWN_BAD_HASHES
+    };
+    lookup_hash_note_in_text(sha256, bundled)
 }
 
 fn lookup_hash_note_in_path(sha256: &str, path: &Path) -> Option<String> {
     let text = fs::read_to_string(path).ok()?;
+    lookup_hash_note_in_text(sha256, &text)
+}
+
+fn lookup_hash_note_in_text(sha256: &str, text: &str) -> Option<String> {
     text.lines()
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
@@ -895,4 +906,3 @@ fn lookup_hash_note_in_path(sha256: &str, path: &Path) -> Option<String> {
             hash.eq_ignore_ascii_case(sha256).then_some(note)
         })
 }
-

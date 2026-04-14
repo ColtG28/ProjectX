@@ -75,4 +75,3 @@ fn is_macho(bytes: &[u8]) -> bool {
             | Some([0xBF, 0xBA, 0xFE, 0xCA])
     )
 }
-

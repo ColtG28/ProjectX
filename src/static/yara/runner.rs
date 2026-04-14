@@ -1,7 +1,6 @@
 use crate::r#static::types::View;
 use regex::Regex;
 use std::fs;
-use std::path::Path;
 use std::sync::OnceLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,8 +141,8 @@ fn fetch_yara_keywords_from_network() -> Vec<String> {
     keywords
 }
 
-fn cache_path() -> &'static Path {
-    Path::new("quarantine/yara_keywords_cache.json")
+fn cache_path() -> std::path::PathBuf {
+    crate::app_paths::yara_cache_path()
 }
 
 fn save_cached_keywords(keywords: &[String]) {
@@ -303,4 +302,3 @@ fn required_literal_count(rule: &str, literal_count: usize) -> usize {
 
     1
 }
-

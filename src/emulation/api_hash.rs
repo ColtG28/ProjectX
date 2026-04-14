@@ -66,4 +66,3 @@ pub(crate) fn hash_name_for_resolution(name: &str) -> u32 {
     }
     hash
 }
-

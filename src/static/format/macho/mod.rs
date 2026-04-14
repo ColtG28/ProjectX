@@ -282,4 +282,3 @@ fn read_u64(bytes: &[u8], offset: usize, little_endian: bool) -> Option<u64> {
         ])
     })
 }
-

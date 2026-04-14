@@ -1395,4 +1395,3 @@ fn trim_nul_ascii(mut value: &[u8]) -> &[u8] {
     }
     value
 }
-

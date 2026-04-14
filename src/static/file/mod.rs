@@ -159,4 +159,3 @@ fn apple_bundle_resource_context(
         resource_kind,
     }
 }
-

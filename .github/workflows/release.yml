@@ -58,82 +58,27 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          mkdir -p dist/package
-          cp "target/release/${{ matrix.binary_name }}" dist/package/
-          cp README.md LICENSE dist/package/
-          tar -czf "dist/${{ matrix.package_name }}" -C dist/package .
-          sha256sum "dist/${{ matrix.package_name }}" > "dist/${{ matrix.package_name }}.sha256"
+          bash scripts/package_linux_release.sh dist
 
       - name: Package macOS artifact
         if: runner.os == 'macOS'
         shell: bash
+        env:
+          PROJECTX_VERSION: ${{ github.ref_name }}
+          PROJECTX_BUILD_NUMBER: ${{ github.run_number }}
+          PROJECTX_ADHOC_SIGN: "1"
         run: |
-          APP_ROOT="dist/ProjectX.app"
-          CONTENTS="$APP_ROOT/Contents"
-          MACOS_DIR="$CONTENTS/MacOS"
-          RESOURCES_DIR="$CONTENTS/Resources"
-          ICONSET_DIR="dist/icon.iconset"
-          DMG_DIR="dist/dmg"
-
-          mkdir -p "$MACOS_DIR" "$RESOURCES_DIR" "$ICONSET_DIR" "$DMG_DIR"
-          cp "target/release/${{ matrix.binary_name }}" "$MACOS_DIR/ProjectX"
-          chmod +x "$MACOS_DIR/ProjectX"
-          cp README.md LICENSE "$RESOURCES_DIR/"
-
-          python3 scripts/make_px_icon.py "$ICONSET_DIR"
-          iconutil -c icns "$ICONSET_DIR" -o "$RESOURCES_DIR/ProjectX.icns"
-
-          cat > "$CONTENTS/Info.plist" <<EOF
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>CFBundleDevelopmentRegion</key>
-            <string>en</string>
-            <key>CFBundleDisplayName</key>
-            <string>ProjectX</string>
-            <key>CFBundleExecutable</key>
-            <string>ProjectX</string>
-            <key>CFBundleIconFile</key>
-            <string>ProjectX.icns</string>
-            <key>CFBundleIdentifier</key>
-            <string>com.coltgorman.projectx</string>
-            <key>CFBundleInfoDictionaryVersion</key>
-            <string>6.0</string>
-            <key>CFBundleName</key>
-            <string>ProjectX</string>
-            <key>CFBundlePackageType</key>
-            <string>APPL</string>
-            <key>CFBundleShortVersionString</key>
-            <string>${GITHUB_REF_NAME#v}</string>
-            <key>CFBundleVersion</key>
-            <string>${GITHUB_RUN_NUMBER}</string>
-            <key>LSApplicationCategoryType</key>
-            <string>public.app-category.utilities</string>
-            <key>NSHighResolutionCapable</key>
-            <true/>
-          </dict>
-          </plist>
-          EOF
-
-          xattr -cr "$APP_ROOT"
-          /usr/libexec/PlistBuddy -c "Add :CFBundleSignature string PXSC" "$CONTENTS/Info.plist" || true
-
-          cp -R "$APP_ROOT" "$DMG_DIR/"
-          ln -s /Applications "$DMG_DIR/Applications"
-          hdiutil create -volname "ProjectX" -srcfolder "$DMG_DIR" -ov -format UDZO "dist/${{ matrix.package_name }}"
-          shasum -a 256 "dist/${{ matrix.package_name }}" > "dist/${{ matrix.package_name }}.sha256"
+          bash scripts/package_macos_app.sh dist
+          mv "dist/ProjectX-macos.dmg" "dist/${{ matrix.package_name }}"
+          mv "dist/ProjectX-macos.dmg.sha256" "dist/${{ matrix.package_name }}.sha256"
 
       - name: Package Windows artifact
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path dist/package | Out-Null
-          Copy-Item "target/release/${{ matrix.binary_name }}" dist/package/
-          Copy-Item README.md, LICENSE dist/package/
-          Compress-Archive -Path dist/package/* -DestinationPath "dist/${{ matrix.package_name }}" -Force
-          $hash = (Get-FileHash "dist/${{ matrix.package_name }}" -Algorithm SHA256).Hash.ToLower()
-          Set-Content -Path "dist/${{ matrix.package_name }}.sha256" -Value "$hash  ${{ matrix.package_name }}"
+          ./scripts/package_windows_release.ps1 -OutDir dist
+          Move-Item -Force "dist/ProjectX-windows.zip" "dist/${{ matrix.package_name }}"
+          Move-Item -Force "dist/ProjectX-windows.zip.sha256" "dist/${{ matrix.package_name }}.sha256"
 
       - name: Upload packaged artifact
         uses: actions/upload-artifact@v6
