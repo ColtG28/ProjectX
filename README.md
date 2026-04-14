@@ -54,6 +54,10 @@ git push origin v1.0.0
 
 GitHub Actions will build optimized release archives for Linux, Windows, and macOS and publish them to GitHub Releases automatically. The repository-local [Downloads](./DOWNLOADS.md) page always points at the latest release assets, so you do not need to make the project public or enable GitHub Pages.
 
+macOS note:
+- The macOS build is currently unsigned.
+- After dragging `ProjectX.app` into `Applications`, open it with right-click -> `Open` the first time, or allow it from `System Settings` -> `Privacy & Security` if macOS blocks launch.
+
 ## Running Tests
 
 ```bash

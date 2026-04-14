@@ -21,15 +21,15 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            label: linux-x86_64
+            label: linux
             binary_name: ProjectX
-            package_name: ProjectX-linux-x86_64.tar.gz
-            artifact_name: projectx-linux-x86_64
+            package_name: ProjectX-linux.tar.gz
+            artifact_name: projectx-linux
           - os: windows-latest
-            label: windows-x86_64
+            label: windows
             binary_name: ProjectX.exe
-            package_name: ProjectX-windows-x86_64.zip
-            artifact_name: projectx-windows-x86_64
+            package_name: ProjectX-windows.zip
+            artifact_name: projectx-windows
           - os: macos-latest
             label: macos
             binary_name: ProjectX
@@ -115,6 +115,9 @@ jobs:
           </dict>
           </plist>
           EOF
+
+          xattr -cr "$APP_ROOT"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleSignature string PXSC" "$CONTENTS/Info.plist" || true
 
           cp -R "$APP_ROOT" "$DMG_DIR/"
           ln -s /Applications "$DMG_DIR/Applications"
