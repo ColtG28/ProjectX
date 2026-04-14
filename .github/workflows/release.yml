@@ -27,7 +27,7 @@ jobs:
             binary_name: ProjectX.exe
             package_name: ProjectX-${{ github.ref_name }}-windows-x86_64.zip
             artifact_name: projectx-windows-x86_64
-          - os: macos-13
+          - os: macos-latest
             label: macos-x86_64
             binary_name: ProjectX
             package_name: ProjectX-${{ github.ref_name }}-macos-x86_64.zip
