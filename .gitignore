@@ -3,9 +3,6 @@
 /dist/
 /release-artifacts/
 
-# Local planning/scratch files
-/Planning/
-
 # Local secrets/config
 /.env
 /.env.*
@@ -13,18 +10,7 @@
 # Runtime scanner state
 /quarantine/
 
-# Optional large benchmark/download workspaces
-/ember_benchmark/
-/raw_benchmark/
-/ml_train/downloads/
-
-# Test/coverage/cache artifacts
-*.profraw
-*.profdata
-/coverage/
-/tarpaulin-report.html
-/.pytest_cache/
-__pycache__/
+# Misc local output
 *.log
 
 # OS/editor noise

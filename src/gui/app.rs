@@ -26,7 +26,8 @@ pub fn gui() -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1320.0, 860.0])
-            .with_min_inner_size([920.0, 640.0]),
+            .with_min_inner_size([920.0, 640.0])
+            .with_icon(Arc::new(projectx_icon())),
         ..Default::default()
     };
     eframe::run_native(
@@ -977,7 +978,7 @@ impl MyApp {
             .lock()
             .ok()
             .and_then(|state| state.available_update.as_ref().map(|update| update.html_url.clone()))
-            .unwrap_or_else(|| format!("https://github.com/{UPDATE_REPOSITORY}/releases/latest"));
+            .unwrap_or_else(releases_page_url);
 
         self.status_message = match open_external_target(&release_url) {
             Ok(()) => "Opened the latest ProjectX release page.".to_string(),
@@ -3121,6 +3122,165 @@ fn reveal_in_file_manager(path: &Path) -> Result<(), String> {
     }
 }
 
+fn projectx_icon() -> egui::IconData {
+    let width = 128usize;
+    let height = 128usize;
+    let mut rgba = vec![0u8; width * height * 4];
+
+    let background = [17u8, 80u8, 63u8, 255u8];
+    let accent = [228u8, 117u8, 49u8, 255u8];
+    let light = [245u8, 239u8, 225u8, 255u8];
+    let shadow = [12u8, 42u8, 34u8, 255u8];
+
+    fill_rounded_rect(&mut rgba, width, 0, 0, width, height, 26, background);
+    fill_circle(&mut rgba, width, 102, 28, 22, accent);
+    fill_circle(&mut rgba, width, 26, 104, 16, shadow);
+
+    draw_p(&mut rgba, width, 26, 24, 30, 78, light);
+    draw_x(&mut rgba, width, 72, 26, 28, 74, light);
+
+    egui::IconData {
+        rgba,
+        width: width as u32,
+        height: height as u32,
+    }
+}
+
+fn set_pixel(rgba: &mut [u8], width: usize, x: usize, y: usize, color: [u8; 4]) {
+    let index = (y * width + x) * 4;
+    rgba[index..index + 4].copy_from_slice(&color);
+}
+
+fn fill_rect(
+    rgba: &mut [u8],
+    width: usize,
+    x: usize,
+    y: usize,
+    rect_width: usize,
+    rect_height: usize,
+    color: [u8; 4],
+) {
+    for yy in y..(y + rect_height) {
+        for xx in x..(x + rect_width) {
+            set_pixel(rgba, width, xx, yy, color);
+        }
+    }
+}
+
+fn fill_circle(
+    rgba: &mut [u8],
+    width: usize,
+    center_x: usize,
+    center_y: usize,
+    radius: usize,
+    color: [u8; 4],
+) {
+    let radius_sq = (radius * radius) as isize;
+    for yy in center_y.saturating_sub(radius)..=(center_y + radius).min(width - 1) {
+        for xx in center_x.saturating_sub(radius)..=(center_x + radius).min(width - 1) {
+            let dx = xx as isize - center_x as isize;
+            let dy = yy as isize - center_y as isize;
+            if dx * dx + dy * dy <= radius_sq {
+                set_pixel(rgba, width, xx, yy, color);
+            }
+        }
+    }
+}
+
+fn fill_rounded_rect(
+    rgba: &mut [u8],
+    width: usize,
+    x: usize,
+    y: usize,
+    rect_width: usize,
+    rect_height: usize,
+    radius: usize,
+    color: [u8; 4],
+) {
+    for yy in y..(y + rect_height) {
+        for xx in x..(x + rect_width) {
+            let local_x = xx - x;
+            let local_y = yy - y;
+            let dx = if local_x < radius {
+                radius - local_x
+            } else if local_x >= rect_width - radius {
+                local_x - (rect_width - radius - 1)
+            } else {
+                0
+            };
+            let dy = if local_y < radius {
+                radius - local_y
+            } else if local_y >= rect_height - radius {
+                local_y - (rect_height - radius - 1)
+            } else {
+                0
+            };
+
+            if dx == 0
+                || dy == 0
+                || (dx * dx + dy * dy) as isize <= (radius * radius) as isize
+            {
+                set_pixel(rgba, width, xx, yy, color);
+            }
+        }
+    }
+}
+
+fn draw_p(
+    rgba: &mut [u8],
+    width: usize,
+    x: usize,
+    y: usize,
+    letter_width: usize,
+    letter_height: usize,
+    color: [u8; 4],
+) {
+    let stroke = 10usize;
+    fill_rect(rgba, width, x, y, stroke, letter_height, color);
+    fill_rect(rgba, width, x, y, letter_width, stroke, color);
+    fill_rect(
+        rgba,
+        width,
+        x,
+        y + letter_height / 2 - stroke / 2,
+        letter_width - 4,
+        stroke,
+        color,
+    );
+    fill_rect(
+        rgba,
+        width,
+        x + letter_width - stroke,
+        y + stroke,
+        stroke,
+        letter_height / 2 - stroke,
+        color,
+    );
+}
+
+fn draw_x(
+    rgba: &mut [u8],
+    width: usize,
+    x: usize,
+    y: usize,
+    letter_width: usize,
+    letter_height: usize,
+    color: [u8; 4],
+) {
+    let thickness = 5isize;
+    for yy in 0..letter_height {
+        for xx in 0..letter_width {
+            let dx1 = xx as isize - (yy as isize * (letter_width as isize - 1) / letter_height as isize);
+            let dx2 = xx as isize
+                - ((letter_width as isize - 1)
+                    - (yy as isize * (letter_width as isize - 1) / letter_height as isize));
+            if dx1.abs() <= thickness || dx2.abs() <= thickness {
+                set_pixel(rgba, width, x + xx, y + yy, color);
+            }
+        }
+    }
+}
+
 fn open_external_target(target: &str) -> Result<(), String> {
     let status = if cfg!(target_os = "macos") {
         Command::new("open")
@@ -3147,31 +3307,11 @@ fn open_external_target(target: &str) -> Result<(), String> {
 }
 
 fn fetch_latest_release_info() -> Result<Option<AvailableUpdate>, String> {
-    let url = format!(
-        "https://api.github.com/repos/{UPDATE_REPOSITORY}/releases/latest"
-    );
-    let response = reqwest::blocking::Client::builder()
+    let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(12))
         .build()
-        .map_err(|error| format!("Failed to build update client: {error}"))?
-        .get(url)
-        .header(reqwest::header::USER_AGENT, "ProjectX-UpdateChecker")
-        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
-        .send()
-        .map_err(|error| format!("Failed to contact GitHub Releases: {error}"))?;
-
-    if !response.status().is_success() {
-        return Err(format!(
-            "GitHub Releases returned {}.",
-            response.status()
-        ));
-    }
-
-    let response_text = response
-        .text()
-        .map_err(|error| format!("Failed to read release metadata: {error}"))?;
-    let value = serde_json::from_str::<serde_json::Value>(&response_text)
-        .map_err(|error| format!("Failed to parse release metadata: {error}"))?;
+        .map_err(|error| format!("Failed to build update client: {error}"))?;
+    let value = fetch_release_json(&client)?;
 
     let tag_name = value["tag_name"]
         .as_str()
@@ -3211,6 +3351,71 @@ fn fetch_latest_release_info() -> Result<Option<AvailableUpdate>, String> {
             .to_string(),
         body,
     }))
+}
+
+fn fetch_release_json(
+    client: &reqwest::blocking::Client,
+) -> Result<serde_json::Value, String> {
+    let latest_url = format!("https://api.github.com/repos/{UPDATE_REPOSITORY}/releases/latest");
+    let latest_response = client
+        .get(&latest_url)
+        .header(reqwest::header::USER_AGENT, "ProjectX-UpdateChecker")
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+        .send()
+        .map_err(|error| format!("Failed to contact GitHub Releases: {error}"))?;
+
+    if latest_response.status().is_success() {
+        let text = latest_response
+            .text()
+            .map_err(|error| format!("Failed to read latest release metadata: {error}"))?;
+        return serde_json::from_str::<serde_json::Value>(&text)
+            .map_err(|error| format!("Failed to parse latest release metadata: {error}"));
+    }
+
+    if latest_response.status() != reqwest::StatusCode::NOT_FOUND {
+        return Err(format!(
+            "GitHub Releases returned {}.",
+            latest_response.status()
+        ));
+    }
+
+    let releases_url = format!("https://api.github.com/repos/{UPDATE_REPOSITORY}/releases");
+    let releases_response = client
+        .get(&releases_url)
+        .header(reqwest::header::USER_AGENT, "ProjectX-UpdateChecker")
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+        .send()
+        .map_err(|error| format!("Failed to contact GitHub release list: {error}"))?;
+
+    if !releases_response.status().is_success() {
+        return Err(format!(
+            "GitHub release list returned {}.",
+            releases_response.status()
+        ));
+    }
+
+    let text = releases_response
+        .text()
+        .map_err(|error| format!("Failed to read release list metadata: {error}"))?;
+    let releases = serde_json::from_str::<Vec<serde_json::Value>>(&text)
+        .map_err(|error| format!("Failed to parse release list metadata: {error}"))?;
+
+    releases
+        .into_iter()
+        .find(|release| {
+            !release["draft"].as_bool().unwrap_or(false)
+                && !release["prerelease"].as_bool().unwrap_or(false)
+        })
+        .ok_or_else(|| {
+            format!(
+                "No published GitHub release was found. Open {} to create one.",
+                releases_page_url()
+            )
+        })
+}
+
+fn releases_page_url() -> String {
+    format!("https://github.com/{UPDATE_REPOSITORY}/releases")
 }
 
 fn select_platform_asset(assets: &[serde_json::Value]) -> Option<serde_json::Value> {

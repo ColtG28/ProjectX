@@ -33,7 +33,7 @@ jobs:
           - os: macos-latest
             label: macos
             binary_name: ProjectX
-            package_name: ProjectX-macos.zip
+            package_name: ProjectX-macos.dmg
             artifact_name: projectx-macos
 
     steps:
@@ -68,10 +68,57 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          mkdir -p dist/package
-          cp "target/release/${{ matrix.binary_name }}" dist/package/
-          cp README.md LICENSE dist/package/
-          ditto -c -k --sequesterRsrc --keepParent dist/package "dist/${{ matrix.package_name }}"
+          APP_ROOT="dist/ProjectX.app"
+          CONTENTS="$APP_ROOT/Contents"
+          MACOS_DIR="$CONTENTS/MacOS"
+          RESOURCES_DIR="$CONTENTS/Resources"
+          ICONSET_DIR="dist/icon.iconset"
+          DMG_DIR="dist/dmg"
+
+          mkdir -p "$MACOS_DIR" "$RESOURCES_DIR" "$ICONSET_DIR" "$DMG_DIR"
+          cp "target/release/${{ matrix.binary_name }}" "$MACOS_DIR/ProjectX"
+          chmod +x "$MACOS_DIR/ProjectX"
+          cp README.md LICENSE "$RESOURCES_DIR/"
+
+          python3 scripts/make_px_icon.py "$ICONSET_DIR"
+          iconutil -c icns "$ICONSET_DIR" -o "$RESOURCES_DIR/ProjectX.icns"
+
+          cat > "$CONTENTS/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleDevelopmentRegion</key>
+            <string>en</string>
+            <key>CFBundleDisplayName</key>
+            <string>ProjectX</string>
+            <key>CFBundleExecutable</key>
+            <string>ProjectX</string>
+            <key>CFBundleIconFile</key>
+            <string>ProjectX.icns</string>
+            <key>CFBundleIdentifier</key>
+            <string>com.coltgorman.projectx</string>
+            <key>CFBundleInfoDictionaryVersion</key>
+            <string>6.0</string>
+            <key>CFBundleName</key>
+            <string>ProjectX</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>CFBundleShortVersionString</key>
+            <string>${GITHUB_REF_NAME#v}</string>
+            <key>CFBundleVersion</key>
+            <string>${GITHUB_RUN_NUMBER}</string>
+            <key>LSApplicationCategoryType</key>
+            <string>public.app-category.utilities</string>
+            <key>NSHighResolutionCapable</key>
+            <true/>
+          </dict>
+          </plist>
+          EOF
+
+          cp -R "$APP_ROOT" "$DMG_DIR/"
+          ln -s /Applications "$DMG_DIR/Applications"
+          hdiutil create -volname "ProjectX" -srcfolder "$DMG_DIR" -ov -format UDZO "dist/${{ matrix.package_name }}"
           shasum -a 256 "dist/${{ matrix.package_name }}" > "dist/${{ matrix.package_name }}.sha256"
 
       - name: Package Windows artifact
