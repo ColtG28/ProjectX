@@ -29,7 +29,7 @@ pub fn gui() -> Result<(), eframe::Error> {
         ..Default::default()
     };
     eframe::run_native(
-        "ProjectX Defensive Scanner",
+        "ProjectX",
         options,
         Box::new(|_cc| Box::new(MyApp::new())),
     )
@@ -201,7 +201,7 @@ impl MyApp {
                     }
                     ui.add_space(4.0 * self.ui_metrics.scale_factor);
                     ui.label(
-                        RichText::new("ProjectX Defensive Scanner")
+                        RichText::new("ProjectX")
                             .strong()
                             .size(22.0 * self.ui_metrics.scale_factor),
                     );
