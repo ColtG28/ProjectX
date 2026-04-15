@@ -70,6 +70,10 @@ pub fn update_cache_path() -> PathBuf {
     config_root().join("update_check_cache.json")
 }
 
+pub fn update_download_dir() -> PathBuf {
+    data_root().join("updates")
+}
+
 pub fn intelligence_dir() -> PathBuf {
     data_root().join("intelligence")
 }
@@ -123,6 +127,7 @@ pub fn ensure_app_dirs() -> Result<(), String> {
         reports_dir(),
         intelligence_dir(),
         download_monitor_dir(),
+        update_download_dir(),
         cache_dir(),
     ];
 

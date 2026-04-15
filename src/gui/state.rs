@@ -553,6 +553,8 @@ pub struct SettingsState {
     #[serde(default = "default_enable_automatic_updates")]
     pub enable_automatic_updates: bool,
     #[serde(default)]
+    pub enable_automatic_update_downloads: bool,
+    #[serde(default)]
     pub watched_paths: Vec<WatchedPathConfig>,
 }
 
@@ -581,8 +583,21 @@ impl Default for SettingsState {
             enable_real_time_protection: false,
             enable_download_monitoring: false,
             enable_automatic_updates: true,
+            enable_automatic_update_downloads: false,
             watched_paths: Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use super::SettingsState;
+
+    #[test]
+    fn automatic_update_downloads_are_opt_in() {
+        let settings = SettingsState::default();
+        assert!(settings.enable_automatic_updates);
+        assert!(!settings.enable_automatic_update_downloads);
     }
 }
 
@@ -601,10 +616,24 @@ pub struct UpdateCheckState {
     pub release_page_url: String,
     pub used_cached_release: bool,
     pub verification_status: Option<String>,
+    pub last_automatic_check_epoch: u64,
+    pub next_scheduled_check_epoch: u64,
+    pub download_status: String,
+    pub download_path: Option<String>,
+    pub downloaded_version: Option<String>,
+    pub download_in_progress: bool,
+    pub download_progress_fraction: Option<f32>,
+    pub last_download_epoch: u64,
+    pub install_status: String,
+    pub last_install_attempt_epoch: u64,
+    pub install_ready: bool,
+    pub install_guidance: String,
+    pub restart_required_after_install: bool,
 }
 
 impl Default for UpdateCheckState {
     fn default() -> Self {
+        let cached = crate::update::load_cached_update_ui_state();
         Self {
             checking: false,
             current_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -626,6 +655,41 @@ impl Default for UpdateCheckState {
             ),
             used_cached_release: false,
             verification_status: None,
+            last_automatic_check_epoch: cached
+                .as_ref()
+                .map(|state| state.last_automatic_check_epoch)
+                .unwrap_or(0),
+            next_scheduled_check_epoch: 0,
+            download_status: cached
+                .as_ref()
+                .and_then(|state| state.last_download_status.clone())
+                .unwrap_or_else(|| "No update download has started yet.".to_string()),
+            download_path: cached
+                .as_ref()
+                .and_then(|state| state.last_downloaded_asset_path.clone()),
+            downloaded_version: cached
+                .as_ref()
+                .and_then(|state| state.last_downloaded_version.clone()),
+            download_in_progress: false,
+            download_progress_fraction: None,
+            last_download_epoch: cached
+                .as_ref()
+                .map(|state| state.last_download_epoch)
+                .unwrap_or(0),
+            install_status: cached
+                .as_ref()
+                .and_then(|state| state.last_install_status.clone())
+                .unwrap_or_else(|| "No install attempt has started yet.".to_string()),
+            last_install_attempt_epoch: cached
+                .as_ref()
+                .map(|state| state.last_install_attempt_epoch)
+                .unwrap_or(0),
+            install_ready: false,
+            install_guidance: String::new(),
+            restart_required_after_install: cached
+                .as_ref()
+                .map(|state| state.restart_required_after_install)
+                .unwrap_or(false),
         }
     }
 }
@@ -638,6 +702,57 @@ pub enum RecordAction {
     DeleteReport,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeedbackScope {
+    Scan,
+    FileAction,
+    Updater,
+    Settings,
+    Protection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeedbackSeverity {
+    Info,
+    Success,
+    Warning,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UiFeedback {
+    pub message: String,
+    pub severity: FeedbackSeverity,
+    pub sticky: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsPanel {
+    General,
+    Protection,
+    Updates,
+    Advanced,
+}
+
+impl SettingsPanel {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::General => "General / Scope",
+            Self::Protection => "Protection",
+            Self::Updates => "Updates",
+            Self::Advanced => "Advanced",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotificationEntry {
+    pub scope: FeedbackScope,
+    pub severity: FeedbackSeverity,
+    pub message: String,
+    pub timestamp_epoch: u64,
+}
+
 #[derive(Debug, Clone)]
 pub enum PendingConfirmationTarget {
     RecordAction {
@@ -646,6 +761,9 @@ pub enum PendingConfirmationTarget {
     },
     DeleteReports {
         record_ids: Vec<String>,
+    },
+    StartScanFromRoots {
+        roots: Vec<PathBuf>,
     },
 }
 
@@ -920,10 +1038,15 @@ pub struct MyApp {
     pub protection_verdict_filter: ProtectionVerdictFilter,
     pub protection_action_filter: ProtectionActionFilter,
     pub history_quarantine_only: bool,
+    pub settings_panel: SettingsPanel,
     pub selected_report_ids: HashSet<String>,
     pub focused_report_id: Option<String>,
     pub pending_confirmation: Option<PendingConfirmation>,
-    pub status_message: String,
+    pub scan_feedback: Option<UiFeedback>,
+    pub file_feedback: Option<UiFeedback>,
+    pub updater_feedback: Option<UiFeedback>,
+    pub settings_feedback: Option<UiFeedback>,
+    pub protection_feedback: Option<UiFeedback>,
     pub base_pixels_per_point: Option<f32>,
     pub last_applied_scale: Option<f32>,
     pub ui_metrics: UiMetrics,
@@ -939,6 +1062,7 @@ pub struct MyApp {
     pub download_status: String,
     pub last_update_poll: Instant,
     pub update_state: std::sync::Arc<std::sync::Mutex<UpdateCheckState>>,
+    pub notifications: VecDeque<NotificationEntry>,
 }
 
 #[derive(Debug, Clone)]

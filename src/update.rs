@@ -39,6 +39,30 @@ impl UpdateStatusKind {
             Self::RateLimited => "rate_limited",
         }
     }
+
+    pub fn user_label(self) -> &'static str {
+        match self {
+            Self::UpToDate => "Up to date",
+            Self::UpdateAvailable => "Update available",
+            Self::Unknown => "Status unknown",
+            Self::Error => "Check failed",
+            Self::Offline => "Offline",
+            Self::RateLimited => "Rate limited",
+        }
+    }
+
+    pub fn user_summary(self) -> &'static str {
+        match self {
+            Self::UpToDate => "This install matches the newest stable release we could confirm.",
+            Self::UpdateAvailable => "A newer stable release is available for this device.",
+            Self::Unknown => "ProjectX has not confirmed update status yet.",
+            Self::Error => "GitHub release metadata could not be verified cleanly.",
+            Self::Offline => "GitHub could not be reached during the most recent check.",
+            Self::RateLimited => {
+                "GitHub temporarily refused more checks because the API limit was reached."
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -77,6 +101,24 @@ pub struct UpdateCache {
     pub last_error: Option<String>,
     pub latest_release: Option<ReleaseInfo>,
     pub recent_attempts: Vec<CachedAttempt>,
+    #[serde(default)]
+    pub last_automatic_check_epoch: u64,
+    #[serde(default)]
+    pub last_downloaded_version: Option<String>,
+    #[serde(default)]
+    pub last_downloaded_asset_name: Option<String>,
+    #[serde(default)]
+    pub last_downloaded_asset_path: Option<String>,
+    #[serde(default)]
+    pub last_download_epoch: u64,
+    #[serde(default)]
+    pub last_download_status: Option<String>,
+    #[serde(default)]
+    pub last_install_status: Option<String>,
+    #[serde(default)]
+    pub last_install_attempt_epoch: u64,
+    #[serde(default)]
+    pub restart_required_after_install: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -92,6 +134,18 @@ pub struct UpdateCheckReport {
     pub repo_label: String,
     pub release_page_url: String,
     pub used_cached_release: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CachedUpdateUiState {
+    pub last_automatic_check_epoch: u64,
+    pub last_downloaded_version: Option<String>,
+    pub last_downloaded_asset_path: Option<String>,
+    pub last_download_epoch: u64,
+    pub last_download_status: Option<String>,
+    pub last_install_status: Option<String>,
+    pub last_install_attempt_epoch: u64,
+    pub restart_required_after_install: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,6 +253,104 @@ pub fn verify_downloaded_asset(path: &Path, expected_sha256: &str) -> Result<Str
             "SHA-256 verification failed. Expected {expected}, got {actual}."
         ))
     }
+}
+
+pub fn load_cached_update_ui_state() -> Option<CachedUpdateUiState> {
+    let cache = load_update_cache()?;
+    Some(CachedUpdateUiState {
+        last_automatic_check_epoch: cache.last_automatic_check_epoch,
+        last_downloaded_version: cache.last_downloaded_version,
+        last_downloaded_asset_path: cache.last_downloaded_asset_path,
+        last_download_epoch: cache.last_download_epoch,
+        last_download_status: cache.last_download_status,
+        last_install_status: cache.last_install_status,
+        last_install_attempt_epoch: cache.last_install_attempt_epoch,
+        restart_required_after_install: cache.restart_required_after_install,
+    })
+}
+
+pub fn persist_automatic_check_epoch(now_epoch: u64) -> Result<(), String> {
+    mutate_update_cache(|cache| {
+        cache.last_automatic_check_epoch = now_epoch;
+    })
+}
+
+pub fn persist_download_result(
+    version: Option<&str>,
+    asset_name: Option<&str>,
+    asset_path: Option<&Path>,
+    status: &str,
+    now_epoch: u64,
+) -> Result<(), String> {
+    mutate_update_cache(|cache| {
+        cache.last_downloaded_version = version.map(str::to_string);
+        cache.last_downloaded_asset_name = asset_name.map(str::to_string);
+        cache.last_downloaded_asset_path =
+            asset_path.map(|path| path.to_string_lossy().to_string());
+        cache.last_download_epoch = now_epoch;
+        cache.last_download_status = Some(status.to_string());
+    })
+}
+
+pub fn persist_install_result(
+    status: &str,
+    now_epoch: u64,
+    restart_required_after_install: bool,
+) -> Result<(), String> {
+    mutate_update_cache(|cache| {
+        cache.last_install_status = Some(status.to_string());
+        cache.last_install_attempt_epoch = now_epoch;
+        cache.restart_required_after_install = restart_required_after_install;
+    })
+}
+
+pub fn download_release_asset<F>(
+    asset_url: &str,
+    asset_name: &str,
+    mut on_progress: F,
+) -> Result<std::path::PathBuf, String>
+where
+    F: FnMut(u64, Option<u64>),
+{
+    let config = github_release_config();
+    let client = build_client().map_err(fetch_failure_message)?;
+    let mut response = apply_request_headers(client.get(asset_url), &config)
+        .send()
+        .map_err(classify_request_error)
+        .map_err(fetch_failure_message)?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let headers = response.headers().clone();
+        let body = response
+            .text()
+            .unwrap_or_else(|_| "Failed to read GitHub response body.".to_string());
+        return Err(fetch_failure_message(classify_http_failure(
+            status, &headers, &body,
+        )));
+    }
+
+    let total = response.content_length();
+    let output_dir = crate::app_paths::update_download_dir();
+    fs::create_dir_all(&output_dir)
+        .map_err(|error| format!("Failed to create update-download directory: {error}"))?;
+    let output_path = unique_download_path(&output_dir, asset_name);
+    let mut file = fs::File::create(&output_path)
+        .map_err(|error| format!("Failed to create {}: {error}", output_path.display()))?;
+    let mut downloaded = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = response
+            .read(&mut buffer)
+            .map_err(|error| format!("Failed to read release download: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        std::io::Write::write_all(&mut file, &buffer[..read])
+            .map_err(|error| format!("Failed to write {}: {error}", output_path.display()))?;
+        downloaded = downloaded.saturating_add(read as u64);
+        on_progress(downloaded, total);
+    }
+    Ok(output_path)
 }
 
 pub fn compare_versions(left: &str, right: &str) -> Ordering {
@@ -722,6 +874,32 @@ fn load_update_cache() -> Option<UpdateCache> {
     serde_json::from_str::<UpdateCache>(&text).ok()
 }
 
+fn mutate_update_cache(mutator: impl FnOnce(&mut UpdateCache)) -> Result<(), String> {
+    let config = github_release_config();
+    let mut cache = load_update_cache().unwrap_or_else(|| UpdateCache {
+        owner: config.owner.clone(),
+        repo: config.repo.clone(),
+        include_prereleases: config.include_prereleases,
+        last_attempt_epoch: 0,
+        last_successful_check_epoch: 0,
+        last_status_kind: UpdateStatusKind::Unknown,
+        last_error: None,
+        latest_release: None,
+        recent_attempts: Vec::new(),
+        last_automatic_check_epoch: 0,
+        last_downloaded_version: None,
+        last_downloaded_asset_name: None,
+        last_downloaded_asset_path: None,
+        last_download_epoch: 0,
+        last_download_status: None,
+        last_install_status: None,
+        last_install_attempt_epoch: 0,
+        restart_required_after_install: false,
+    });
+    mutator(&mut cache);
+    write_update_cache(&cache)
+}
+
 fn save_update_cache(
     config: &GitHubReleaseConfig,
     report: &UpdateCheckReport,
@@ -737,6 +915,15 @@ fn save_update_cache(
         last_error: None,
         latest_release: None,
         recent_attempts: Vec::new(),
+        last_automatic_check_epoch: 0,
+        last_downloaded_version: None,
+        last_downloaded_asset_name: None,
+        last_downloaded_asset_path: None,
+        last_download_epoch: 0,
+        last_download_status: None,
+        last_install_status: None,
+        last_install_attempt_epoch: 0,
+        restart_required_after_install: false,
     });
 
     cache.owner = config.owner.clone();
@@ -765,14 +952,61 @@ fn save_update_cache(
         cache.recent_attempts.drain(0..drain);
     }
 
+    write_update_cache(&cache)
+}
+
+fn write_update_cache(cache: &UpdateCache) -> Result<(), String> {
     let path = crate::app_paths::update_cache_path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| format!("Failed to create update-cache directory: {error}"))?;
     }
-    let text = serde_json::to_string_pretty(&cache)
+    let text = serde_json::to_string_pretty(cache)
         .map_err(|error| format!("Failed to serialize update cache: {error}"))?;
     fs::write(path, text).map_err(|error| format!("Failed to write update cache: {error}"))
+}
+
+fn fetch_failure_message(failure: FetchFailure) -> String {
+    match failure {
+        FetchFailure::Offline(message)
+        | FetchFailure::RateLimited(message)
+        | FetchFailure::Error(message) => message,
+    }
+}
+
+fn unique_download_path(dir: &Path, asset_name: &str) -> std::path::PathBuf {
+    let sanitized = asset_name.trim();
+    let candidate = dir.join(sanitized);
+    if !candidate.exists() {
+        return candidate;
+    }
+    let stem = Path::new(sanitized)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("projectx-update");
+    let extension = Path::new(sanitized)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    for index in 1..1000 {
+        let file_name = if extension.is_empty() {
+            format!("{stem}-{index}")
+        } else {
+            format!("{stem}-{index}.{extension}")
+        };
+        let path = dir.join(file_name);
+        if !path.exists() {
+            return path;
+        }
+    }
+    dir.join(format!("{}-{}", stem, now_fallback_suffix()))
+}
+
+fn now_fallback_suffix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 fn env_value<'a>(env_map: &'a HashMap<String, String>, key: &str) -> Option<&'a str> {
@@ -1292,6 +1526,15 @@ mod tests {
                     checksum_status: "SHA-256 metadata is available.".to_string(),
                 }),
                 recent_attempts: Vec::new(),
+                last_automatic_check_epoch: 0,
+                last_downloaded_version: None,
+                last_downloaded_asset_name: None,
+                last_downloaded_asset_path: None,
+                last_download_epoch: 0,
+                last_download_status: None,
+                last_install_status: None,
+                last_install_attempt_epoch: 0,
+                restart_required_after_install: false,
             }),
         );
         assert_eq!(report.status_kind, UpdateStatusKind::Offline);
@@ -1361,5 +1604,16 @@ mod tests {
         let result = verify_downloaded_asset(&path, &hash);
         fs::remove_file(&path).ok();
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn status_kind_user_labels_are_product_facing() {
+        assert_eq!(
+            UpdateStatusKind::UpdateAvailable.user_label(),
+            "Update available"
+        );
+        assert!(UpdateStatusKind::Offline
+            .user_summary()
+            .contains("could not be reached"));
     }
 }

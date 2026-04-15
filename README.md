@@ -204,6 +204,16 @@ Avoid real malware samples.
 - Real-time protection is user-space and passive-first: it watches selected files or folders, classifies create/modify/replace-style changes, groups rapid repeats into one logical event when practical, and never executes the watched content.
 - Windows, macOS, and Linux all use the same event-driven protection workflow when watcher initialization succeeds; polling remains the explicit fallback path instead of a hidden backup behavior.
 - Protection workflow is intentionally split by task rather than by subsystem: Settings configures watched paths, Scan shows live protection state and recent activity, and Operations is the durable review timeline for protection-driven events.
+- Settings now uses lightweight in-page panels for `General / Scope`, `Protection`, `Updates`, and `Advanced` so the same configuration model is quicker to navigate.
+- About now acts as a compact health summary, including current version, update status, protection state, watched-path count, and the most recent completed scan.
+- Recent important GUI events are surfaced through a lightweight notification feed instead of disappearing after a single interaction.
+- Results and Operations are organized as review workspaces: quick verdict filters stay near the summary chips, the pinned detail view keeps the current focus visible, and result detail groups now emphasize the strongest detection signals first.
+- Automatic update checks can run in the background, and update downloads can optionally happen automatically after a successful background check. Downloads are stored locally, checksum verification is surfaced in the GUI, and installation always remains a manual user step.
+- Guided install flow is platform-aware and still user-controlled:
+  - macOS DMG builds are opened for drag-to-Applications replacement
+  - Windows `.exe` / `.msi` packages are launched explicitly by the user from the GUI
+  - Linux and archive-style packages are revealed with clear install guidance instead of silent replacement
+- The Scan page now uses a proper vertical workspace scroll path and wraps controls/cards earlier so narrower windows do not push content off the right edge as aggressively.
 - The app now launches directly into the GUI from `src/main.rs`.
 - Older CLI and sandbox-execution-oriented product paths have been removed from the desktop app.
 - Quarantine restore and delete actions require confirmation from the GUI before modifying local files.

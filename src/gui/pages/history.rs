@@ -7,7 +7,8 @@ use crate::gui::app::summarize_record_refs;
 use crate::gui::components::{
     summary_chip::stat_chip, workspace_toolbar::render_record_workspace_toolbar,
 };
-use crate::gui::state::{MyApp, RecordStorageState, Verdict};
+use crate::gui::state::{FeedbackScope, MyApp, RecordStorageState, Verdict};
+use crate::gui::theme;
 
 impl MyApp {
     pub fn render_history(&mut self, ui: &mut egui::Ui) {
@@ -16,6 +17,8 @@ impl MyApp {
             "Browse prior scans, focus on quarantined items, and inspect operational or protection-driven outcomes.",
         );
         ui.separator();
+        self.render_feedback_banner(ui, FeedbackScope::FileAction);
+        ui.add_space(theme::item_gap(self.ui_metrics.scale_factor));
 
         let mut indices = self.filtered_record_indices(2_000, self.history_search.trim());
         if self.history_quarantine_only {
@@ -64,6 +67,15 @@ impl MyApp {
                 metrics.error_total.to_string(),
                 Color32::from_rgb(170, 170, 180),
             );
+        });
+        ui.add_space(theme::item_gap(self.ui_metrics.scale_factor));
+        theme::card_frame().show(ui, |ui| {
+            ui.label(egui::RichText::new("Review lanes").strong());
+            ui.horizontal_wrapped(|ui| {
+                ui.small("History keeps longer-lived scan results.");
+                ui.small("Protection activity tracks queued, deferred, throttled, and completed event flow.");
+                ui.small("File actions remain separate so restore, delete, and report removal stay easy to audit.");
+            });
         });
         ui.separator();
 
@@ -305,6 +317,18 @@ impl MyApp {
             });
             ui.separator();
         }
+
+        self.render_notification_center(
+            ui,
+            "Recent operational activity",
+            &[
+                FeedbackScope::FileAction,
+                FeedbackScope::Protection,
+                FeedbackScope::Updater,
+            ],
+            6,
+        );
+        ui.add_space(theme::section_gap(self.ui_metrics.scale_factor));
 
         let displayed_ids = indices
             .iter()

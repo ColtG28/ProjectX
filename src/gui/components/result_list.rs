@@ -25,12 +25,35 @@ pub fn render_result_row(
         .stroke(egui::Stroke::new(1.0, Color32::from_rgb(52, 60, 70)))
         .inner_margin(egui::Margin::symmetric(8.0, 6.0))
         .show(ui, |ui| {
+            let available = ui.available_width().max(480.0);
+            let show_type_column = available > 680.0;
+            let show_size_column = available > 760.0;
+            let show_time_column = available > 860.0;
+            let verdict_width = 76.0;
+            let type_width = if show_type_column { 104.0 } else { 0.0 };
+            let size_width = if show_size_column { 70.0 } else { 0.0 };
+            let time_width = if show_time_column { 102.0 } else { 0.0 };
+            let badge_reserve = if available > 980.0 { 260.0 } else { 180.0 };
+            let checkbox_width = if show_checkbox { 28.0 } else { 0.0 };
+            let inspect_width = 70.0;
+            let spacing_budget = 44.0;
+            let name_width = (available
+                - checkbox_width
+                - verdict_width
+                - type_width
+                - size_width
+                - time_width
+                - badge_reserve
+                - inspect_width
+                - spacing_budget)
+                .max(120.0);
+
             ui.horizontal(|ui| {
                 if show_checkbox {
                     ui.checkbox(checked, "");
                 }
                 ui.add_sized(
-                    [72.0, 0.0],
+                    [verdict_width, 0.0],
                     egui::Label::new(
                         RichText::new(record.verdict.label())
                             .strong()
@@ -38,32 +61,40 @@ pub fn render_result_row(
                     ),
                 );
                 ui.add_sized(
-                    [180.0, 0.0],
+                    [name_width, 0.0],
                     egui::Label::new(
                         RichText::new(record.display_name())
                             .strong()
                             .color(Color32::from_rgb(235, 239, 244)),
-                    ),
+                    )
+                    .truncate(true),
                 );
-                ui.add_sized(
-                    [104.0, 0.0],
-                    egui::Label::new(
-                        RichText::new(record.quick_type_label())
-                            .color(Color32::from_rgb(190, 196, 201)),
-                    ),
-                );
-                ui.add_sized(
-                    [74.0, 0.0],
-                    egui::Label::new(crate::gui::app::format_bytes(record.file_size_bytes)),
-                );
-                ui.add_sized(
-                    [96.0, 0.0],
-                    egui::Label::new(format_timestamp_compact(record.scanned_at_epoch)),
-                );
+                if show_type_column {
+                    ui.add_sized(
+                        [type_width, 0.0],
+                        egui::Label::new(
+                            RichText::new(record.quick_type_label())
+                                .color(Color32::from_rgb(190, 196, 201)),
+                        )
+                        .truncate(true),
+                    );
+                }
+                if show_size_column {
+                    ui.add_sized(
+                        [size_width, 0.0],
+                        egui::Label::new(crate::gui::app::format_bytes(record.file_size_bytes)),
+                    );
+                }
+                if show_time_column {
+                    ui.add_sized(
+                        [time_width, 0.0],
+                        egui::Label::new(format_timestamp_compact(record.scanned_at_epoch)),
+                    );
+                }
                 ui.horizontal(|ui| {
                     badge(ui, record.severity.label(), severity_color(record.severity));
                 });
-                ui.add_space(8.0);
+                ui.add_space(6.0);
                 ui.horizontal_wrapped(|ui| {
                     for source in record.signal_sources.iter().take(4) {
                         signal_badge(ui, source);
@@ -75,12 +106,16 @@ pub fn render_result_row(
                     }
                 });
             });
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(&record.path)
-                        .monospace()
-                        .size(11.0)
-                        .color(Color32::from_rgb(160, 168, 178)),
+            ui.horizontal_wrapped(|ui| {
+                ui.add_sized(
+                    [available - 18.0, 0.0],
+                    egui::Label::new(
+                        RichText::new(&record.path)
+                            .monospace()
+                            .size(11.0)
+                            .color(Color32::from_rgb(160, 168, 178)),
+                    )
+                    .truncate(true),
                 );
                 storage_badge(ui, record.resolved_storage_state());
                 if record.warning_count > 0 {

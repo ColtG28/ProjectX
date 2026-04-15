@@ -7,7 +7,8 @@ use crate::gui::app::summarize_record_refs;
 use crate::gui::components::{
     summary_chip::stat_chip, workspace_toolbar::render_record_workspace_toolbar,
 };
-use crate::gui::state::MyApp;
+use crate::gui::state::{FeedbackScope, MyApp};
+use crate::gui::theme;
 
 impl MyApp {
     pub fn render_reports(&mut self, ui: &mut egui::Ui) {
@@ -16,6 +17,8 @@ impl MyApp {
             "Focus on current triage, inspect reasoning, and manage safe report or quarantine actions.",
         );
         ui.separator();
+        self.render_feedback_banner(ui, FeedbackScope::FileAction);
+        ui.add_space(theme::item_gap(self.ui_metrics.scale_factor));
 
         let all_indices = self.filtered_record_indices(1_000, self.report_search.trim());
         let filtered_records = all_indices
@@ -55,6 +58,39 @@ impl MyApp {
                 Color32::from_rgb(132, 170, 214),
             );
         });
+        ui.add_space(6.0);
+        theme::card_frame().show(ui, |ui| {
+            ui.label(egui::RichText::new("Quick review filters").strong());
+            ui.horizontal_wrapped(|ui| {
+                for (label, filter) in [
+                    ("All", crate::gui::state::ReportVerdictFilter::All),
+                    ("Clean", crate::gui::state::ReportVerdictFilter::Clean),
+                    (
+                        "Suspicious",
+                        crate::gui::state::ReportVerdictFilter::Suspicious,
+                    ),
+                    (
+                        "Malicious",
+                        crate::gui::state::ReportVerdictFilter::Malicious,
+                    ),
+                ] {
+                    let selected = self.report_verdict_filter == filter;
+                    if ui
+                        .add(egui::Button::new(label).fill(if selected {
+                            Color32::from_rgb(52, 68, 88)
+                        } else {
+                            Color32::from_rgb(31, 37, 44)
+                        }))
+                        .clicked()
+                    {
+                        self.report_verdict_filter = filter;
+                    }
+                }
+                ui.small(
+                    "Use this row to jump between clean triage and suspicious review quickly.",
+                );
+            });
+        });
         ui.separator();
 
         let indices = all_indices;
@@ -92,6 +128,16 @@ impl MyApp {
         if toolbar.delete_selected_reports {
             self.delete_selected_reports(&displayed_ids);
         }
+        if let Some(focused) = self.focused_report_id.as_ref() {
+            ui.small(format!("Pinned detail: {}", focused));
+        }
+        ui.add_space(theme::item_gap(self.ui_metrics.scale_factor));
+        self.render_notification_center(
+            ui,
+            "Recent file actions",
+            &[FeedbackScope::FileAction, FeedbackScope::Updater],
+            4,
+        );
         ui.separator();
         self.render_record_workspace(
             ui,

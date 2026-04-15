@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use chrono::TimeZone;
 use eframe::egui;
 use egui::{Align, Align2, CentralPanel, Layout, RichText, Sense, SidePanel, TopBottomPanel, Vec2};
 use notify::{
@@ -20,6 +21,7 @@ use super::state::*;
 use super::theme;
 
 const AUTO_UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+const AUTO_UPDATE_CHECK_INTERVAL_SECS: u64 = 6 * 60 * 60;
 pub fn gui() -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -28,11 +30,7 @@ pub fn gui() -> Result<(), eframe::Error> {
             .with_icon(Arc::new(projectx_icon())),
         ..Default::default()
     };
-    eframe::run_native(
-        "ProjectX",
-        options,
-        Box::new(|_cc| Box::new(MyApp::new())),
-    )
+    eframe::run_native("ProjectX", options, Box::new(|_cc| Box::new(MyApp::new())))
 }
 
 impl MyApp {
@@ -63,10 +61,15 @@ impl MyApp {
             protection_verdict_filter: ProtectionVerdictFilter::All,
             protection_action_filter: ProtectionActionFilter::All,
             history_quarantine_only: false,
+            settings_panel: SettingsPanel::General,
             selected_report_ids: HashSet::new(),
             focused_report_id: None,
             pending_confirmation: None,
-            status_message: String::new(),
+            scan_feedback: None,
+            file_feedback: None,
+            updater_feedback: None,
+            settings_feedback: None,
+            protection_feedback: None,
             base_pixels_per_point: None,
             last_applied_scale: None,
             ui_metrics: UiMetrics::default(),
@@ -82,9 +85,170 @@ impl MyApp {
             download_status: String::new(),
             last_update_poll: Instant::now() - AUTO_UPDATE_CHECK_INTERVAL,
             update_state: Arc::new(Mutex::new(UpdateCheckState::default())),
+            notifications: VecDeque::new(),
         };
         app.refresh_protection_summary();
+        app.refresh_update_install_state();
         app
+    }
+
+    pub(crate) fn set_feedback<S: Into<String>>(
+        &mut self,
+        scope: FeedbackScope,
+        severity: FeedbackSeverity,
+        message: S,
+    ) {
+        let message = message.into();
+        let slot = match scope {
+            FeedbackScope::Scan => &mut self.scan_feedback,
+            FeedbackScope::FileAction => &mut self.file_feedback,
+            FeedbackScope::Updater => &mut self.updater_feedback,
+            FeedbackScope::Settings => &mut self.settings_feedback,
+            FeedbackScope::Protection => &mut self.protection_feedback,
+        };
+        *slot = Some(UiFeedback {
+            message: message.clone(),
+            severity,
+            sticky: matches!(
+                severity,
+                FeedbackSeverity::Error | FeedbackSeverity::Warning
+            ),
+        });
+        self.notifications.push_front(NotificationEntry {
+            scope,
+            severity,
+            message,
+            timestamp_epoch: now_epoch(),
+        });
+        while self.notifications.len() > 24 {
+            self.notifications.pop_back();
+        }
+    }
+
+    pub(crate) fn clear_feedback(&mut self, scope: FeedbackScope) {
+        let slot = match scope {
+            FeedbackScope::Scan => &mut self.scan_feedback,
+            FeedbackScope::FileAction => &mut self.file_feedback,
+            FeedbackScope::Updater => &mut self.updater_feedback,
+            FeedbackScope::Settings => &mut self.settings_feedback,
+            FeedbackScope::Protection => &mut self.protection_feedback,
+        };
+        *slot = None;
+    }
+
+    pub(crate) fn feedback(&self, scope: FeedbackScope) -> Option<&UiFeedback> {
+        match scope {
+            FeedbackScope::Scan => self.scan_feedback.as_ref(),
+            FeedbackScope::FileAction => self.file_feedback.as_ref(),
+            FeedbackScope::Updater => self.updater_feedback.as_ref(),
+            FeedbackScope::Settings => self.settings_feedback.as_ref(),
+            FeedbackScope::Protection => self.protection_feedback.as_ref(),
+        }
+    }
+
+    pub(crate) fn render_feedback_banner(&mut self, ui: &mut egui::Ui, scope: FeedbackScope) {
+        let Some(feedback) = self.feedback(scope).cloned() else {
+            return;
+        };
+
+        let (fill, stroke) = match feedback.severity {
+            FeedbackSeverity::Info => (
+                egui::Color32::from_rgb(32, 42, 52),
+                egui::Color32::from_rgb(78, 110, 142),
+            ),
+            FeedbackSeverity::Success => (
+                egui::Color32::from_rgb(27, 43, 35),
+                egui::Color32::from_rgb(92, 154, 112),
+            ),
+            FeedbackSeverity::Warning => (
+                egui::Color32::from_rgb(56, 46, 24),
+                egui::Color32::from_rgb(186, 145, 62),
+            ),
+            FeedbackSeverity::Error => (
+                egui::Color32::from_rgb(63, 33, 33),
+                egui::Color32::from_rgb(176, 92, 92),
+            ),
+        };
+
+        egui::Frame::none()
+            .fill(fill)
+            .stroke(egui::Stroke::new(1.0, stroke))
+            .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(feedback.message);
+                    if feedback.sticky && ui.small_button("Dismiss").clicked() {
+                        self.clear_feedback(scope);
+                    }
+                });
+            });
+    }
+
+    pub(crate) fn render_notification_center(
+        &self,
+        ui: &mut egui::Ui,
+        title: &str,
+        scopes: &[FeedbackScope],
+        max_items: usize,
+    ) {
+        theme::card_frame().show(ui, |ui| {
+            ui.label(egui::RichText::new(title).strong());
+            let entries = self
+                .notifications
+                .iter()
+                .filter(|entry| scopes.contains(&entry.scope))
+                .take(max_items)
+                .collect::<Vec<_>>();
+            if entries.is_empty() {
+                ui.small("No recent items for this area.");
+                return;
+            }
+            for entry in entries {
+                let color = match entry.severity {
+                    FeedbackSeverity::Info => egui::Color32::from_rgb(176, 221, 255),
+                    FeedbackSeverity::Success => egui::Color32::from_rgb(112, 184, 132),
+                    FeedbackSeverity::Warning => egui::Color32::from_rgb(224, 185, 105),
+                    FeedbackSeverity::Error => egui::Color32::from_rgb(198, 114, 114),
+                };
+                ui.horizontal_wrapped(|ui| {
+                    ui.colored_label(color, feedback_scope_label(entry.scope));
+                    ui.small(format_timestamp_with_relative(entry.timestamp_epoch));
+                });
+                ui.label(&entry.message);
+                ui.add_space(4.0);
+            }
+        });
+    }
+
+    pub(crate) fn latest_scan_epoch(&self) -> Option<u64> {
+        self.records
+            .iter()
+            .map(|record| record.scanned_at_epoch)
+            .max()
+    }
+
+    pub(crate) fn protection_status_label(&self) -> &'static str {
+        if !self.settings.enable_real_time_protection {
+            "Protection disabled"
+        } else if self.protection_summary.backlog_count > 0 {
+            "Protection active with backlog"
+        } else if self.protection_summary.monitor_state == "Active" {
+            "Protection active"
+        } else {
+            "Protection idle"
+        }
+    }
+
+    pub(crate) fn refresh_update_install_state(&mut self) {
+        if let Ok(mut state) = self.update_state.lock() {
+            let plan = build_guided_install_plan(
+                state.latest_release.as_ref(),
+                state.download_path.as_deref(),
+                state.verification_status.as_deref(),
+            );
+            state.install_ready = plan.ready;
+            state.install_guidance = plan.instructions;
+        }
     }
 
     pub fn is_booting(&self) -> bool {
@@ -369,12 +533,20 @@ impl MyApp {
                 ui.label(egui::RichText::new("Inspect").small().strong());
                 if ui.small_button("Copy path").clicked() {
                     ui.output_mut(|output| output.copied_text = self.records[index].path.clone());
-                    self.status_message = "Copied file path.".to_string();
+                    self.set_feedback(
+                        FeedbackScope::FileAction,
+                        FeedbackSeverity::Success,
+                        "Copied file path.",
+                    );
                 }
                 if let Some(hash) = self.records[index].sha256.as_deref() {
                     if ui.small_button("Copy hash").clicked() {
                         ui.output_mut(|output| output.copied_text = hash.to_string());
-                        self.status_message = "Copied SHA-256 hash.".to_string();
+                        self.set_feedback(
+                            FeedbackScope::FileAction,
+                            FeedbackSeverity::Success,
+                            "Copied SHA-256 hash.",
+                        );
                     }
                 }
                 if ui.small_button("Reveal file").clicked() {
@@ -422,15 +594,31 @@ impl MyApp {
             }
         }
         if let Some(path) = pending_reveal {
-            self.status_message = match reveal_in_file_manager(Path::new(&path)) {
-                Ok(()) => "Opened the file in the OS file manager.".to_string(),
-                Err(error) => format!("Reveal failed: {error}"),
+            match reveal_in_file_manager(Path::new(&path)) {
+                Ok(()) => self.set_feedback(
+                    FeedbackScope::FileAction,
+                    FeedbackSeverity::Success,
+                    "Opened the file in the OS file manager.",
+                ),
+                Err(error) => self.set_feedback(
+                    FeedbackScope::FileAction,
+                    FeedbackSeverity::Error,
+                    format!("Reveal failed: {error}"),
+                ),
             };
         }
         if let Some(path) = pending_report_reveal {
-            self.status_message = match reveal_in_file_manager(Path::new(&path)) {
-                Ok(()) => "Opened the report in the OS file manager.".to_string(),
-                Err(error) => format!("Reveal failed: {error}"),
+            match reveal_in_file_manager(Path::new(&path)) {
+                Ok(()) => self.set_feedback(
+                    FeedbackScope::FileAction,
+                    FeedbackSeverity::Success,
+                    "Opened the report in the OS file manager.",
+                ),
+                Err(error) => self.set_feedback(
+                    FeedbackScope::FileAction,
+                    FeedbackSeverity::Error,
+                    format!("Reveal failed: {error}"),
+                ),
             };
         }
     }
@@ -450,11 +638,15 @@ impl MyApp {
             let removed = self.remove_report_files(record.report_path.as_deref());
             self.selected_report_ids.remove(&record.record_id());
             self.records.remove(index);
-            self.status_message = if removed {
-                "Report deleted from disk and removed from the GUI.".to_string()
-            } else {
-                "Report entry removed from the GUI.".to_string()
-            };
+            self.set_feedback(
+                FeedbackScope::FileAction,
+                FeedbackSeverity::Success,
+                if removed {
+                    "Report deleted from disk and removed from the GUI."
+                } else {
+                    "Report entry removed from the GUI."
+                },
+            );
             save_history(&self.records, &self.timing_samples);
             return;
         }
@@ -464,7 +656,11 @@ impl MyApp {
         };
 
         let Some(quarantine_path) = record.quarantine_path.clone() else {
-            self.status_message = "No quarantined file is recorded for that entry.".to_string();
+            self.set_feedback(
+                FeedbackScope::FileAction,
+                FeedbackSeverity::Warning,
+                "No quarantined file is recorded for that entry.",
+            );
             return;
         };
 
@@ -503,7 +699,15 @@ impl MyApp {
             RecordAction::DeleteReport => unreachable!(),
         };
 
-        self.status_message = message;
+        self.set_feedback(
+            FeedbackScope::FileAction,
+            if message.contains("failed") || message.contains("no longer present") {
+                FeedbackSeverity::Error
+            } else {
+                FeedbackSeverity::Success
+            },
+            message,
+        );
         save_history(&self.records, &self.timing_samples);
     }
 
@@ -565,6 +769,28 @@ impl MyApp {
         });
     }
 
+    pub(crate) fn queue_scan_all_confirmation(&mut self) {
+        let roots = if self.settings.include_entire_filesystem {
+            vec![PathBuf::from("/")]
+        } else {
+            vec![home_dir().unwrap_or_else(|| PathBuf::from("/"))]
+        };
+        let scope_label = if self.settings.include_entire_filesystem {
+            "the entire filesystem"
+        } else {
+            "your home folder"
+        };
+        self.pending_confirmation = Some(PendingConfirmation {
+            title: "Start wide scan?".to_string(),
+            message: format!(
+                "Scan all files will walk {} and can take a while on larger systems. Start the scan now?",
+                scope_label
+            ),
+            confirm_label: "Start wide scan".to_string(),
+            target: PendingConfirmationTarget::StartScanFromRoots { roots },
+        });
+    }
+
     fn render_pending_confirmation(&mut self, ctx: &egui::Context) {
         let Some(dialog) = self.pending_confirmation.clone() else {
             return;
@@ -583,10 +809,14 @@ impl MyApp {
                         self.pending_confirmation = None;
                     }
                     if ui
-                        .add(
-                            egui::Button::new(dialog.confirm_label.clone())
-                                .fill(egui::Color32::from_rgb(130, 67, 67)),
-                        )
+                        .add(egui::Button::new(dialog.confirm_label.clone()).fill(
+                            match dialog.target {
+                                PendingConfirmationTarget::StartScanFromRoots { .. } => {
+                                    egui::Color32::from_rgb(66, 97, 130)
+                                }
+                                _ => egui::Color32::from_rgb(130, 67, 67),
+                            },
+                        ))
                         .clicked()
                     {
                         let target = dialog.target.clone();
@@ -597,6 +827,9 @@ impl MyApp {
                             }
                             PendingConfirmationTarget::DeleteReports { record_ids } => {
                                 self.delete_reports_by_ids(&record_ids);
+                            }
+                            PendingConfirmationTarget::StartScanFromRoots { roots } => {
+                                self.start_scan_from_roots(roots);
                             }
                         }
                     }
@@ -663,7 +896,11 @@ impl MyApp {
     pub(crate) fn submit_manual_path(&mut self) {
         let input = self.single_file_path.trim().to_string();
         if input.is_empty() {
-            self.status_message = "Enter a file or folder path first.".to_string();
+            self.set_feedback(
+                FeedbackScope::Scan,
+                FeedbackSeverity::Warning,
+                "Enter a file or folder path first.",
+            );
         } else {
             self.start_scan_from_roots(vec![PathBuf::from(input)]);
         }
@@ -898,7 +1135,17 @@ impl MyApp {
 
     fn poll_update_checker(&mut self) {
         if !self.settings.enable_automatic_updates {
+            if let Ok(mut state) = self.update_state.lock() {
+                state.next_scheduled_check_epoch = 0;
+            }
             return;
+        }
+
+        if let Ok(mut state) = self.update_state.lock() {
+            let base_epoch = state
+                .last_automatic_check_epoch
+                .max(state.last_checked_epoch);
+            state.next_scheduled_check_epoch = next_update_check_epoch(base_epoch);
         }
 
         if self.last_update_poll.elapsed() < AUTO_UPDATE_CHECK_INTERVAL {
@@ -919,7 +1166,9 @@ impl MyApp {
         }
         state.checking = true;
         state.last_error = None;
-        state.verification_status = None;
+        if manual {
+            state.verification_status = None;
+        }
         state.status = if manual {
             "Checking for updates...".to_string()
         } else {
@@ -928,14 +1177,16 @@ impl MyApp {
         drop(state);
 
         let update_state = Arc::clone(&self.update_state);
+        let auto_download = self.settings.enable_automatic_update_downloads && !manual;
         thread::spawn(move || {
             let outcome = crate::update::check_for_updates(now_epoch());
+            let last_checked_epoch = outcome.last_checked_epoch;
             if let Ok(mut state) = update_state.lock() {
                 state.checking = false;
                 state.current_version = outcome.current_version;
                 state.status = outcome.status_label;
                 state.status_kind = outcome.status_kind;
-                state.last_checked_epoch = outcome.last_checked_epoch;
+                state.last_checked_epoch = last_checked_epoch;
                 state.last_successful_check_epoch = outcome.last_successful_check_epoch;
                 state.latest_release = outcome.latest_release;
                 state.available_update = outcome.available_update;
@@ -943,6 +1194,23 @@ impl MyApp {
                 state.repo_label = outcome.repo_label;
                 state.release_page_url = outcome.release_page_url;
                 state.used_cached_release = outcome.used_cached_release;
+                if !manual {
+                    state.last_automatic_check_epoch = last_checked_epoch;
+                    state.next_scheduled_check_epoch = next_update_check_epoch(last_checked_epoch);
+                }
+                let plan = build_guided_install_plan(
+                    state.latest_release.as_ref(),
+                    state.download_path.as_deref(),
+                    state.verification_status.as_deref(),
+                );
+                state.install_ready = plan.ready;
+                state.install_guidance = plan.instructions;
+            }
+            if !manual {
+                let _ = crate::update::persist_automatic_check_epoch(last_checked_epoch);
+            }
+            if auto_download {
+                maybe_auto_download_update(&update_state);
             }
         });
     }
@@ -954,13 +1222,25 @@ impl MyApp {
             .ok()
             .and_then(|state| state.available_update.clone());
         let Some(update) = available_update else {
-            self.status_message = "No newer update is available right now.".to_string();
+            self.set_feedback(
+                FeedbackScope::Updater,
+                FeedbackSeverity::Info,
+                "No newer update is available right now.",
+            );
             return;
         };
 
-        self.status_message = match open_external_target(&update.asset_url) {
-            Ok(()) => format!("Opened {} for download.", update.asset_name),
-            Err(error) => format!("Failed to open update download: {error}"),
+        match open_external_target(&update.asset_url) {
+            Ok(()) => self.set_feedback(
+                FeedbackScope::Updater,
+                FeedbackSeverity::Success,
+                format!("Opened {} for download.", update.asset_name),
+            ),
+            Err(error) => self.set_feedback(
+                FeedbackScope::Updater,
+                FeedbackSeverity::Error,
+                format!("Failed to open update download: {error}"),
+            ),
         };
     }
 
@@ -971,8 +1251,11 @@ impl MyApp {
             .ok()
             .and_then(|state| state.latest_release.clone());
         let Some(release) = latest_release else {
-            self.status_message =
-                "No release metadata is available to verify against yet.".to_string();
+            self.set_feedback(
+                FeedbackScope::Updater,
+                FeedbackSeverity::Warning,
+                "No release metadata is available to verify against yet.",
+            );
             return;
         };
         let Some(expected_sha256) = release.expected_sha256.as_deref() else {
@@ -980,7 +1263,7 @@ impl MyApp {
             if let Ok(mut state) = self.update_state.lock() {
                 state.verification_status = Some(message.clone());
             }
-            self.status_message = message;
+            self.set_feedback(FeedbackScope::Updater, FeedbackSeverity::Warning, message);
             return;
         };
 
@@ -994,16 +1277,150 @@ impl MyApp {
         let result = crate::update::verify_downloaded_asset(&path, expected_sha256);
         match result {
             Ok(message) => {
+                let _ = crate::update::persist_download_result(
+                    Some(&release.version),
+                    Some(&release.asset_name),
+                    Some(&path),
+                    &message,
+                    now_epoch(),
+                );
                 if let Ok(mut state) = self.update_state.lock() {
                     state.verification_status = Some(message.clone());
+                    state.download_path = Some(path.to_string_lossy().to_string());
+                    state.downloaded_version = Some(release.version.clone());
+                    state.download_status = format!("Verified {}.", release.asset_name);
+                    state.last_download_epoch = now_epoch();
+                    let plan = build_guided_install_plan(
+                        state.latest_release.as_ref(),
+                        state.download_path.as_deref(),
+                        state.verification_status.as_deref(),
+                    );
+                    state.install_ready = plan.ready;
+                    state.install_guidance = plan.instructions;
                 }
-                self.status_message = message;
+                self.set_feedback(FeedbackScope::Updater, FeedbackSeverity::Success, message);
             }
             Err(error) => {
+                let _ = crate::update::persist_download_result(
+                    Some(&release.version),
+                    Some(&release.asset_name),
+                    Some(&path),
+                    &error,
+                    now_epoch(),
+                );
                 if let Ok(mut state) = self.update_state.lock() {
                     state.verification_status = Some(error.clone());
+                    state.download_path = Some(path.to_string_lossy().to_string());
+                    state.downloaded_version = Some(release.version.clone());
+                    state.last_download_epoch = now_epoch();
+                    let plan = build_guided_install_plan(
+                        state.latest_release.as_ref(),
+                        state.download_path.as_deref(),
+                        state.verification_status.as_deref(),
+                    );
+                    state.install_ready = plan.ready;
+                    state.install_guidance = plan.instructions;
                 }
-                self.status_message = error;
+                self.set_feedback(FeedbackScope::Updater, FeedbackSeverity::Error, error);
+            }
+        }
+    }
+
+    pub(crate) fn open_downloaded_update_folder(&mut self) {
+        let path = self
+            .update_state
+            .lock()
+            .ok()
+            .and_then(|state| state.download_path.clone());
+        let Some(path) = path else {
+            self.set_feedback(
+                FeedbackScope::Updater,
+                FeedbackSeverity::Info,
+                "No downloaded update is available yet.",
+            );
+            return;
+        };
+        match reveal_in_file_manager(Path::new(&path)) {
+            Ok(()) => self.set_feedback(
+                FeedbackScope::Updater,
+                FeedbackSeverity::Success,
+                "Opened the downloaded update in the file manager.",
+            ),
+            Err(error) => self.set_feedback(
+                FeedbackScope::Updater,
+                FeedbackSeverity::Error,
+                format!("Failed to reveal the downloaded update: {error}"),
+            ),
+        }
+    }
+
+    pub(crate) fn install_downloaded_update(&mut self) {
+        let state_snapshot = self.update_state.lock().ok().map(|state| state.clone());
+        let Some(state_snapshot) = state_snapshot else {
+            return;
+        };
+        let plan = build_guided_install_plan(
+            state_snapshot.latest_release.as_ref(),
+            state_snapshot.download_path.as_deref(),
+            state_snapshot.verification_status.as_deref(),
+        );
+        let Some(path) = state_snapshot.download_path.as_deref() else {
+            self.set_feedback(
+                FeedbackScope::Updater,
+                FeedbackSeverity::Warning,
+                "Download or verify an update package before starting the install flow.",
+            );
+            return;
+        };
+        if !plan.ready {
+            if let Ok(mut state) = self.update_state.lock() {
+                state.install_status = plan.instructions.clone();
+                state.install_ready = false;
+                state.install_guidance = plan.instructions.clone();
+            }
+            self.set_feedback(
+                FeedbackScope::Updater,
+                FeedbackSeverity::Warning,
+                plan.instructions,
+            );
+            return;
+        }
+
+        let result = if plan.launch_installer {
+            open_external_target(path)
+        } else {
+            reveal_in_file_manager(Path::new(path))
+        };
+
+        match result {
+            Ok(()) => {
+                let status = if plan.launch_installer {
+                    "Install flow started. Follow the platform installer/replacement steps, then relaunch ProjectX."
+                } else {
+                    "Update package revealed. Follow the guided install steps shown in Settings, then relaunch ProjectX."
+                };
+                let _ = crate::update::persist_install_result(
+                    status,
+                    now_epoch(),
+                    plan.restart_required_after_install,
+                );
+                if let Ok(mut state) = self.update_state.lock() {
+                    state.install_status = status.to_string();
+                    state.last_install_attempt_epoch = now_epoch();
+                    state.restart_required_after_install = plan.restart_required_after_install;
+                    state.install_guidance = plan.instructions.clone();
+                }
+                self.set_feedback(FeedbackScope::Updater, FeedbackSeverity::Success, status);
+            }
+            Err(error) => {
+                let status = format!("Install flow could not be started: {error}");
+                let _ = crate::update::persist_install_result(&status, now_epoch(), false);
+                if let Ok(mut state) = self.update_state.lock() {
+                    state.install_status = status.clone();
+                    state.last_install_attempt_epoch = now_epoch();
+                    state.restart_required_after_install = false;
+                }
+                self.set_feedback(FeedbackScope::Updater, FeedbackSeverity::Error, status);
             }
         }
     }
@@ -1025,9 +1442,17 @@ impl MyApp {
                 crate::update::releases_page_url(&config.owner, &config.repo)
             });
 
-        self.status_message = match open_external_target(&release_url) {
-            Ok(()) => "Opened the latest ProjectX release page.".to_string(),
-            Err(error) => format!("Failed to open release page: {error}"),
+        match open_external_target(&release_url) {
+            Ok(()) => self.set_feedback(
+                FeedbackScope::Updater,
+                FeedbackSeverity::Success,
+                "Opened the latest ProjectX release page.",
+            ),
+            Err(error) => self.set_feedback(
+                FeedbackScope::Updater,
+                FeedbackSeverity::Error,
+                format!("Failed to open release page: {error}"),
+            ),
         };
     }
 
@@ -1846,9 +2271,13 @@ impl MyApp {
         for id in record_ids {
             self.selected_report_ids.remove(id);
         }
-        self.status_message = format!(
-            "Deleted {} selected report entrie(s) and removed {} report file(s).",
-            removed_entries, removed_files
+        self.set_feedback(
+            FeedbackScope::FileAction,
+            FeedbackSeverity::Success,
+            format!(
+                "Deleted {} selected report entrie(s) and removed {} report file(s).",
+                removed_entries, removed_files
+            ),
         );
         save_history(&self.records, &self.timing_samples);
     }
@@ -1869,6 +2298,8 @@ impl MyApp {
         if self.ui_metrics.compact {
             egui::ScrollArea::vertical().show(ui, |ui| self.render_record_list(ui, indices, true));
             ui.separator();
+            self.render_workspace_selection_summary(ui, indices);
+            ui.add_space(8.0);
             self.render_record_detail(ui);
             ui.add_space(8.0);
             self.render_workspace_note(ui, note);
@@ -1880,6 +2311,8 @@ impl MyApp {
                         .show(ui, |ui| self.render_record_list(ui, indices, true));
                 });
                 columns[1].vertical(|ui| {
+                    self.render_workspace_selection_summary(ui, indices);
+                    ui.add_space(8.0);
                     self.render_record_detail(ui);
                     ui.add_space(8.0);
                     self.render_workspace_note(ui, note);
@@ -1888,8 +2321,34 @@ impl MyApp {
         }
     }
 
+    fn render_workspace_selection_summary(&self, ui: &mut egui::Ui, indices: &[usize]) {
+        let selected = self
+            .focused_report_id
+            .as_ref()
+            .and_then(|id| self.records.iter().find(|record| record.record_id() == *id))
+            .or_else(|| indices.last().and_then(|index| self.records.get(*index)));
+        theme::card_frame().show(ui, |ui| {
+            ui.label(egui::RichText::new("Current focus").strong());
+            if let Some(record) = selected {
+                ui.label(
+                    egui::RichText::new(record.display_name())
+                        .strong()
+                        .color(egui::Color32::from_rgb(235, 239, 244)),
+                );
+                ui.small(format!(
+                    "{} | {} | {}",
+                    record.verdict.label(),
+                    record.severity.label(),
+                    format_timestamp_compact(record.scanned_at_epoch)
+                ));
+            } else {
+                ui.small("Select a result to pin its detail view here.");
+            }
+        });
+    }
+
     fn render_workspace_note(&self, ui: &mut egui::Ui, note: &str) {
-        ui.group(|ui| {
+        theme::card_frame().show(ui, |ui| {
             ui.label(egui::RichText::new("Operational notes").strong());
             ui.label(note);
         });
@@ -1906,7 +2365,11 @@ impl MyApp {
             .iter()
             .any(|entry| entry.path == normalized)
         {
-            self.status_message = "That path is already being watched.".to_string();
+            self.set_feedback(
+                FeedbackScope::Settings,
+                FeedbackSeverity::Warning,
+                "That path is already being watched.",
+            );
             return;
         }
         self.settings.watched_paths.push(WatchedPathConfig {
@@ -1915,7 +2378,11 @@ impl MyApp {
         });
         save_gui_settings(&self.settings);
         self.refresh_protection_summary();
-        self.status_message = format!("Added watched path: {normalized}");
+        self.set_feedback(
+            FeedbackScope::Settings,
+            FeedbackSeverity::Success,
+            format!("Added watched path: {normalized}"),
+        );
     }
 
     pub(crate) fn remove_watched_path(&mut self, path: &str) {
@@ -1929,7 +2396,11 @@ impl MyApp {
         save_protection_backlog(&self.protection_backlog);
         save_gui_settings(&self.settings);
         self.refresh_protection_summary();
-        self.status_message = format!("Removed watched path: {path}");
+        self.set_feedback(
+            FeedbackScope::Settings,
+            FeedbackSeverity::Success,
+            format!("Removed watched path: {path}"),
+        );
     }
 
     fn record_protection_event(&mut self, input: ProtectionEventInput) {
@@ -2138,7 +2609,11 @@ impl MyApp {
 
     pub(crate) fn start_scan_from_roots(&mut self, roots: Vec<PathBuf>) {
         if roots.is_empty() {
-            self.status_message = "No valid path was supplied.".to_string();
+            self.set_feedback(
+                FeedbackScope::Scan,
+                FeedbackSeverity::Warning,
+                "No valid path was supplied.",
+            );
             return;
         }
 
@@ -2148,7 +2623,11 @@ impl MyApp {
             .map(|path| path.to_string_lossy().to_string())
             .collect::<Vec<_>>();
         if !missing.is_empty() {
-            self.status_message = format!("Some paths do not exist: {}", missing.join(", "));
+            self.set_feedback(
+                FeedbackScope::Scan,
+                FeedbackSeverity::Error,
+                format!("Some paths do not exist: {}", missing.join(", ")),
+            );
             return;
         }
 
@@ -2163,25 +2642,41 @@ impl MyApp {
     fn start_scan(&mut self, targets: Vec<ScanTarget>) {
         let targets = dedupe_targets(targets);
         if targets.is_empty() {
-            self.status_message = "No files found to scan for this selection.".to_string();
+            self.set_feedback(
+                FeedbackScope::Scan,
+                FeedbackSeverity::Warning,
+                "No files found to scan for this selection.",
+            );
             return;
         }
 
-        if let Ok(mut job) = self.job.lock() {
+        let queued_message = if let Ok(mut job) = self.job.lock() {
             if job.running {
-                let (added_count, added_bytes) = queue_targets_into_job(&mut job, targets);
-                if added_count == 0 {
-                    self.status_message =
-                        "Those files are already queued or currently scanning.".to_string();
+                let (added_count, added_bytes) = queue_targets_into_job(&mut job, targets.clone());
+                Some(if added_count == 0 {
+                    (
+                        FeedbackSeverity::Info,
+                        "Those files are already queued or currently scanning.".to_string(),
+                    )
                 } else {
-                    self.status_message = format!(
-                        "Queued {} file(s) for later scanning ({}).",
-                        added_count,
-                        format_bytes(added_bytes)
-                    );
-                }
-                return;
+                    (
+                        FeedbackSeverity::Success,
+                        format!(
+                            "Queued {} file(s) for later scanning ({}).",
+                            added_count,
+                            format_bytes(added_bytes)
+                        ),
+                    )
+                })
+            } else {
+                None
             }
+        } else {
+            None
+        };
+        if let Some((severity, message)) = queued_message {
+            self.set_feedback(FeedbackScope::Scan, severity, message);
+            return;
         }
 
         let latest_by_path = latest_record_map(&self.records);
@@ -2204,10 +2699,14 @@ impl MyApp {
             };
         }
 
-        self.status_message = format!(
-            "Started scan for {} files ({} total).",
-            total,
-            format_bytes(total_bytes)
+        self.set_feedback(
+            FeedbackScope::Scan,
+            FeedbackSeverity::Success,
+            format!(
+                "Started scan for {} files ({} total).",
+                total,
+                format_bytes(total_bytes)
+            ),
         );
 
         let job_ref = Arc::clone(&self.job);
@@ -2265,17 +2764,40 @@ impl eframe::App for MyApp {
         self.render_pending_confirmation(ctx);
         self.render_loading_indicator(ctx);
 
-        if self.is_loading()
-            || self.settings.enable_download_monitoring
-            || self.settings.enable_real_time_protection
-            || self
-                .update_state
-                .lock()
-                .map(|state| state.checking)
-                .unwrap_or(false)
-        {
-            ctx.request_repaint_after(Duration::from_millis(100));
+        if let Some(interval) = self.next_repaint_interval() {
+            ctx.request_repaint_after(interval);
         }
+    }
+}
+
+impl MyApp {
+    fn next_repaint_interval(&self) -> Option<Duration> {
+        if self.is_loading() {
+            return Some(Duration::from_millis(120));
+        }
+
+        let update_check_active = self
+            .update_state
+            .lock()
+            .map(|state| state.checking || state.download_in_progress)
+            .unwrap_or(false);
+        if update_check_active {
+            return Some(Duration::from_millis(180));
+        }
+
+        if self.settings.enable_download_monitoring && !self.download_watch.is_empty() {
+            return Some(Duration::from_millis(300));
+        }
+
+        if self.settings.enable_real_time_protection
+            && (!self.protection_backlog.is_empty()
+                || !self.protection_status.is_empty()
+                || self.protection_monitor.receiver.is_some())
+        {
+            return Some(Duration::from_millis(320));
+        }
+
+        None
     }
 }
 
@@ -3747,11 +4269,241 @@ pub(crate) fn format_eta(seconds: u64) -> String {
     }
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct GuidedInstallPlan {
+    pub(crate) ready: bool,
+    pub(crate) launch_installer: bool,
+    pub(crate) restart_required_after_install: bool,
+    pub(crate) action_label: &'static str,
+    pub(crate) instructions: String,
+}
+
+pub(crate) fn build_guided_install_plan(
+    release: Option<&AvailableUpdate>,
+    download_path: Option<&str>,
+    verification_status: Option<&str>,
+) -> GuidedInstallPlan {
+    let Some(download_path) = download_path else {
+        return GuidedInstallPlan {
+            ready: false,
+            launch_installer: false,
+            restart_required_after_install: false,
+            action_label: "Install update",
+            instructions: "Download or verify an update package before starting the install flow."
+                .to_string(),
+        };
+    };
+
+    let release = release.cloned().unwrap_or_default();
+    let checksum_required = release.expected_sha256.is_some();
+    let checksum_verified = verification_status
+        .map(|message| {
+            message
+                .to_ascii_lowercase()
+                .contains("verified successfully")
+        })
+        .unwrap_or(false);
+    if checksum_required && !checksum_verified {
+        return GuidedInstallPlan {
+            ready: false,
+            launch_installer: false,
+            restart_required_after_install: false,
+            action_label: "Install update",
+            instructions: "Verify the downloaded update package before starting the install flow."
+                .to_string(),
+        };
+    }
+
+    let lower = download_path.to_ascii_lowercase();
+    if cfg!(target_os = "macos") {
+        if lower.ends_with(".dmg") {
+            return GuidedInstallPlan {
+                ready: true,
+                launch_installer: true,
+                restart_required_after_install: true,
+                action_label: "Install update",
+                instructions: "ProjectX will open the DMG. Drag the new ProjectX.app into Applications, replace the existing copy if prompted, then relaunch ProjectX.".to_string(),
+            };
+        }
+        if lower.ends_with(".zip") {
+            return GuidedInstallPlan {
+                ready: true,
+                launch_installer: false,
+                restart_required_after_install: true,
+                action_label: "Reveal install package",
+                instructions: "ProjectX will reveal the downloaded archive. Extract the app bundle, move it into Applications, replace the existing copy if prompted, then relaunch ProjectX.".to_string(),
+            };
+        }
+    } else if cfg!(target_os = "windows") {
+        if lower.ends_with(".exe") || lower.ends_with(".msi") {
+            return GuidedInstallPlan {
+                ready: true,
+                launch_installer: true,
+                restart_required_after_install: true,
+                action_label: "Install update",
+                instructions: "ProjectX will launch the Windows installer package. Complete the install prompts, then restart ProjectX when the installer finishes.".to_string(),
+            };
+        }
+        if lower.ends_with(".zip") {
+            return GuidedInstallPlan {
+                ready: true,
+                launch_installer: false,
+                restart_required_after_install: true,
+                action_label: "Reveal install package",
+                instructions: "ProjectX will reveal the portable update archive. Extract it, replace the current app files with the new build, then restart ProjectX.".to_string(),
+            };
+        }
+    } else {
+        if lower.ends_with(".appimage") || lower.ends_with(".deb") || lower.ends_with(".rpm") {
+            return GuidedInstallPlan {
+                ready: true,
+                launch_installer: false,
+                restart_required_after_install: true,
+                action_label: "Reveal install package",
+                instructions: "ProjectX will reveal the downloaded Linux package. Use your normal platform install flow for this package, then relaunch ProjectX.".to_string(),
+            };
+        }
+    }
+
+    GuidedInstallPlan {
+        ready: true,
+        launch_installer: false,
+        restart_required_after_install: true,
+        action_label: "Reveal install package",
+        instructions: if checksum_required {
+            "ProjectX will reveal the verified update package. Follow the platform-specific replacement or installer steps for that package, then relaunch ProjectX.".to_string()
+        } else {
+            "ProjectX will reveal the downloaded update package. No matching checksum metadata was published for this release, so review the package carefully before installing, then relaunch ProjectX.".to_string()
+        },
+    }
+}
+
 pub(crate) fn now_epoch() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0)
+}
+
+fn next_update_check_epoch(last_check_epoch: u64) -> u64 {
+    if last_check_epoch == 0 {
+        0
+    } else {
+        last_check_epoch.saturating_add(AUTO_UPDATE_CHECK_INTERVAL_SECS)
+    }
+}
+
+fn maybe_auto_download_update(update_state: &Arc<Mutex<UpdateCheckState>>) {
+    let release = update_state.lock().ok().and_then(|state| {
+        if state.download_in_progress {
+            return None;
+        }
+        state
+            .available_update
+            .clone()
+            .filter(|release| state.downloaded_version.as_deref() != Some(release.version.as_str()))
+    });
+    let Some(release) = release else {
+        return;
+    };
+
+    if let Ok(mut state) = update_state.lock() {
+        state.download_in_progress = true;
+        state.download_progress_fraction = Some(0.0);
+        state.download_status = format!("Downloading {} in the background...", release.asset_name);
+    }
+
+    let update_state = Arc::clone(update_state);
+    thread::spawn(move || {
+        let result = crate::update::download_release_asset(
+            &release.asset_url,
+            &release.asset_name,
+            |downloaded, total| {
+                if let Ok(mut state) = update_state.lock() {
+                    state.download_progress_fraction = total.map(|total_bytes| {
+                        if total_bytes == 0 {
+                            0.0
+                        } else {
+                            (downloaded as f32 / total_bytes as f32).clamp(0.0, 1.0)
+                        }
+                    });
+                    state.download_status = if let Some(total_bytes) = total {
+                        format!(
+                            "Downloading {} ({}/{})",
+                            release.asset_name,
+                            format_bytes(downloaded),
+                            format_bytes(total_bytes)
+                        )
+                    } else {
+                        format!(
+                            "Downloading {} ({})",
+                            release.asset_name,
+                            format_bytes(downloaded)
+                        )
+                    };
+                }
+            },
+        );
+
+        match result {
+            Ok(path) => {
+                let verification = release
+                    .expected_sha256
+                    .as_deref()
+                    .map(|expected| crate::update::verify_downloaded_asset(&path, expected));
+                let verification_message = match verification {
+                    Some(Ok(message)) => Some(message),
+                    Some(Err(error)) => Some(error),
+                    None => None,
+                };
+                let status = verification_message
+                    .clone()
+                    .unwrap_or_else(|| format!("Downloaded {}.", release.asset_name));
+                let _ = crate::update::persist_download_result(
+                    Some(&release.version),
+                    Some(&release.asset_name),
+                    Some(&path),
+                    &status,
+                    now_epoch(),
+                );
+                if let Ok(mut state) = update_state.lock() {
+                    state.download_in_progress = false;
+                    state.download_progress_fraction = Some(1.0);
+                    state.download_status = status;
+                    state.download_path = Some(path.to_string_lossy().to_string());
+                    state.downloaded_version = Some(release.version.clone());
+                    state.last_download_epoch = now_epoch();
+                    if let Some(message) = verification_message {
+                        state.verification_status = Some(message);
+                    }
+                    let plan = build_guided_install_plan(
+                        state.latest_release.as_ref(),
+                        state.download_path.as_deref(),
+                        state.verification_status.as_deref(),
+                    );
+                    state.install_ready = plan.ready;
+                    state.install_guidance = plan.instructions;
+                }
+            }
+            Err(error) => {
+                let _ =
+                    crate::update::persist_download_result(None, None, None, &error, now_epoch());
+                if let Ok(mut state) = update_state.lock() {
+                    state.download_in_progress = false;
+                    state.download_progress_fraction = None;
+                    state.download_status = error.clone();
+                    state.last_error = Some(error);
+                    let plan = build_guided_install_plan(
+                        state.latest_release.as_ref(),
+                        state.download_path.as_deref(),
+                        state.verification_status.as_deref(),
+                    );
+                    state.install_ready = plan.ready;
+                    state.install_guidance = plan.instructions;
+                }
+            }
+        }
+    });
 }
 
 pub(crate) fn format_timestamp_compact(epoch: u64) -> String {
@@ -3786,32 +4538,8 @@ fn format_local_timestamp(epoch: u64, pattern: &str) -> Option<String> {
         return None;
     }
 
-    #[cfg(unix)]
-    unsafe {
-        let time = epoch as libc::time_t;
-        let mut local = std::mem::zeroed::<libc::tm>();
-        if libc::localtime_r(&time, &mut local).is_null() {
-            return None;
-        }
-        let mut buffer = [0u8; 64];
-        let format = std::ffi::CString::new(pattern).ok()?;
-        let written = libc::strftime(
-            buffer.as_mut_ptr() as *mut libc::c_char,
-            buffer.len(),
-            format.as_ptr(),
-            &local,
-        );
-        if written == 0 {
-            return None;
-        }
-        Some(String::from_utf8_lossy(&buffer[..written]).to_string())
-    }
-
-    #[cfg(not(unix))]
-    {
-        let _ = pattern;
-        Some(format!("epoch {}", epoch))
-    }
+    let timestamp = chrono::Local.timestamp_opt(epoch as i64, 0).single()?;
+    Some(timestamp.format(pattern).to_string())
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -4106,5 +4834,141 @@ fn severity_level_from_label(label: &str) -> SeverityLevel {
         "high" => SeverityLevel::High,
         "error" => SeverityLevel::Error,
         _ => SeverityLevel::Medium,
+    }
+}
+
+fn feedback_scope_label(scope: FeedbackScope) -> &'static str {
+    match scope {
+        FeedbackScope::Scan => "Scan",
+        FeedbackScope::FileAction => "File action",
+        FeedbackScope::Updater => "Updater",
+        FeedbackScope::Settings => "Settings",
+        FeedbackScope::Protection => "Protection",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scoped_feedback_does_not_overwrite_other_channels() {
+        let mut app = MyApp::default();
+        app.set_feedback(FeedbackScope::Scan, FeedbackSeverity::Info, "scan");
+        app.set_feedback(FeedbackScope::Updater, FeedbackSeverity::Error, "update");
+
+        assert_eq!(
+            app.feedback(FeedbackScope::Scan)
+                .map(|feedback| feedback.message.as_str()),
+            Some("scan")
+        );
+        assert_eq!(
+            app.feedback(FeedbackScope::Updater)
+                .map(|feedback| feedback.message.as_str()),
+            Some("update")
+        );
+    }
+
+    #[test]
+    fn wide_scan_confirmation_uses_confirmation_target() {
+        let mut app = MyApp::default();
+        app.settings.include_entire_filesystem = true;
+        app.queue_scan_all_confirmation();
+
+        match app
+            .pending_confirmation
+            .as_ref()
+            .map(|dialog| &dialog.target)
+        {
+            Some(PendingConfirmationTarget::StartScanFromRoots { roots }) => {
+                assert_eq!(roots, &vec![PathBuf::from("/")]);
+            }
+            other => panic!("unexpected confirmation target: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compact_timestamp_is_human_readable() {
+        let label = format_timestamp_compact(1_700_000_000);
+        assert!(!label.contains("epoch "));
+        assert!(label.contains('-'));
+        assert!(label.contains(':'));
+    }
+
+    #[test]
+    fn repaint_interval_is_idle_when_no_live_work_is_running() {
+        let mut app = MyApp::default();
+        app.boot_until = Instant::now();
+        assert_eq!(app.next_repaint_interval(), None);
+    }
+
+    #[test]
+    fn notifications_capture_recent_feedback() {
+        let mut app = MyApp::default();
+        app.set_feedback(FeedbackScope::Updater, FeedbackSeverity::Success, "checked");
+        app.set_feedback(
+            FeedbackScope::FileAction,
+            FeedbackSeverity::Warning,
+            "restore",
+        );
+
+        assert_eq!(app.notifications.len(), 2);
+        assert_eq!(
+            app.notifications
+                .front()
+                .map(|entry| entry.message.as_str()),
+            Some("restore")
+        );
+    }
+
+    #[test]
+    fn settings_panel_defaults_to_general() {
+        let app = MyApp::default();
+        assert_eq!(app.settings_panel, SettingsPanel::General);
+    }
+
+    #[test]
+    fn latest_scan_epoch_is_none_without_records() {
+        let app = MyApp::default();
+        assert_eq!(app.latest_scan_epoch(), None);
+    }
+
+    #[test]
+    fn next_update_check_epoch_uses_fixed_interval() {
+        assert_eq!(
+            next_update_check_epoch(100),
+            100 + AUTO_UPDATE_CHECK_INTERVAL_SECS
+        );
+        assert_eq!(next_update_check_epoch(0), 0);
+    }
+
+    #[test]
+    fn guided_install_requires_verification_when_checksum_exists() {
+        let release = AvailableUpdate {
+            asset_name: "ProjectX-macos.dmg".to_string(),
+            expected_sha256: Some("a".repeat(64)),
+            ..AvailableUpdate::default()
+        };
+        let plan = build_guided_install_plan(
+            Some(&release),
+            Some("/tmp/ProjectX-macos.dmg"),
+            Some("waiting"),
+        );
+        assert!(!plan.ready);
+    }
+
+    #[test]
+    fn guided_install_plan_allows_verified_macos_dmg() {
+        let release = AvailableUpdate {
+            asset_name: "ProjectX-macos.dmg".to_string(),
+            expected_sha256: Some("a".repeat(64)),
+            ..AvailableUpdate::default()
+        };
+        let plan = build_guided_install_plan(
+            Some(&release),
+            Some("/tmp/ProjectX-macos.dmg"),
+            Some("SHA-256 verified successfully for ProjectX-macos.dmg."),
+        );
+        assert!(plan.ready);
     }
 }

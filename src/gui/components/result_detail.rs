@@ -8,6 +8,7 @@ use crate::gui::components::status_bar::{
     badge, count_badge, severity_color, signal_badge, storage_badge, verdict_color,
 };
 use crate::gui::state::{ProtectionEvent, ScanRecord};
+use crate::gui::theme;
 use crate::r#static::report::source_label;
 
 pub fn render_result_detail(
@@ -17,10 +18,10 @@ pub fn render_result_detail(
     protection_event: Option<&ProtectionEvent>,
 ) {
     ui.heading("Detection Detail");
-    ui.label("Pinned result metadata, signal sources, and safe follow-up context.");
+    ui.label("Pinned result summary, strongest signals, and safe follow-up context.");
     ui.separator();
 
-    detail_section(ui, "Result summary", |ui| {
+    detail_section(ui, "Summary", |ui| {
         ui.horizontal_wrapped(|ui| {
             ui.label(
                 RichText::new(record.verdict.label())
@@ -128,7 +129,7 @@ pub fn render_result_detail(
     });
 
     ui.add_space(8.0 * scale);
-    detail_section(ui, "Detection reasons", |ui| {
+    detail_section(ui, "Why it was flagged", |ui| {
         if record.detection_reasons.is_empty() {
             ui.label("No structured detection reasons were recorded.");
         } else {
@@ -136,34 +137,31 @@ pub fn render_result_detail(
             for reason in &record.detection_reasons {
                 grouped.entry(&reason.source).or_default().push(reason);
             }
+            let mut strongest = record
+                .detection_reasons
+                .iter()
+                .filter(|reason| reason.weight >= 0.7)
+                .collect::<Vec<_>>();
+            strongest.sort_by(|left, right| right.weight.total_cmp(&left.weight));
+            if !strongest.is_empty() {
+                ui.label(RichText::new("Highest-confidence signals").strong());
+                for reason in strongest.into_iter().take(3) {
+                    signal_reason_card(ui, reason, true);
+                }
+                ui.add_space(6.0 * scale);
+            }
             for (source, reasons) in grouped {
                 ui.add_space(4.0 * scale);
                 ui.label(RichText::new(source_label(source)).strong());
                 for reason in reasons {
-                    ui.group(|ui| {
-                        ui.label(
-                            RichText::new(if reason.name.is_empty() {
-                                &reason.reason_type
-                            } else {
-                                &reason.name
-                            })
-                            .strong(),
-                        );
-                        let description = if reason.description.is_empty() {
-                            &reason.reason_type
-                        } else {
-                            &reason.description
-                        };
-                        ui.label(description);
-                        ui.label(RichText::new(format!("weight {:.2}", reason.weight)).size(11.0));
-                    });
+                    signal_reason_card(ui, reason, reason.weight >= 0.7);
                 }
             }
         }
     });
 
     ui.add_space(8.0 * scale);
-    detail_section(ui, "Operational notes", |ui| {
+    detail_section(ui, "Reasoning and actions", |ui| {
         if !record.summary_text.is_empty() {
             ui.label(&record.summary_text);
         } else {
@@ -192,7 +190,7 @@ pub fn render_result_detail(
     });
 
     ui.add_space(8.0 * scale);
-    detail_section(ui, "Paths", |ui| {
+    detail_section(ui, "Provenance and storage", |ui| {
         ui.monospace(&record.path);
         ui.label("Viewing or copying metadata does not modify local files.");
         if let Some(path) = record.quarantine_path.as_deref() {
@@ -209,8 +207,56 @@ pub fn render_result_detail(
 }
 
 fn detail_section(ui: &mut egui::Ui, title: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
-    ui.group(|ui| {
+    theme::card_frame().show(ui, |ui| {
         ui.label(RichText::new(title).strong());
         add_contents(ui);
     });
+}
+
+fn signal_reason_card(
+    ui: &mut egui::Ui,
+    reason: &crate::gui::state::DetectionReason,
+    highlight: bool,
+) {
+    let fill = if highlight {
+        egui::Color32::from_rgb(45, 36, 21)
+    } else {
+        egui::Color32::from_rgb(31, 37, 44)
+    };
+    let stroke = if highlight {
+        egui::Color32::from_rgb(186, 145, 62)
+    } else {
+        egui::Color32::from_rgb(57, 66, 76)
+    };
+    egui::Frame::none()
+        .fill(fill)
+        .stroke(egui::Stroke::new(1.0, stroke))
+        .rounding(6.0)
+        .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new(if reason.name.is_empty() {
+                        &reason.reason_type
+                    } else {
+                        &reason.name
+                    })
+                    .strong(),
+                );
+                ui.small(if highlight {
+                    "High confidence"
+                } else if reason.weight >= 0.4 {
+                    "Supporting signal"
+                } else {
+                    "Weak signal"
+                });
+            });
+            let description = if reason.description.is_empty() {
+                &reason.reason_type
+            } else {
+                &reason.description
+            };
+            ui.label(description);
+            ui.small(format!("weight {:.2}", reason.weight));
+        });
 }
