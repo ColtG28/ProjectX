@@ -248,6 +248,39 @@ impl MyApp {
             );
             state.install_ready = plan.ready;
             state.install_guidance = plan.instructions;
+            Self::sync_update_snapshot_locked(&mut state);
+        }
+    }
+
+    pub(crate) fn sync_update_snapshot_locked(state: &mut UpdateCheckState) {
+        state.debug_snapshot = Some(crate::update::UpdateStateSnapshot {
+            current_version: state.current_version.clone(),
+            latest_version: state
+                .latest_release
+                .as_ref()
+                .map(|release| release.version.clone()),
+            selected_release_tag: state
+                .latest_release
+                .as_ref()
+                .map(|release| release.tag_name.clone()),
+            selected_asset_name: state
+                .latest_release
+                .as_ref()
+                .map(|release| release.asset_name.clone()),
+            status_kind: state.status_kind,
+            status_label: state.status.clone(),
+            download_status: Some(state.download_status.clone()),
+            verification_status: state.verification_status.clone(),
+            install_status: Some(state.install_status.clone()),
+            install_ready: state.install_ready,
+            last_error: state.last_error.clone(),
+            last_successful_check_epoch: state.last_successful_check_epoch,
+            downloaded_path: state.download_path.clone(),
+            test_mode_active: state.test_mode_active,
+            test_mode_scenario: state.test_mode_scenario.clone(),
+        });
+        if let Some(snapshot) = state.debug_snapshot.clone() {
+            let _ = crate::update::persist_update_state_snapshot(snapshot);
         }
     }
 
@@ -1174,6 +1207,23 @@ impl MyApp {
         } else {
             "Running automatic update check...".to_string()
         };
+        state.test_mode_active = crate::update::update_test_config().enabled;
+        state.test_mode_scenario = state.test_mode_active.then(|| {
+            crate::update::update_test_config()
+                .scenario
+                .label()
+                .to_string()
+        });
+        crate::update::log_update_event(
+            "check",
+            if manual { "manual" } else { "automatic" },
+            if manual {
+                "Manual update check started."
+            } else {
+                "Automatic update check started."
+            },
+            None,
+        );
         drop(state);
 
         let update_state = Arc::clone(&self.update_state);
@@ -1198,6 +1248,9 @@ impl MyApp {
                     state.last_automatic_check_epoch = last_checked_epoch;
                     state.next_scheduled_check_epoch = next_update_check_epoch(last_checked_epoch);
                 }
+                if let Some(release) = state.latest_release.as_ref() {
+                    state.verification_expected_sha256 = release.expected_sha256.clone();
+                }
                 let plan = build_guided_install_plan(
                     state.latest_release.as_ref(),
                     state.download_path.as_deref(),
@@ -1205,6 +1258,7 @@ impl MyApp {
                 );
                 state.install_ready = plan.ready;
                 state.install_guidance = plan.instructions;
+                MyApp::sync_update_snapshot_locked(&mut state);
             }
             if !manual {
                 let _ = crate::update::persist_automatic_check_epoch(last_checked_epoch);
@@ -1274,22 +1328,55 @@ impl MyApp {
             return;
         };
 
-        let result = crate::update::verify_downloaded_asset(&path, expected_sha256);
-        match result {
-            Ok(message) => {
+        let diagnostics =
+            crate::update::verify_downloaded_asset_diagnostics(&path, expected_sha256);
+        let now = now_epoch();
+        let _ = crate::update::persist_verification_result(
+            diagnostics.expected_sha256.as_deref(),
+            diagnostics.actual_sha256.as_deref(),
+            &diagnostics.status,
+            now,
+        );
+        crate::update::log_update_event(
+            "verify",
+            if diagnostics.verified {
+                "matched"
+            } else {
+                "failed"
+            },
+            &diagnostics.status,
+            Some(&format!(
+                "path={} expected={} actual={}",
+                path.display(),
+                diagnostics
+                    .expected_sha256
+                    .as_deref()
+                    .unwrap_or("unavailable"),
+                diagnostics
+                    .actual_sha256
+                    .as_deref()
+                    .unwrap_or("unavailable")
+            )),
+        );
+        match diagnostics.verified {
+            true => {
+                let message = diagnostics.status.clone();
                 let _ = crate::update::persist_download_result(
                     Some(&release.version),
                     Some(&release.asset_name),
                     Some(&path),
                     &message,
-                    now_epoch(),
+                    now,
                 );
                 if let Ok(mut state) = self.update_state.lock() {
                     state.verification_status = Some(message.clone());
+                    state.verification_expected_sha256 = diagnostics.expected_sha256.clone();
+                    state.verification_actual_sha256 = diagnostics.actual_sha256.clone();
+                    state.last_verification_epoch = now;
                     state.download_path = Some(path.to_string_lossy().to_string());
                     state.downloaded_version = Some(release.version.clone());
                     state.download_status = format!("Verified {}.", release.asset_name);
-                    state.last_download_epoch = now_epoch();
+                    state.last_download_epoch = now;
                     let plan = build_guided_install_plan(
                         state.latest_release.as_ref(),
                         state.download_path.as_deref(),
@@ -1297,22 +1384,28 @@ impl MyApp {
                     );
                     state.install_ready = plan.ready;
                     state.install_guidance = plan.instructions;
+                    MyApp::sync_update_snapshot_locked(&mut state);
                 }
                 self.set_feedback(FeedbackScope::Updater, FeedbackSeverity::Success, message);
             }
-            Err(error) => {
+            false => {
+                let error = diagnostics.status.clone();
                 let _ = crate::update::persist_download_result(
                     Some(&release.version),
                     Some(&release.asset_name),
                     Some(&path),
                     &error,
-                    now_epoch(),
+                    now,
                 );
                 if let Ok(mut state) = self.update_state.lock() {
                     state.verification_status = Some(error.clone());
+                    state.verification_expected_sha256 = diagnostics.expected_sha256.clone();
+                    state.verification_actual_sha256 = diagnostics.actual_sha256.clone();
+                    state.last_verification_epoch = now;
                     state.download_path = Some(path.to_string_lossy().to_string());
                     state.downloaded_version = Some(release.version.clone());
-                    state.last_download_epoch = now_epoch();
+                    state.download_status = error.clone();
+                    state.last_download_epoch = now;
                     let plan = build_guided_install_plan(
                         state.latest_release.as_ref(),
                         state.download_path.as_deref(),
@@ -1320,6 +1413,7 @@ impl MyApp {
                     );
                     state.install_ready = plan.ready;
                     state.install_guidance = plan.instructions;
+                    MyApp::sync_update_snapshot_locked(&mut state);
                 }
                 self.set_feedback(FeedbackScope::Updater, FeedbackSeverity::Error, error);
             }
@@ -1354,6 +1448,219 @@ impl MyApp {
         }
     }
 
+    pub(crate) fn force_redownload_latest_update(&mut self) {
+        let latest = self
+            .update_state
+            .lock()
+            .ok()
+            .and_then(|state| state.latest_release.clone());
+        let Some(release) = latest else {
+            self.set_feedback(
+                FeedbackScope::Updater,
+                FeedbackSeverity::Warning,
+                "No release metadata is available to re-download yet.",
+            );
+            return;
+        };
+
+        let update_state = Arc::clone(&self.update_state);
+        if let Ok(mut state) = update_state.lock() {
+            state.download_in_progress = true;
+            state.download_progress_fraction = Some(0.0);
+            state.download_status = format!("Force re-downloading {}...", release.asset_name);
+            MyApp::sync_update_snapshot_locked(&mut state);
+        }
+        crate::update::log_update_event(
+            "download",
+            "forced",
+            "Force re-download requested from debug controls.",
+            Some(&release.asset_name),
+        );
+
+        thread::spawn(move || {
+            let result = crate::update::download_release_asset(
+                &release.asset_url,
+                &release.asset_name,
+                |downloaded, total| {
+                    if let Ok(mut state) = update_state.lock() {
+                        state.download_progress_fraction = total.map(|total_bytes| {
+                            if total_bytes == 0 {
+                                0.0
+                            } else {
+                                (downloaded as f32 / total_bytes as f32).clamp(0.0, 1.0)
+                            }
+                        });
+                        state.download_status = format!(
+                            "Force re-downloading {} ({})",
+                            release.asset_name,
+                            format_bytes(downloaded)
+                        );
+                    }
+                },
+            );
+
+            match result {
+                Ok(path) => {
+                    let verification = release.expected_sha256.as_deref().map(|expected| {
+                        crate::update::verify_downloaded_asset_diagnostics(&path, expected)
+                    });
+                    if let Some(diagnostics) = verification.as_ref() {
+                        let _ = crate::update::persist_verification_result(
+                            diagnostics.expected_sha256.as_deref(),
+                            diagnostics.actual_sha256.as_deref(),
+                            &diagnostics.status,
+                            now_epoch(),
+                        );
+                    }
+                    let status = verification
+                        .as_ref()
+                        .map(|diag| diag.status.clone())
+                        .unwrap_or_else(|| format!("Downloaded {}.", release.asset_name));
+                    let _ = crate::update::persist_download_result(
+                        Some(&release.version),
+                        Some(&release.asset_name),
+                        Some(&path),
+                        &status,
+                        now_epoch(),
+                    );
+                    if let Ok(mut state) = update_state.lock() {
+                        state.download_in_progress = false;
+                        state.download_progress_fraction = Some(1.0);
+                        state.download_status = status;
+                        state.download_path = Some(path.to_string_lossy().to_string());
+                        state.downloaded_version = Some(release.version.clone());
+                        state.last_download_epoch = now_epoch();
+                        if let Some(diagnostics) = verification {
+                            state.verification_status = Some(diagnostics.status);
+                            state.verification_expected_sha256 = diagnostics.expected_sha256;
+                            state.verification_actual_sha256 = diagnostics.actual_sha256;
+                            state.last_verification_epoch = now_epoch();
+                        }
+                        let plan = build_guided_install_plan(
+                            state.latest_release.as_ref(),
+                            state.download_path.as_deref(),
+                            state.verification_status.as_deref(),
+                        );
+                        state.install_ready = plan.ready;
+                        state.install_guidance = plan.instructions;
+                        MyApp::sync_update_snapshot_locked(&mut state);
+                    }
+                }
+                Err(error) => {
+                    let _ = crate::update::persist_download_result(
+                        None,
+                        None,
+                        None,
+                        &error,
+                        now_epoch(),
+                    );
+                    if let Ok(mut state) = update_state.lock() {
+                        state.download_in_progress = false;
+                        state.download_progress_fraction = None;
+                        state.download_status = error.clone();
+                        state.last_error = Some(error);
+                        MyApp::sync_update_snapshot_locked(&mut state);
+                    }
+                }
+            }
+        });
+    }
+
+    pub(crate) fn clear_update_cache_debug(&mut self) {
+        match crate::update::clear_update_cache() {
+            Ok(()) => {
+                if let Ok(mut state) = self.update_state.lock() {
+                    *state = UpdateCheckState::default();
+                    MyApp::sync_update_snapshot_locked(&mut state);
+                }
+                self.set_feedback(
+                    FeedbackScope::Updater,
+                    FeedbackSeverity::Success,
+                    "Cleared updater cache and reloaded the updater state.",
+                );
+            }
+            Err(error) => self.set_feedback(
+                FeedbackScope::Updater,
+                FeedbackSeverity::Error,
+                format!("Failed to clear updater cache: {error}"),
+            ),
+        }
+    }
+
+    pub(crate) fn rerun_checksum_verification(&mut self) {
+        let snapshot = self.update_state.lock().ok().map(|state| state.clone());
+        let Some(state) = snapshot else {
+            return;
+        };
+        let Some(release) = state.latest_release.as_ref() else {
+            self.set_feedback(
+                FeedbackScope::Updater,
+                FeedbackSeverity::Warning,
+                "No release metadata is available to verify against.",
+            );
+            return;
+        };
+        let Some(expected) = release.expected_sha256.as_deref() else {
+            self.set_feedback(
+                FeedbackScope::Updater,
+                FeedbackSeverity::Warning,
+                "No checksum metadata is available for the current release.",
+            );
+            return;
+        };
+        let Some(path) = state.download_path.as_deref() else {
+            self.set_feedback(
+                FeedbackScope::Updater,
+                FeedbackSeverity::Warning,
+                "No downloaded update is available to verify yet.",
+            );
+            return;
+        };
+        let diagnostics =
+            crate::update::verify_downloaded_asset_diagnostics(Path::new(path), expected);
+        let now = now_epoch();
+        let _ = crate::update::persist_verification_result(
+            diagnostics.expected_sha256.as_deref(),
+            diagnostics.actual_sha256.as_deref(),
+            &diagnostics.status,
+            now,
+        );
+        crate::update::log_update_event(
+            "verify",
+            if diagnostics.verified {
+                "matched"
+            } else {
+                "failed"
+            },
+            "Checksum verification re-run from updater debug controls.",
+            Some(&diagnostics.status),
+        );
+        if let Ok(mut state) = self.update_state.lock() {
+            state.verification_status = Some(diagnostics.status.clone());
+            state.verification_expected_sha256 = diagnostics.expected_sha256.clone();
+            state.verification_actual_sha256 = diagnostics.actual_sha256.clone();
+            state.last_verification_epoch = now;
+            state.download_status = diagnostics.status.clone();
+            let plan = build_guided_install_plan(
+                state.latest_release.as_ref(),
+                state.download_path.as_deref(),
+                state.verification_status.as_deref(),
+            );
+            state.install_ready = plan.ready;
+            state.install_guidance = plan.instructions;
+            MyApp::sync_update_snapshot_locked(&mut state);
+        }
+        self.set_feedback(
+            FeedbackScope::Updater,
+            if diagnostics.verified {
+                FeedbackSeverity::Success
+            } else {
+                FeedbackSeverity::Error
+            },
+            diagnostics.status,
+        );
+    }
+
     pub(crate) fn install_downloaded_update(&mut self) {
         let state_snapshot = self.update_state.lock().ok().map(|state| state.clone());
         let Some(state_snapshot) = state_snapshot else {
@@ -1386,11 +1693,19 @@ impl MyApp {
             return;
         }
 
-        let result = if plan.launch_installer {
+        let result = if let Some(message) = crate::update::simulated_install_failure_message(path) {
+            Err(message)
+        } else if plan.launch_installer {
             open_external_target(path)
         } else {
             reveal_in_file_manager(Path::new(path))
         };
+        crate::update::log_update_event(
+            "install",
+            "started",
+            "Guided install flow started from the GUI.",
+            Some(&format!("path={} action={}", path, plan.action_label)),
+        );
 
         match result {
             Ok(()) => {
@@ -1409,7 +1724,9 @@ impl MyApp {
                     state.last_install_attempt_epoch = now_epoch();
                     state.restart_required_after_install = plan.restart_required_after_install;
                     state.install_guidance = plan.instructions.clone();
+                    MyApp::sync_update_snapshot_locked(&mut state);
                 }
+                crate::update::log_update_event("install", "completed", status, None);
                 self.set_feedback(FeedbackScope::Updater, FeedbackSeverity::Success, status);
             }
             Err(error) => {
@@ -1419,7 +1736,9 @@ impl MyApp {
                     state.install_status = status.clone();
                     state.last_install_attempt_epoch = now_epoch();
                     state.restart_required_after_install = false;
+                    MyApp::sync_update_snapshot_locked(&mut state);
                 }
+                crate::update::log_update_event("install", "failed", &status, None);
                 self.set_feedback(FeedbackScope::Updater, FeedbackSeverity::Error, status);
             }
         }
@@ -4411,6 +4730,7 @@ fn maybe_auto_download_update(update_state: &Arc<Mutex<UpdateCheckState>>) {
         state.download_in_progress = true;
         state.download_progress_fraction = Some(0.0);
         state.download_status = format!("Downloading {} in the background...", release.asset_name);
+        MyApp::sync_update_snapshot_locked(&mut state);
     }
 
     let update_state = Arc::clone(update_state);
@@ -4447,15 +4767,18 @@ fn maybe_auto_download_update(update_state: &Arc<Mutex<UpdateCheckState>>) {
 
         match result {
             Ok(path) => {
-                let verification = release
-                    .expected_sha256
-                    .as_deref()
-                    .map(|expected| crate::update::verify_downloaded_asset(&path, expected));
-                let verification_message = match verification {
-                    Some(Ok(message)) => Some(message),
-                    Some(Err(error)) => Some(error),
-                    None => None,
-                };
+                let verification = release.expected_sha256.as_deref().map(|expected| {
+                    crate::update::verify_downloaded_asset_diagnostics(&path, expected)
+                });
+                if let Some(diagnostics) = verification.as_ref() {
+                    let _ = crate::update::persist_verification_result(
+                        diagnostics.expected_sha256.as_deref(),
+                        diagnostics.actual_sha256.as_deref(),
+                        &diagnostics.status,
+                        now_epoch(),
+                    );
+                }
+                let verification_message = verification.as_ref().map(|diag| diag.status.clone());
                 let status = verification_message
                     .clone()
                     .unwrap_or_else(|| format!("Downloaded {}.", release.asset_name));
@@ -4473,8 +4796,11 @@ fn maybe_auto_download_update(update_state: &Arc<Mutex<UpdateCheckState>>) {
                     state.download_path = Some(path.to_string_lossy().to_string());
                     state.downloaded_version = Some(release.version.clone());
                     state.last_download_epoch = now_epoch();
-                    if let Some(message) = verification_message {
-                        state.verification_status = Some(message);
+                    if let Some(diagnostics) = verification {
+                        state.verification_status = Some(diagnostics.status);
+                        state.verification_expected_sha256 = diagnostics.expected_sha256;
+                        state.verification_actual_sha256 = diagnostics.actual_sha256;
+                        state.last_verification_epoch = now_epoch();
                     }
                     let plan = build_guided_install_plan(
                         state.latest_release.as_ref(),
@@ -4483,6 +4809,7 @@ fn maybe_auto_download_update(update_state: &Arc<Mutex<UpdateCheckState>>) {
                     );
                     state.install_ready = plan.ready;
                     state.install_guidance = plan.instructions;
+                    MyApp::sync_update_snapshot_locked(&mut state);
                 }
             }
             Err(error) => {
@@ -4500,6 +4827,7 @@ fn maybe_auto_download_update(update_state: &Arc<Mutex<UpdateCheckState>>) {
                     );
                     state.install_ready = plan.ready;
                     state.install_guidance = plan.instructions;
+                    MyApp::sync_update_snapshot_locked(&mut state);
                 }
             }
         }
@@ -4970,5 +5298,51 @@ mod tests {
             Some("SHA-256 verified successfully for ProjectX-macos.dmg."),
         );
         assert!(plan.ready);
+    }
+
+    #[test]
+    fn update_snapshot_tracks_latest_release_and_install_state() {
+        let mut state = UpdateCheckState::default();
+        state.current_version = "1.0.0".to_string();
+        state.status = "Update available.".to_string();
+        state.status_kind = UpdateStatusKind::UpdateAvailable;
+        state.latest_release = Some(AvailableUpdate {
+            version: "1.1.0".to_string(),
+            tag_name: "v1.1.0".to_string(),
+            asset_name: "ProjectX-macos.dmg".to_string(),
+            ..AvailableUpdate::default()
+        });
+        state.download_status = "Downloaded ProjectX-macos.dmg.".to_string();
+        state.install_status = "Ready to install.".to_string();
+        state.install_ready = true;
+
+        MyApp::sync_update_snapshot_locked(&mut state);
+
+        let snapshot = state.debug_snapshot.expect("snapshot");
+        assert_eq!(snapshot.current_version, "1.0.0");
+        assert_eq!(snapshot.latest_version.as_deref(), Some("1.1.0"));
+        assert_eq!(
+            snapshot.selected_asset_name.as_deref(),
+            Some("ProjectX-macos.dmg")
+        );
+        assert!(snapshot.install_ready);
+    }
+
+    #[test]
+    fn rerun_checksum_verification_requires_downloaded_path() {
+        let mut app = MyApp::default();
+        if let Ok(mut state) = app.update_state.lock() {
+            state.latest_release = Some(AvailableUpdate {
+                version: "1.1.0".to_string(),
+                asset_name: "ProjectX-macos.dmg".to_string(),
+                expected_sha256: Some("a".repeat(64)),
+                ..AvailableUpdate::default()
+            });
+        }
+        app.rerun_checksum_verification();
+        assert!(app
+            .feedback(FeedbackScope::Updater)
+            .map(|feedback| feedback.message.contains("No downloaded update"))
+            .unwrap_or(false));
     }
 }

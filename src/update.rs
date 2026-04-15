@@ -2,9 +2,11 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
-use std::path::Path;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use chrono::{Local, TimeZone};
 use reqwest::blocking::{Client, RequestBuilder};
 use reqwest::header::{HeaderMap, ACCEPT, AUTHORIZATION, USER_AGENT};
 use serde::{Deserialize, Serialize};
@@ -16,6 +18,13 @@ const API_BASE: &str = "https://api.github.com";
 const GITHUB_API_VERSION: &str = "2022-11-28";
 const UPDATE_TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_CACHE_ATTEMPTS: usize = 6;
+const MAX_LOG_LINES: usize = 200;
+const TEST_MODE_ENV: &str = "PROJECTX_UPDATE_TEST_MODE";
+const TEST_SCENARIO_ENV: &str = "PROJECTX_UPDATE_TEST_SCENARIO";
+const TEST_RELEASES_FILE_ENV: &str = "PROJECTX_UPDATE_TEST_RELEASES_FILE";
+
+const SIMULATED_UPDATE_BYTES: &[u8] = b"ProjectX simulated update payload\n";
+const SIMULATED_NO_UPDATE_BYTES: &[u8] = b"ProjectX simulated current payload\n";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum UpdateStatusKind {
@@ -80,6 +89,8 @@ pub struct ReleaseInfo {
     pub checksum_asset_url: Option<String>,
     pub expected_sha256: Option<String>,
     pub checksum_status: String,
+    #[serde(default)]
+    pub checksum_debug_detail: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,6 +130,18 @@ pub struct UpdateCache {
     pub last_install_attempt_epoch: u64,
     #[serde(default)]
     pub restart_required_after_install: bool,
+    #[serde(default)]
+    pub last_verification_status: Option<String>,
+    #[serde(default)]
+    pub last_verification_expected_sha256: Option<String>,
+    #[serde(default)]
+    pub last_verification_actual_sha256: Option<String>,
+    #[serde(default)]
+    pub last_verification_epoch: u64,
+    #[serde(default)]
+    pub cache_validation_note: Option<String>,
+    #[serde(default)]
+    pub last_snapshot: Option<UpdateStateSnapshot>,
 }
 
 #[derive(Debug, Clone)]
@@ -146,6 +169,31 @@ pub struct CachedUpdateUiState {
     pub last_install_status: Option<String>,
     pub last_install_attempt_epoch: u64,
     pub restart_required_after_install: bool,
+    pub last_verification_status: Option<String>,
+    pub last_verification_expected_sha256: Option<String>,
+    pub last_verification_actual_sha256: Option<String>,
+    pub last_verification_epoch: u64,
+    pub cache_validation_note: Option<String>,
+    pub last_snapshot: Option<UpdateStateSnapshot>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UpdateStateSnapshot {
+    pub current_version: String,
+    pub latest_version: Option<String>,
+    pub selected_release_tag: Option<String>,
+    pub selected_asset_name: Option<String>,
+    pub status_kind: UpdateStatusKind,
+    pub status_label: String,
+    pub download_status: Option<String>,
+    pub verification_status: Option<String>,
+    pub install_status: Option<String>,
+    pub install_ready: bool,
+    pub last_error: Option<String>,
+    pub last_successful_check_epoch: u64,
+    pub downloaded_path: Option<String>,
+    pub test_mode_active: bool,
+    pub test_mode_scenario: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,6 +202,46 @@ pub struct GitHubReleaseConfig {
     pub repo: String,
     pub token: Option<String>,
     pub include_prereleases: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateTestConfig {
+    pub enabled: bool,
+    pub scenario: UpdateTestScenario,
+    pub releases_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateTestScenario {
+    Live,
+    UpdateAvailable,
+    NoUpdate,
+    InvalidChecksum,
+    FailedDownload,
+    MissingAsset,
+    AmbiguousAsset,
+    VersionDowngrade,
+    Offline,
+    RateLimited,
+    InstallFailure,
+}
+
+impl UpdateTestScenario {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Live => "live",
+            Self::UpdateAvailable => "update_available",
+            Self::NoUpdate => "no_update",
+            Self::InvalidChecksum => "invalid_checksum",
+            Self::FailedDownload => "failed_download",
+            Self::MissingAsset => "missing_asset",
+            Self::AmbiguousAsset => "ambiguous_asset",
+            Self::VersionDowngrade => "version_downgrade",
+            Self::Offline => "offline",
+            Self::RateLimited => "rate_limited",
+            Self::InstallFailure => "install_failure",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -214,19 +302,68 @@ pub fn check_for_updates(now_epoch: u64) -> UpdateCheckReport {
     let config = github_release_config();
     let current_version = env!("CARGO_PKG_VERSION").to_string();
     let cached = load_update_cache();
+    let test_config = update_test_config();
+
+    log_update_event(
+        "check",
+        "started",
+        &format!(
+            "Checking GitHub releases for {}/{}.",
+            config.owner, config.repo
+        ),
+        Some(&format!(
+            "current_version={} prereleases={} test_mode={} scenario={}",
+            current_version,
+            config.include_prereleases,
+            test_config.enabled,
+            test_config.scenario.label()
+        )),
+    );
+
+    if test_config.enabled {
+        let report = simulate_update_check(
+            &config,
+            &current_version,
+            now_epoch,
+            cached.clone(),
+            &test_config,
+        );
+        let _ = save_update_cache(&config, &report, now_epoch);
+        log_update_report_completion(&report);
+        return report;
+    }
 
     match build_client().and_then(|client| fetch_release(&client, &config)) {
         Ok(release) => {
             let report = build_success_report(&config, current_version, release, now_epoch, false);
             let _ = save_update_cache(&config, &report, now_epoch);
+            log_update_report_completion(&report);
             report
         }
         Err(failure) => {
             let report = build_failure_report(&config, current_version, now_epoch, failure, cached);
             let _ = save_update_cache(&config, &report, now_epoch);
+            log_update_report_completion(&report);
             report
         }
     }
+}
+
+pub fn update_test_config() -> UpdateTestConfig {
+    let env_map = std::env::vars().collect::<HashMap<_, _>>();
+    UpdateTestConfig {
+        enabled: env_value(&env_map, TEST_MODE_ENV)
+            .map(parse_env_bool)
+            .unwrap_or(false),
+        scenario: env_value(&env_map, TEST_SCENARIO_ENV)
+            .map(parse_update_test_scenario)
+            .unwrap_or(UpdateTestScenario::Live),
+        releases_file: env_value(&env_map, TEST_RELEASES_FILE_ENV).map(PathBuf::from),
+    }
+}
+
+pub fn updater_debug_actions_enabled() -> bool {
+    cfg!(debug_assertions) || update_test_config().enabled
 }
 
 pub fn github_release_config() -> GitHubReleaseConfig {
@@ -255,6 +392,46 @@ pub fn verify_downloaded_asset(path: &Path, expected_sha256: &str) -> Result<Str
     }
 }
 
+pub fn verify_downloaded_asset_diagnostics(
+    path: &Path,
+    expected_sha256: &str,
+) -> VerificationDiagnostics {
+    let expected = normalize_sha256(expected_sha256);
+    let actual = sha256_file(path).ok();
+    let status = match (expected.as_deref(), actual.as_deref()) {
+        (None, _) => "Expected SHA-256 metadata is malformed.".to_string(),
+        (_, None) => format!("Could not calculate SHA-256 for {}.", path.display()),
+        (Some(expected), Some(actual)) if expected.eq_ignore_ascii_case(actual) => format!(
+            "SHA-256 verified successfully for {}.",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("selected file")
+        ),
+        (Some(expected), Some(actual)) => {
+            format!("SHA-256 verification failed. Expected {expected}, got {actual}.")
+        }
+    };
+    VerificationDiagnostics {
+        expected_sha256: expected.clone(),
+        actual_sha256: actual.clone(),
+        status,
+        verified: expected.is_some()
+            && actual
+                .as_deref()
+                .zip(expected.as_deref())
+                .map(|(actual, expected)| actual.eq_ignore_ascii_case(expected))
+                .unwrap_or(false),
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VerificationDiagnostics {
+    pub expected_sha256: Option<String>,
+    pub actual_sha256: Option<String>,
+    pub status: String,
+    pub verified: bool,
+}
+
 pub fn load_cached_update_ui_state() -> Option<CachedUpdateUiState> {
     let cache = load_update_cache()?;
     Some(CachedUpdateUiState {
@@ -266,12 +443,28 @@ pub fn load_cached_update_ui_state() -> Option<CachedUpdateUiState> {
         last_install_status: cache.last_install_status,
         last_install_attempt_epoch: cache.last_install_attempt_epoch,
         restart_required_after_install: cache.restart_required_after_install,
+        last_verification_status: cache.last_verification_status,
+        last_verification_expected_sha256: cache.last_verification_expected_sha256,
+        last_verification_actual_sha256: cache.last_verification_actual_sha256,
+        last_verification_epoch: cache.last_verification_epoch,
+        cache_validation_note: cache.cache_validation_note,
+        last_snapshot: cache.last_snapshot,
     })
+}
+
+pub fn load_cached_update_snapshot() -> Option<UpdateStateSnapshot> {
+    load_update_cache().and_then(|cache| cache.last_snapshot)
 }
 
 pub fn persist_automatic_check_epoch(now_epoch: u64) -> Result<(), String> {
     mutate_update_cache(|cache| {
         cache.last_automatic_check_epoch = now_epoch;
+    })
+}
+
+pub fn persist_update_state_snapshot(snapshot: UpdateStateSnapshot) -> Result<(), String> {
+    mutate_update_cache(|cache| {
+        cache.last_snapshot = Some(snapshot);
     })
 }
 
@@ -292,6 +485,20 @@ pub fn persist_download_result(
     })
 }
 
+pub fn persist_verification_result(
+    expected_sha256: Option<&str>,
+    actual_sha256: Option<&str>,
+    status: &str,
+    now_epoch: u64,
+) -> Result<(), String> {
+    mutate_update_cache(|cache| {
+        cache.last_verification_expected_sha256 = expected_sha256.map(str::to_string);
+        cache.last_verification_actual_sha256 = actual_sha256.map(str::to_string);
+        cache.last_verification_status = Some(status.to_string());
+        cache.last_verification_epoch = now_epoch;
+    })
+}
+
 pub fn persist_install_result(
     status: &str,
     now_epoch: u64,
@@ -304,6 +511,38 @@ pub fn persist_install_result(
     })
 }
 
+pub fn clear_update_cache() -> Result<(), String> {
+    let path = crate::app_paths::update_cache_path();
+    if !path.exists() {
+        return Ok(());
+    }
+    fs::remove_file(&path)
+        .map_err(|error| format!("Failed to remove {}: {error}", path.display()))?;
+    log_update_event(
+        "cache",
+        "cleared",
+        "Updater cache was cleared.",
+        Some(&path.display().to_string()),
+    );
+    Ok(())
+}
+
+pub fn recent_update_log_lines(limit: usize) -> Vec<String> {
+    let path = crate::app_paths::update_log_path();
+    let Ok(text) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let mut lines = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if lines.len() > limit {
+        lines.drain(0..lines.len() - limit);
+    }
+    lines
+}
+
 pub fn download_release_asset<F>(
     asset_url: &str,
     asset_name: &str,
@@ -312,8 +551,19 @@ pub fn download_release_asset<F>(
 where
     F: FnMut(u64, Option<u64>),
 {
+    let test_config = update_test_config();
+    if test_config.enabled {
+        return simulate_download_release_asset(asset_url, asset_name, &test_config, on_progress);
+    }
+
     let config = github_release_config();
     let client = build_client().map_err(fetch_failure_message)?;
+    log_update_event(
+        "download",
+        "started",
+        &format!("Downloading {}.", asset_name),
+        Some(asset_url),
+    );
     let mut response = apply_request_headers(client.get(asset_url), &config)
         .send()
         .map_err(classify_request_error)
@@ -350,6 +600,15 @@ where
         downloaded = downloaded.saturating_add(read as u64);
         on_progress(downloaded, total);
     }
+    log_update_event(
+        "download",
+        "completed",
+        &format!("Downloaded {}.", asset_name),
+        Some(&format!(
+            "path={} bytes={downloaded}",
+            output_path.display()
+        )),
+    );
     Ok(output_path)
 }
 
@@ -398,6 +657,18 @@ fn build_success_report(
     used_cached_release: bool,
 ) -> UpdateCheckReport {
     let has_update = is_version_newer(&release.version, &current_version);
+    log_update_event(
+        "check",
+        "release_selected",
+        &format!(
+            "Selected release {} ({})",
+            release.tag_name, release.version
+        ),
+        Some(&format!(
+            "asset={} reason={} checksum_status={}",
+            release.asset_name, release.asset_match_reason, release.checksum_status
+        )),
+    );
     let status_kind = if has_update {
         UpdateStatusKind::UpdateAvailable
     } else {
@@ -436,12 +707,27 @@ fn build_failure_report(
         FetchFailure::RateLimited(message) => (UpdateStatusKind::RateLimited, message),
         FetchFailure::Error(message) => (UpdateStatusKind::Error, message),
     };
+    log_update_event(
+        "check",
+        "failed",
+        status_prefix(status_kind),
+        Some(&error_message),
+    );
 
     let cached_release = cached
         .filter(|cache| cache.owner == config.owner && cache.repo == config.repo)
         .and_then(|cache| cache.latest_release.clone().map(|release| (cache, release)));
 
     if let Some((cache, release)) = cached_release {
+        log_update_event(
+            "cache",
+            "used",
+            "Using cached release metadata after update-check failure.",
+            Some(&format!(
+                "release={} cached_at={}",
+                release.version, cache.last_successful_check_epoch
+            )),
+        );
         let has_update = is_version_newer(&release.version, &current_version);
         return UpdateCheckReport {
             current_version,
@@ -632,6 +918,7 @@ fn select_release(
                         checksum_asset_url: checksum.asset_url,
                         expected_sha256: checksum.sha256,
                         checksum_status: checksum.status,
+                        checksum_debug_detail: checksum.debug_detail,
                     },
                 });
             }
@@ -645,7 +932,18 @@ fn select_release(
     candidates
         .into_iter()
         .next()
-        .map(|candidate| candidate.release)
+        .map(|candidate| {
+            log_update_event(
+                "check",
+                "candidate_selected",
+                &format!("Release candidate {} selected.", candidate.release.tag_name),
+                Some(&format!(
+                    "version={} published_at={}",
+                    candidate.release.version, candidate.release.published_at
+                )),
+            );
+            candidate.release
+        })
         .ok_or_else(|| {
             let mut message =
                 "No suitable published release asset was found for this platform.".to_string();
@@ -776,6 +1074,7 @@ fn resolve_checksum_for_asset(
                 asset_url: None,
                 sha256: None,
                 status: "No matching SHA-256 asset was published for this release.".to_string(),
+                debug_detail: Some(format!("No checksum asset matched {}.", asset.name)),
             })
         }
         [single] => (*single).clone(),
@@ -791,6 +1090,14 @@ fn resolve_checksum_for_asset(
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
+                debug_detail: Some(format!(
+                    "Ambiguous checksum assets for {}: {}",
+                    asset.name,
+                    many.iter()
+                        .map(|asset| asset.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )),
             })
         }
     };
@@ -813,6 +1120,10 @@ fn resolve_checksum_for_asset(
             sha256: None,
             status: "A checksum asset exists, but ProjectX could not parse a SHA-256 value for the selected download."
                 .to_string(),
+            debug_detail: Some(format!(
+                "Could not parse SHA-256 for {} from {}.",
+                asset.name, checksum_asset.name
+            )),
         });
     };
 
@@ -821,6 +1132,10 @@ fn resolve_checksum_for_asset(
         asset_url: Some(checksum_asset.browser_download_url.clone()),
         sha256: Some(sha256),
         status: format!("SHA-256 metadata is available in {}.", checksum_asset.name),
+        debug_detail: Some(format!(
+            "Checksum asset {} resolved for {}.",
+            checksum_asset.name, asset.name
+        )),
     })
 }
 
@@ -870,8 +1185,19 @@ fn sha256_file(path: &Path) -> Result<String, String> {
 
 fn load_update_cache() -> Option<UpdateCache> {
     let path = crate::app_paths::update_cache_path();
-    let text = fs::read_to_string(path).ok()?;
-    serde_json::from_str::<UpdateCache>(&text).ok()
+    let text = fs::read_to_string(&path).ok()?;
+    match serde_json::from_str::<UpdateCache>(&text) {
+        Ok(cache) => Some(validate_update_cache(cache)),
+        Err(error) => {
+            log_update_event(
+                "cache",
+                "invalid",
+                "Updater cache could not be parsed and will be ignored.",
+                Some(&format!("path={} error={error}", path.display())),
+            );
+            None
+        }
+    }
 }
 
 fn mutate_update_cache(mutator: impl FnOnce(&mut UpdateCache)) -> Result<(), String> {
@@ -895,6 +1221,12 @@ fn mutate_update_cache(mutator: impl FnOnce(&mut UpdateCache)) -> Result<(), Str
         last_install_status: None,
         last_install_attempt_epoch: 0,
         restart_required_after_install: false,
+        last_verification_status: None,
+        last_verification_expected_sha256: None,
+        last_verification_actual_sha256: None,
+        last_verification_epoch: 0,
+        cache_validation_note: None,
+        last_snapshot: None,
     });
     mutator(&mut cache);
     write_update_cache(&cache)
@@ -924,6 +1256,12 @@ fn save_update_cache(
         last_install_status: None,
         last_install_attempt_epoch: 0,
         restart_required_after_install: false,
+        last_verification_status: None,
+        last_verification_expected_sha256: None,
+        last_verification_actual_sha256: None,
+        last_verification_epoch: 0,
+        cache_validation_note: None,
+        last_snapshot: None,
     });
 
     cache.owner = config.owner.clone();
@@ -951,6 +1289,30 @@ fn save_update_cache(
         let drain = cache.recent_attempts.len() - MAX_CACHE_ATTEMPTS;
         cache.recent_attempts.drain(0..drain);
     }
+    let snapshot = cache
+        .last_snapshot
+        .get_or_insert_with(UpdateStateSnapshot::default);
+    snapshot.status_kind = report.status_kind;
+    snapshot.status_label = report.status_label.clone();
+    snapshot.last_error = report.last_error.clone();
+    snapshot.last_successful_check_epoch = report.last_successful_check_epoch;
+    snapshot.current_version = report.current_version.clone();
+    snapshot.latest_version = report
+        .latest_release
+        .as_ref()
+        .map(|release| release.version.clone());
+    snapshot.selected_release_tag = report
+        .latest_release
+        .as_ref()
+        .map(|release| release.tag_name.clone());
+    snapshot.selected_asset_name = report
+        .latest_release
+        .as_ref()
+        .map(|release| release.asset_name.clone());
+    snapshot.test_mode_active = update_test_config().enabled;
+    snapshot.test_mode_scenario = update_test_config()
+        .enabled
+        .then(|| update_test_config().scenario.label().to_string());
 
     write_update_cache(&cache)
 }
@@ -964,6 +1326,363 @@ fn write_update_cache(cache: &UpdateCache) -> Result<(), String> {
     let text = serde_json::to_string_pretty(cache)
         .map_err(|error| format!("Failed to serialize update cache: {error}"))?;
     fs::write(path, text).map_err(|error| format!("Failed to write update cache: {error}"))
+}
+
+fn validate_update_cache(mut cache: UpdateCache) -> UpdateCache {
+    let mut notes = Vec::new();
+
+    if cache.owner.trim().is_empty() || cache.repo.trim().is_empty() {
+        notes.push("cache owner/repo metadata was incomplete".to_string());
+        let config = github_release_config();
+        cache.owner = config.owner;
+        cache.repo = config.repo;
+        cache.include_prereleases = config.include_prereleases;
+    }
+
+    if cache.recent_attempts.len() > MAX_CACHE_ATTEMPTS {
+        let drain = cache.recent_attempts.len() - MAX_CACHE_ATTEMPTS;
+        cache.recent_attempts.drain(0..drain);
+        notes.push("recent attempt history was truncated to the supported limit".to_string());
+    }
+
+    if let Some(release) = cache.latest_release.as_mut() {
+        if release.version.trim().is_empty()
+            || release.tag_name.trim().is_empty()
+            || release.asset_name.trim().is_empty()
+            || release.asset_url.trim().is_empty()
+        {
+            cache.latest_release = None;
+            notes.push("cached release metadata was incomplete and was cleared".to_string());
+        } else if let Some(expected) = release.expected_sha256.clone() {
+            if let Some(normalized) = normalize_sha256(&expected) {
+                release.expected_sha256 = Some(normalized);
+            } else {
+                release.expected_sha256 = None;
+                release.checksum_status =
+                    "Cached checksum metadata was malformed and was cleared.".to_string();
+                notes.push("cached checksum metadata was malformed and was cleared".to_string());
+            }
+        }
+    }
+
+    if let Some(path) = cache.last_downloaded_asset_path.clone() {
+        if !Path::new(&path).exists() {
+            cache.last_downloaded_asset_path = None;
+            cache.last_downloaded_asset_name = None;
+            cache.last_downloaded_version = None;
+            cache.last_download_status =
+                Some("Previously downloaded update file is no longer present on disk.".to_string());
+            notes.push("cached downloaded-file path no longer exists".to_string());
+        }
+    } else {
+        cache.last_downloaded_asset_name = None;
+        cache.last_downloaded_version = None;
+    }
+
+    cache.cache_validation_note = if notes.is_empty() {
+        None
+    } else {
+        let note = notes.join("; ");
+        log_update_event(
+            "cache",
+            "validated",
+            "Updater cache was sanitized during load.",
+            Some(&note),
+        );
+        Some(note)
+    };
+
+    cache
+}
+
+fn log_update_report_completion(report: &UpdateCheckReport) {
+    log_update_event(
+        "check",
+        "completed",
+        &report.status_label,
+        Some(&format!(
+            "status={} latest={} cached={} error={}",
+            report.status_kind.as_str(),
+            report
+                .latest_release
+                .as_ref()
+                .map(|release| release.version.as_str())
+                .unwrap_or("none"),
+            report.used_cached_release,
+            report.last_error.as_deref().unwrap_or("none")
+        )),
+    );
+}
+
+pub fn log_update_event(stage: &str, status: &str, message: &str, detail: Option<&str>) {
+    let path = crate::app_paths::update_log_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+
+    let timestamp_epoch = chrono::Utc::now().timestamp().max(0) as u64;
+    let timestamp = Local
+        .timestamp_opt(timestamp_epoch as i64, 0)
+        .single()
+        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_else(|| timestamp_epoch.to_string());
+    let mut line = format!(
+        "[{timestamp}] [{}] [{}] {}",
+        status.to_ascii_uppercase(),
+        stage,
+        message
+    );
+    if let Some(detail) = detail.filter(|detail| !detail.trim().is_empty()) {
+        line.push_str(" | ");
+        line.push_str(detail);
+    }
+    line.push('\n');
+
+    if let Ok(mut existing) = fs::read_to_string(&path) {
+        existing.push_str(&line);
+        let lines = existing.lines().collect::<Vec<_>>();
+        if lines.len() > MAX_LOG_LINES {
+            let trimmed = lines[lines.len() - MAX_LOG_LINES..].join("\n");
+            let _ = fs::write(&path, format!("{trimmed}\n"));
+        } else {
+            let _ = fs::write(&path, existing);
+        }
+    } else if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = file.write_all(line.as_bytes());
+    }
+}
+
+fn simulate_update_check(
+    config: &GitHubReleaseConfig,
+    current_version: &str,
+    now_epoch: u64,
+    cached: Option<UpdateCache>,
+    test_config: &UpdateTestConfig,
+) -> UpdateCheckReport {
+    log_update_event(
+        "test_mode",
+        "active",
+        "Updater test mode is active.",
+        Some(&format!("scenario={}", test_config.scenario.label())),
+    );
+
+    match test_config.scenario {
+        UpdateTestScenario::Offline => build_failure_report(
+            config,
+            current_version.to_string(),
+            now_epoch,
+            FetchFailure::Offline("Test mode simulated an offline update check.".to_string()),
+            cached,
+        ),
+        UpdateTestScenario::RateLimited => build_failure_report(
+            config,
+            current_version.to_string(),
+            now_epoch,
+            FetchFailure::RateLimited(
+                "Test mode simulated a GitHub API rate-limit response.".to_string(),
+            ),
+            cached,
+        ),
+        UpdateTestScenario::MissingAsset => build_failure_report(
+            config,
+            current_version.to_string(),
+            now_epoch,
+            FetchFailure::Error(
+                "Test mode simulated a release with no compatible asset.".to_string(),
+            ),
+            cached,
+        ),
+        UpdateTestScenario::AmbiguousAsset => build_failure_report(
+            config,
+            current_version.to_string(),
+            now_epoch,
+            FetchFailure::Error(
+                "Test mode simulated an ambiguous release with multiple equally valid assets."
+                    .to_string(),
+            ),
+            cached,
+        ),
+        _ => {
+            if let Some(releases) =
+                load_test_releases_from_file(test_config.releases_file.as_deref())
+            {
+                let release = releases.into_iter().next().unwrap_or_else(|| {
+                    simulated_release(config, current_version, &test_config.scenario)
+                });
+                build_success_report(
+                    config,
+                    current_version.to_string(),
+                    release,
+                    now_epoch,
+                    false,
+                )
+            } else {
+                build_success_report(
+                    config,
+                    current_version.to_string(),
+                    simulated_release(config, current_version, &test_config.scenario),
+                    now_epoch,
+                    false,
+                )
+            }
+        }
+    }
+}
+
+fn load_test_releases_from_file(path: Option<&Path>) -> Option<Vec<ReleaseInfo>> {
+    let path = path?;
+    let text = fs::read_to_string(path).ok()?;
+    let releases = serde_json::from_str::<Vec<ReleaseInfo>>(&text).ok()?;
+    (!releases.is_empty()).then_some(releases)
+}
+
+fn simulated_release(
+    config: &GitHubReleaseConfig,
+    current_version: &str,
+    scenario: &UpdateTestScenario,
+) -> ReleaseInfo {
+    let version = match scenario {
+        UpdateTestScenario::NoUpdate => normalize_version_label(current_version),
+        UpdateTestScenario::VersionDowngrade => simulated_previous_patch_version(current_version),
+        _ => simulated_next_patch_version(current_version),
+    };
+    let tag_name = format!("v{version}");
+    let asset_name = simulated_asset_name();
+    let payload_hash = sha256_bytes(match scenario {
+        UpdateTestScenario::NoUpdate => SIMULATED_NO_UPDATE_BYTES,
+        _ => SIMULATED_UPDATE_BYTES,
+    });
+    let expected_sha256 = match scenario {
+        UpdateTestScenario::InvalidChecksum => Some("f".repeat(64)),
+        UpdateTestScenario::FailedDownload => Some(payload_hash.clone()),
+        UpdateTestScenario::InstallFailure => Some(payload_hash.clone()),
+        _ => Some(payload_hash.clone()),
+    };
+    let checksum_status = if matches!(scenario, UpdateTestScenario::InvalidChecksum) {
+        "Test mode published a checksum that will not match the downloaded package.".to_string()
+    } else {
+        "Test mode checksum metadata is available.".to_string()
+    };
+
+    ReleaseInfo {
+        version,
+        tag_name: tag_name.clone(),
+        published_at: "2026-04-15T12:00:00Z".to_string(),
+        html_url: format!(
+            "https://github.com/{}/{}/releases/tag/{}",
+            config.owner, config.repo, tag_name
+        ),
+        body: format!("Simulated updater scenario: {}.", scenario.label()),
+        asset_name: asset_name.clone(),
+        asset_url: format!("projectx-test://{}", scenario.label()),
+        asset_content_type: simulated_content_type(&asset_name).to_string(),
+        asset_match_reason: format!("test mode scenario {}", scenario.label()),
+        checksum_asset_name: Some(format!("{asset_name}.sha256")),
+        checksum_asset_url: Some(format!("projectx-test://{}.sha256", scenario.label())),
+        expected_sha256,
+        checksum_status,
+        checksum_debug_detail: Some(format!(
+            "Test mode scenario {} supplied checksum metadata.",
+            scenario.label()
+        )),
+    }
+}
+
+fn simulate_download_release_asset<F>(
+    _asset_url: &str,
+    asset_name: &str,
+    test_config: &UpdateTestConfig,
+    mut on_progress: F,
+) -> Result<PathBuf, String>
+where
+    F: FnMut(u64, Option<u64>),
+{
+    if matches!(test_config.scenario, UpdateTestScenario::FailedDownload) {
+        let message = "Test mode simulated a failed update download.".to_string();
+        log_update_event("download", "failed", &message, Some(asset_name));
+        return Err(message);
+    }
+
+    let output_dir = crate::app_paths::update_download_dir();
+    fs::create_dir_all(&output_dir)
+        .map_err(|error| format!("Failed to create update-download directory: {error}"))?;
+    let output_path = unique_download_path(&output_dir, asset_name);
+    let bytes = if matches!(test_config.scenario, UpdateTestScenario::NoUpdate) {
+        SIMULATED_NO_UPDATE_BYTES
+    } else {
+        SIMULATED_UPDATE_BYTES
+    };
+    on_progress(0, Some(bytes.len() as u64));
+    fs::write(&output_path, bytes)
+        .map_err(|error| format!("Failed to create simulated update package: {error}"))?;
+    on_progress(bytes.len() as u64, Some(bytes.len() as u64));
+    log_update_event(
+        "download",
+        "completed",
+        "Simulated update package written.",
+        Some(&format!(
+            "path={} scenario={}",
+            output_path.display(),
+            test_config.scenario.label()
+        )),
+    );
+    Ok(output_path)
+}
+
+fn simulated_asset_name() -> String {
+    match current_target_os() {
+        TargetOs::MacOs => "ProjectX-macos.dmg".to_string(),
+        TargetOs::Windows => "ProjectX-windows-x86_64.exe".to_string(),
+        TargetOs::Linux => "ProjectX-linux-x86_64.tar.gz".to_string(),
+    }
+}
+
+fn simulated_content_type(asset_name: &str) -> &'static str {
+    if asset_name.ends_with(".dmg") {
+        "application/x-apple-diskimage"
+    } else if asset_name.ends_with(".exe") {
+        "application/vnd.microsoft.portable-executable"
+    } else {
+        "application/gzip"
+    }
+}
+
+fn simulated_next_patch_version(current_version: &str) -> String {
+    let mut parsed = parse_version(current_version);
+    if parsed.numeric_parts.is_empty() {
+        return "1.0.0".to_string();
+    }
+    let last = parsed.numeric_parts.len() - 1;
+    parsed.numeric_parts[last] = parsed.numeric_parts[last].saturating_add(1);
+    parsed.prerelease.clear();
+    parsed
+        .numeric_parts
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+fn simulated_previous_patch_version(current_version: &str) -> String {
+    let mut parsed = parse_version(current_version);
+    if parsed.numeric_parts.is_empty() {
+        return "0.0.1".to_string();
+    }
+    let last = parsed.numeric_parts.len() - 1;
+    parsed.numeric_parts[last] = parsed.numeric_parts[last].saturating_sub(1);
+    parsed.prerelease.clear();
+    parsed
+        .numeric_parts
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+fn sha256_bytes(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
 }
 
 fn fetch_failure_message(failure: FetchFailure) -> String {
@@ -1017,11 +1736,33 @@ fn env_value<'a>(env_map: &'a HashMap<String, String>, key: &str) -> Option<&'a 
         .filter(|value| !value.is_empty())
 }
 
+fn parse_update_test_scenario(value: &str) -> UpdateTestScenario {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "update_available" | "available" => UpdateTestScenario::UpdateAvailable,
+        "no_update" | "up_to_date" => UpdateTestScenario::NoUpdate,
+        "invalid_checksum" | "checksum_mismatch" => UpdateTestScenario::InvalidChecksum,
+        "failed_download" | "download_failed" => UpdateTestScenario::FailedDownload,
+        "missing_asset" => UpdateTestScenario::MissingAsset,
+        "ambiguous_asset" => UpdateTestScenario::AmbiguousAsset,
+        "version_downgrade" | "downgrade" => UpdateTestScenario::VersionDowngrade,
+        "offline" => UpdateTestScenario::Offline,
+        "rate_limited" | "rate_limit" => UpdateTestScenario::RateLimited,
+        "install_failure" | "install_failed" => UpdateTestScenario::InstallFailure,
+        _ => UpdateTestScenario::Live,
+    }
+}
+
 fn parse_env_bool(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
         "1" | "true" | "yes" | "on"
     )
+}
+
+pub fn simulated_install_failure_message(path: &str) -> Option<String> {
+    let test_config = update_test_config();
+    (test_config.enabled && matches!(test_config.scenario, UpdateTestScenario::InstallFailure))
+        .then(|| format!("Test mode simulated an install-launch failure for {path}."))
 }
 
 fn current_target_os() -> TargetOs {
@@ -1225,6 +1966,7 @@ struct ChecksumResolution {
     asset_url: Option<String>,
     sha256: Option<String>,
     status: String,
+    debug_detail: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1524,6 +2266,7 @@ mod tests {
                     ),
                     expected_sha256: Some("a".repeat(64)),
                     checksum_status: "SHA-256 metadata is available.".to_string(),
+                    checksum_debug_detail: None,
                 }),
                 recent_attempts: Vec::new(),
                 last_automatic_check_epoch: 0,
@@ -1535,6 +2278,12 @@ mod tests {
                 last_install_status: None,
                 last_install_attempt_epoch: 0,
                 restart_required_after_install: false,
+                last_verification_status: None,
+                last_verification_expected_sha256: None,
+                last_verification_actual_sha256: None,
+                last_verification_epoch: 0,
+                cache_validation_note: None,
+                last_snapshot: None,
             }),
         );
         assert_eq!(report.status_kind, UpdateStatusKind::Offline);
@@ -1604,6 +2353,109 @@ mod tests {
         let result = verify_downloaded_asset(&path, &hash);
         fs::remove_file(&path).ok();
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn verification_diagnostics_report_actual_and_expected_hashes() {
+        let path = std::env::temp_dir().join("projectx-update-test-diagnostics.bin");
+        fs::write(&path, b"projectx-diagnostics").expect("write temp file");
+        let diagnostics = verify_downloaded_asset_diagnostics(&path, &"a".repeat(64));
+        fs::remove_file(&path).ok();
+        assert!(!diagnostics.verified);
+        assert_eq!(diagnostics.expected_sha256, Some("a".repeat(64)));
+        assert!(diagnostics.actual_sha256.is_some());
+        assert!(diagnostics.status.contains("Expected"));
+    }
+
+    #[test]
+    fn update_test_mode_can_parse_scenarios() {
+        assert_eq!(
+            parse_update_test_scenario("invalid_checksum"),
+            UpdateTestScenario::InvalidChecksum
+        );
+        assert_eq!(
+            parse_update_test_scenario("install_failed"),
+            UpdateTestScenario::InstallFailure
+        );
+    }
+
+    #[test]
+    fn simulated_update_check_can_force_no_update() {
+        let config = github_release_config_from_env_map(&env_map(&[]));
+        let report = simulate_update_check(
+            &config,
+            "1.2.3",
+            100,
+            None,
+            &UpdateTestConfig {
+                enabled: true,
+                scenario: UpdateTestScenario::NoUpdate,
+                releases_file: None,
+            },
+        );
+        assert_eq!(report.status_kind, UpdateStatusKind::UpToDate);
+        assert!(report.available_update.is_none());
+        assert_eq!(
+            report
+                .latest_release
+                .as_ref()
+                .map(|release| release.version.as_str()),
+            Some("1.2.3")
+        );
+    }
+
+    #[test]
+    fn simulated_update_check_can_force_update_available() {
+        let config = github_release_config_from_env_map(&env_map(&[]));
+        let report = simulate_update_check(
+            &config,
+            "1.2.3",
+            100,
+            None,
+            &UpdateTestConfig {
+                enabled: true,
+                scenario: UpdateTestScenario::UpdateAvailable,
+                releases_file: None,
+            },
+        );
+        assert_eq!(report.status_kind, UpdateStatusKind::UpdateAvailable);
+        assert!(report.available_update.is_some());
+    }
+
+    #[test]
+    fn cache_validation_clears_missing_download_path() {
+        let cache = validate_update_cache(UpdateCache {
+            owner: DEFAULT_OWNER.to_string(),
+            repo: DEFAULT_REPO.to_string(),
+            include_prereleases: false,
+            last_attempt_epoch: 10,
+            last_successful_check_epoch: 10,
+            last_status_kind: UpdateStatusKind::Unknown,
+            last_error: None,
+            latest_release: None,
+            recent_attempts: Vec::new(),
+            last_automatic_check_epoch: 0,
+            last_downloaded_version: Some("1.2.3".to_string()),
+            last_downloaded_asset_name: Some("ProjectX-macos.dmg".to_string()),
+            last_downloaded_asset_path: Some("/definitely/missing/path.dmg".to_string()),
+            last_download_epoch: 11,
+            last_download_status: Some("Downloaded.".to_string()),
+            last_install_status: None,
+            last_install_attempt_epoch: 0,
+            restart_required_after_install: false,
+            last_verification_status: None,
+            last_verification_expected_sha256: None,
+            last_verification_actual_sha256: None,
+            last_verification_epoch: 0,
+            cache_validation_note: None,
+            last_snapshot: None,
+        });
+        assert!(cache.last_downloaded_asset_path.is_none());
+        assert!(cache
+            .cache_validation_note
+            .as_deref()
+            .unwrap_or_default()
+            .contains("no longer exists"));
     }
 
     #[test]

@@ -64,6 +64,9 @@ Supported environment variables:
 - `PROJECTX_GITHUB_REPO`
 - `PROJECTX_GITHUB_TOKEN`
 - `PROJECTX_INCLUDE_PRERELEASES`
+- `PROJECTX_UPDATE_TEST_MODE`
+- `PROJECTX_UPDATE_TEST_SCENARIO`
+- `PROJECTX_UPDATE_TEST_RELEASES_FILE`
 
 Behavior notes:
 
@@ -76,8 +79,43 @@ Behavior notes:
 - If multiple assets match equally well, the updater reports the ambiguity instead of guessing.
 - If GitHub is offline, rate-limited, or misconfigured, the app reports that state explicitly instead of pretending it is up to date.
 - The app stores updater cache metadata in local app config, including the last attempted lookup, the last successful lookup, the last error state, the selected release metadata, and a short recent-attempt history.
+- The updater also persists a lightweight state snapshot so the GUI can show current release, asset, verification, install-readiness, and last-error state without hiding failures behind transient banners.
 - When a matching `.sha256` release asset exists, the updater records the expected SHA-256 and can verify a user-selected downloaded file without auto-running it.
+- Verification diagnostics now keep both the expected and actual SHA-256 values so mismatches are easier to debug.
 - The updater remains manual and safe: it can open a release page, open a download, and verify a downloaded artifact, but it does not auto-install updates.
+- Updater activity is logged to the local app-data directory in `update_events.log`, including check, selection, download, verification, cache, and install-flow events.
+
+### Updater Test Mode
+
+For deterministic updater testing without relying on live GitHub responses, enable test mode:
+
+```bash
+PROJECTX_UPDATE_TEST_MODE=true cargo run --release
+```
+
+Supported scenarios:
+
+- `PROJECTX_UPDATE_TEST_SCENARIO=update_available`
+- `PROJECTX_UPDATE_TEST_SCENARIO=no_update`
+- `PROJECTX_UPDATE_TEST_SCENARIO=invalid_checksum`
+- `PROJECTX_UPDATE_TEST_SCENARIO=failed_download`
+- `PROJECTX_UPDATE_TEST_SCENARIO=missing_asset`
+- `PROJECTX_UPDATE_TEST_SCENARIO=ambiguous_asset`
+- `PROJECTX_UPDATE_TEST_SCENARIO=version_downgrade`
+- `PROJECTX_UPDATE_TEST_SCENARIO=offline`
+- `PROJECTX_UPDATE_TEST_SCENARIO=rate_limited`
+- `PROJECTX_UPDATE_TEST_SCENARIO=install_failure`
+
+Optional overrides:
+
+- `PROJECTX_UPDATE_TEST_RELEASES_FILE=/absolute/path/to/releases.json`
+
+Test-mode behavior:
+
+- test mode is shown in the updater UI
+- debug-only updater actions become available in Settings
+- live release checks and downloads are not trusted as production results
+- install remains manual and guided even in test mode
 
 macOS note:
 - The macOS release contains a real `ProjectX.app` bundle inside a DMG.

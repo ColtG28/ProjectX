@@ -616,6 +616,9 @@ pub struct UpdateCheckState {
     pub release_page_url: String,
     pub used_cached_release: bool,
     pub verification_status: Option<String>,
+    pub verification_expected_sha256: Option<String>,
+    pub verification_actual_sha256: Option<String>,
+    pub last_verification_epoch: u64,
     pub last_automatic_check_epoch: u64,
     pub next_scheduled_check_epoch: u64,
     pub download_status: String,
@@ -629,6 +632,10 @@ pub struct UpdateCheckState {
     pub install_ready: bool,
     pub install_guidance: String,
     pub restart_required_after_install: bool,
+    pub cache_validation_note: Option<String>,
+    pub test_mode_active: bool,
+    pub test_mode_scenario: Option<String>,
+    pub debug_snapshot: Option<crate::update::UpdateStateSnapshot>,
 }
 
 impl Default for UpdateCheckState {
@@ -654,7 +661,19 @@ impl Default for UpdateCheckState {
                 &crate::update::github_release_config().repo,
             ),
             used_cached_release: false,
-            verification_status: None,
+            verification_status: cached
+                .as_ref()
+                .and_then(|state| state.last_verification_status.clone()),
+            verification_expected_sha256: cached
+                .as_ref()
+                .and_then(|state| state.last_verification_expected_sha256.clone()),
+            verification_actual_sha256: cached
+                .as_ref()
+                .and_then(|state| state.last_verification_actual_sha256.clone()),
+            last_verification_epoch: cached
+                .as_ref()
+                .map(|state| state.last_verification_epoch)
+                .unwrap_or(0),
             last_automatic_check_epoch: cached
                 .as_ref()
                 .map(|state| state.last_automatic_check_epoch)
@@ -690,6 +709,19 @@ impl Default for UpdateCheckState {
                 .as_ref()
                 .map(|state| state.restart_required_after_install)
                 .unwrap_or(false),
+            cache_validation_note: cached
+                .as_ref()
+                .and_then(|state| state.cache_validation_note.clone()),
+            test_mode_active: crate::update::update_test_config().enabled,
+            test_mode_scenario: crate::update::update_test_config().enabled.then(|| {
+                crate::update::update_test_config()
+                    .scenario
+                    .label()
+                    .to_string()
+            }),
+            debug_snapshot: cached
+                .as_ref()
+                .and_then(|state| state.last_snapshot.clone()),
         }
     }
 }

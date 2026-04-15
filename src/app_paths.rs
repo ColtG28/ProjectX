@@ -70,6 +70,10 @@ pub fn update_cache_path() -> PathBuf {
     config_root().join("update_check_cache.json")
 }
 
+pub fn update_log_path() -> PathBuf {
+    data_root().join("update_events.log")
+}
+
 pub fn update_download_dir() -> PathBuf {
     data_root().join("updates")
 }

@@ -246,6 +246,7 @@ impl MyApp {
             .lock()
             .map(|state| state.clone())
             .unwrap_or_default();
+        let recent_update_logs = crate::update::recent_update_log_lines(8);
         let status_color = update_status_color(update_snapshot.status_kind);
 
         theme::card_frame().show(ui, |ui| {
@@ -261,6 +262,16 @@ impl MyApp {
                         .unwrap_or("Unknown"),
                 );
                 settings_pill(ui, "Source", &update_snapshot.repo_label);
+                if update_snapshot.test_mode_active {
+                    settings_pill(
+                        ui,
+                        "Test mode",
+                        update_snapshot
+                            .test_mode_scenario
+                            .as_deref()
+                            .unwrap_or("active"),
+                    );
+                }
             });
             ui.add_space(4.0);
             ui.colored_label(
@@ -288,6 +299,9 @@ impl MyApp {
                     egui::Color32::from_rgb(198, 114, 114),
                     format!("Last check detail: {error}"),
                 );
+            }
+            if let Some(note) = &update_snapshot.cache_validation_note {
+                ui.small(format!("Cache note: {note}"));
             }
             if update_snapshot.last_automatic_check_epoch > 0 {
                 ui.small(format!(
@@ -333,6 +347,43 @@ impl MyApp {
                 .clicked()
             {
                 self.open_downloaded_update_folder();
+            }
+            if crate::update::updater_debug_actions_enabled() {
+                if ui
+                    .add_enabled(
+                        !update_snapshot.checking,
+                        egui::Button::new("Force check update"),
+                    )
+                    .clicked()
+                {
+                    self.start_update_check(true);
+                }
+                if ui
+                    .add_enabled(
+                        update_snapshot.latest_release.is_some(),
+                        egui::Button::new("Force re-download latest"),
+                    )
+                    .clicked()
+                {
+                    self.force_redownload_latest_update();
+                }
+                if ui
+                    .add_enabled(
+                        update_snapshot.download_path.is_some()
+                            && update_snapshot
+                                .latest_release
+                                .as_ref()
+                                .and_then(|release| release.expected_sha256.as_ref())
+                                .is_some(),
+                        egui::Button::new("Re-run checksum verification"),
+                    )
+                    .clicked()
+                {
+                    self.rerun_checksum_verification();
+                }
+                if ui.button("Clear update cache").clicked() {
+                    self.clear_update_cache_debug();
+                }
             }
         });
 
@@ -410,9 +461,20 @@ impl MyApp {
                 if !update.checksum_status.is_empty() {
                     ui.label(format!("Checksum status: {}", update.checksum_status));
                 }
-                if let Some(hash) = update.expected_sha256.as_deref() {
-                    let preview_len = hash.len().min(16);
-                    ui.small(format!("Expected SHA-256: {}...", &hash[..preview_len]));
+                if let Some(hash) = update_snapshot.verification_expected_sha256.as_deref().or(update.expected_sha256.as_deref()) {
+                    ui.small(format!("Expected SHA-256: {hash}"));
+                }
+                if let Some(actual) = update_snapshot.verification_actual_sha256.as_deref() {
+                    ui.small(format!("Actual SHA-256: {actual}"));
+                }
+                if let Some(detail) = update.checksum_debug_detail.as_deref() {
+                    ui.small(format!("Checksum detail: {detail}"));
+                }
+                if update_snapshot.last_verification_epoch > 0 {
+                    ui.small(format!(
+                        "Last verification: {}",
+                        format_timestamp_with_relative(update_snapshot.last_verification_epoch)
+                    ));
                 }
                 if ui
                     .add_enabled(
@@ -425,6 +487,42 @@ impl MyApp {
                 }
                 if let Some(message) = update_snapshot.verification_status.as_deref() {
                     ui.colored_label(verification_color(Some(message)), message);
+                }
+            });
+        }
+
+        if crate::update::updater_debug_actions_enabled() {
+            ui.add_space(theme::section_gap(self.ui_metrics.scale_factor));
+            theme::card_frame().show(ui, |ui| {
+                ui.label(egui::RichText::new("Updater diagnostics").strong());
+                ui.small("These controls and traces are intended for reliability testing and support work.");
+                if let Some(snapshot) = update_snapshot.debug_snapshot.as_ref() {
+                    ui.separator();
+                    ui.small(format!("Snapshot status: {}", snapshot.status_label));
+                    ui.small(format!(
+                        "Snapshot latest version: {}",
+                        snapshot.latest_version.as_deref().unwrap_or("Unknown")
+                    ));
+                    ui.small(format!(
+                        "Snapshot asset: {}",
+                        snapshot.selected_asset_name.as_deref().unwrap_or("Unknown")
+                    ));
+                    ui.small(format!(
+                        "Install ready: {}",
+                        if snapshot.install_ready { "Yes" } else { "No" }
+                    ));
+                    if let Some(error) = snapshot.last_error.as_deref() {
+                        ui.small(format!("Snapshot error: {error}"));
+                    }
+                }
+                ui.separator();
+                ui.label(egui::RichText::new("Recent updater log").strong());
+                if recent_update_logs.is_empty() {
+                    ui.small("No updater log entries yet.");
+                } else {
+                    for line in recent_update_logs {
+                        ui.monospace(line);
+                    }
                 }
             });
         }
