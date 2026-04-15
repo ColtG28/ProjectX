@@ -1,16 +1,21 @@
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fs;
+use std::io::Read;
+use std::path::Path;
 use std::time::Duration;
 
 use reqwest::blocking::{Client, RequestBuilder};
 use reqwest::header::{HeaderMap, ACCEPT, AUTHORIZATION, USER_AGENT};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 const DEFAULT_OWNER: &str = "ColtG-28";
 const DEFAULT_REPO: &str = "ProjectX";
 const API_BASE: &str = "https://api.github.com";
 const GITHUB_API_VERSION: &str = "2022-11-28";
 const UPDATE_TIMEOUT: Duration = Duration::from_secs(12);
+const MAX_CACHE_ATTEMPTS: usize = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum UpdateStatusKind {
@@ -42,18 +47,36 @@ pub struct ReleaseInfo {
     pub tag_name: String,
     pub published_at: String,
     pub html_url: String,
+    pub body: String,
     pub asset_name: String,
     pub asset_url: String,
-    pub body: String,
+    pub asset_content_type: String,
+    pub asset_match_reason: String,
+    pub checksum_asset_name: Option<String>,
+    pub checksum_asset_url: Option<String>,
+    pub expected_sha256: Option<String>,
+    pub checksum_status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachedAttempt {
+    pub checked_epoch: u64,
+    pub status_kind: UpdateStatusKind,
+    pub error: Option<String>,
+    pub latest_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateCache {
-    pub checked_epoch: u64,
     pub owner: String,
     pub repo: String,
     pub include_prereleases: bool,
-    pub release: ReleaseInfo,
+    pub last_attempt_epoch: u64,
+    pub last_successful_check_epoch: u64,
+    pub last_status_kind: UpdateStatusKind,
+    pub last_error: Option<String>,
+    pub latest_release: Option<ReleaseInfo>,
+    pub recent_attempts: Vec<CachedAttempt>,
 }
 
 #[derive(Debug, Clone)]
@@ -86,41 +109,118 @@ enum FetchFailure {
     Error(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetOs {
+    MacOs,
+    Windows,
+    Linux,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetArch {
+    X86_64,
+    Aarch64,
+    Other,
+}
+
+#[derive(Debug, Clone)]
+struct ReleaseCandidate {
+    version: ParsedVersion,
+    published_at: String,
+    release: ReleaseInfo,
+}
+
+#[derive(Debug, Clone)]
+struct AssetSelection {
+    asset: GitHubAsset,
+    reason: String,
+}
+
+#[derive(Debug, Clone)]
+enum AssetSelectionOutcome {
+    Selected(AssetSelection),
+    Ambiguous(String),
+    Missing(String),
+}
+
+#[derive(Debug, Clone)]
+struct ParsedVersion {
+    normalized: String,
+    numeric_parts: Vec<u64>,
+    prerelease: Vec<PreIdentifier>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PreIdentifier {
+    Numeric(u64),
+    Text(String),
+}
+
 pub fn check_for_updates(now_epoch: u64) -> UpdateCheckReport {
     let config = github_release_config();
     let current_version = env!("CARGO_PKG_VERSION").to_string();
-    let release_page_url = releases_page_url(&config.owner, &config.repo);
-    let repo_label = format!("{}/{}", config.owner, config.repo);
-    let client = build_client();
-    let cached = load_cached_release();
+    let cached = load_update_cache();
 
-    match client.and_then(|client| fetch_release(&client, &config)) {
+    match build_client().and_then(|client| fetch_release(&client, &config)) {
         Ok(release) => {
-            let _ = save_cached_release(&config, &release, now_epoch);
-            build_report(
-                &config,
-                current_version,
-                release,
-                now_epoch,
-                now_epoch,
-                None,
-                false,
-            )
+            let report = build_success_report(&config, current_version, release, now_epoch, false);
+            let _ = save_update_cache(&config, &report, now_epoch);
+            report
         }
-        Err(failure) => build_report_from_failure(
-            &config,
-            current_version,
-            now_epoch,
-            failure,
-            cached,
-            release_page_url,
-            repo_label,
-        ),
+        Err(failure) => {
+            let report = build_failure_report(&config, current_version, now_epoch, failure, cached);
+            let _ = save_update_cache(&config, &report, now_epoch);
+            report
+        }
     }
 }
 
 pub fn github_release_config() -> GitHubReleaseConfig {
     github_release_config_from_env_map(&std::env::vars().collect::<HashMap<_, _>>())
+}
+
+pub fn releases_page_url(owner: &str, repo: &str) -> String {
+    format!("https://github.com/{owner}/{repo}/releases")
+}
+
+pub fn verify_downloaded_asset(path: &Path, expected_sha256: &str) -> Result<String, String> {
+    let expected = normalize_sha256(expected_sha256)
+        .ok_or_else(|| "The expected SHA-256 value is malformed.".to_string())?;
+    let actual = sha256_file(path)?;
+    if actual.eq_ignore_ascii_case(&expected) {
+        Ok(format!(
+            "SHA-256 verified successfully for {}.",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("selected file")
+        ))
+    } else {
+        Err(format!(
+            "SHA-256 verification failed. Expected {expected}, got {actual}."
+        ))
+    }
+}
+
+pub fn compare_versions(left: &str, right: &str) -> Ordering {
+    compare_parsed_versions(&parse_version(left), &parse_version(right))
+}
+
+pub fn is_version_newer(candidate: &str, current: &str) -> bool {
+    compare_versions(candidate, current).is_gt()
+}
+
+pub fn normalize_version_label(version: &str) -> String {
+    let trimmed = version.trim();
+    let start = trimmed
+        .char_indices()
+        .find_map(|(index, ch)| ch.is_ascii_digit().then_some(index))
+        .unwrap_or(trimmed.len());
+    trimmed[start..]
+        .split('+')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string()
 }
 
 fn github_release_config_from_env_map(env_map: &HashMap<String, String>) -> GitHubReleaseConfig {
@@ -138,77 +238,11 @@ fn github_release_config_from_env_map(env_map: &HashMap<String, String>) -> GitH
     }
 }
 
-fn build_report_from_failure(
-    config: &GitHubReleaseConfig,
-    current_version: String,
-    now_epoch: u64,
-    failure: FetchFailure,
-    cached: Option<UpdateCache>,
-    release_page_url: String,
-    repo_label: String,
-) -> UpdateCheckReport {
-    let (status_kind, last_error) = match failure {
-        FetchFailure::Offline(message) => (UpdateStatusKind::Offline, Some(message)),
-        FetchFailure::RateLimited(message) => (UpdateStatusKind::RateLimited, Some(message)),
-        FetchFailure::Error(message) => (UpdateStatusKind::Error, Some(message)),
-    };
-
-    if let Some(cache) =
-        cached.filter(|cache| cache.owner == config.owner && cache.repo == config.repo)
-    {
-        let cached_release = cache.release;
-        let has_update = is_version_newer(&cached_release.version, &current_version);
-        let latest_release = Some(cached_release.clone());
-        return UpdateCheckReport {
-            current_version,
-            available_update: has_update.then_some(cached_release.clone()),
-            latest_release,
-            last_checked_epoch: now_epoch,
-            last_successful_check_epoch: cache.checked_epoch,
-            status_label: format!(
-                "{}. Showing cached release metadata from {}.",
-                status_error_prefix(status_kind),
-                cache.checked_epoch
-            ),
-            last_error,
-            status_kind,
-            repo_label,
-            release_page_url,
-            used_cached_release: true,
-        };
-    }
-
-    UpdateCheckReport {
-        current_version,
-        latest_release: None,
-        available_update: None,
-        last_checked_epoch: now_epoch,
-        last_successful_check_epoch: 0,
-        status_kind,
-        status_label: status_error_prefix(status_kind).to_string(),
-        last_error,
-        repo_label,
-        release_page_url,
-        used_cached_release: false,
-    }
-}
-
-fn status_error_prefix(kind: UpdateStatusKind) -> &'static str {
-    match kind {
-        UpdateStatusKind::Offline => "GitHub could not be reached",
-        UpdateStatusKind::RateLimited => "GitHub API rate limit was reached",
-        UpdateStatusKind::Error => "The GitHub release check failed",
-        _ => "Update status is unknown",
-    }
-}
-
-fn build_report(
+fn build_success_report(
     config: &GitHubReleaseConfig,
     current_version: String,
     release: ReleaseInfo,
     now_epoch: u64,
-    success_epoch: u64,
-    last_error: Option<String>,
     used_cached_release: bool,
 ) -> UpdateCheckReport {
     let has_update = is_version_newer(&release.version, &current_version);
@@ -228,13 +262,75 @@ fn build_report(
         latest_release: Some(release.clone()),
         available_update: has_update.then_some(release),
         last_checked_epoch: now_epoch,
-        last_successful_check_epoch: success_epoch,
+        last_successful_check_epoch: now_epoch,
         status_kind,
         status_label,
-        last_error,
+        last_error: None,
         repo_label: format!("{}/{}", config.owner, config.repo),
         release_page_url: releases_page_url(&config.owner, &config.repo),
         used_cached_release,
+    }
+}
+
+fn build_failure_report(
+    config: &GitHubReleaseConfig,
+    current_version: String,
+    now_epoch: u64,
+    failure: FetchFailure,
+    cached: Option<UpdateCache>,
+) -> UpdateCheckReport {
+    let (status_kind, error_message) = match failure {
+        FetchFailure::Offline(message) => (UpdateStatusKind::Offline, message),
+        FetchFailure::RateLimited(message) => (UpdateStatusKind::RateLimited, message),
+        FetchFailure::Error(message) => (UpdateStatusKind::Error, message),
+    };
+
+    let cached_release = cached
+        .filter(|cache| cache.owner == config.owner && cache.repo == config.repo)
+        .and_then(|cache| cache.latest_release.clone().map(|release| (cache, release)));
+
+    if let Some((cache, release)) = cached_release {
+        let has_update = is_version_newer(&release.version, &current_version);
+        return UpdateCheckReport {
+            current_version,
+            latest_release: Some(release.clone()),
+            available_update: has_update.then_some(release),
+            last_checked_epoch: now_epoch,
+            last_successful_check_epoch: cache.last_successful_check_epoch,
+            status_kind,
+            status_label: format!(
+                "{}. Showing cached release metadata from {}.",
+                status_prefix(status_kind),
+                cache.last_successful_check_epoch
+            ),
+            last_error: Some(error_message),
+            repo_label: format!("{}/{}", config.owner, config.repo),
+            release_page_url: releases_page_url(&config.owner, &config.repo),
+            used_cached_release: true,
+        };
+    }
+
+    UpdateCheckReport {
+        current_version,
+        latest_release: None,
+        available_update: None,
+        last_checked_epoch: now_epoch,
+        last_successful_check_epoch: 0,
+        status_kind,
+        status_label: status_prefix(status_kind).to_string(),
+        last_error: Some(error_message),
+        repo_label: format!("{}/{}", config.owner, config.repo),
+        release_page_url: releases_page_url(&config.owner, &config.repo),
+        used_cached_release: false,
+    }
+}
+
+fn status_prefix(kind: UpdateStatusKind) -> &'static str {
+    match kind {
+        UpdateStatusKind::Offline => "GitHub could not be reached",
+        UpdateStatusKind::RateLimited => "GitHub API rate limit was reached",
+        UpdateStatusKind::Error => "The GitHub release check failed",
+        _ => "Update status is unknown",
     }
 }
 
@@ -250,7 +346,7 @@ fn fetch_release(
     config: &GitHubReleaseConfig,
 ) -> Result<ReleaseInfo, FetchFailure> {
     let url = format!(
-        "{API_BASE}/repos/{}/{}/releases?per_page=20",
+        "{API_BASE}/repos/{}/{}/releases?per_page=30",
         config.owner, config.repo
     );
     let response = apply_request_headers(client.get(url), config)
@@ -270,8 +366,7 @@ fn fetch_release(
         FetchFailure::Error(format!("Failed to parse GitHub releases response: {error}"))
     })?;
 
-    release_from_list(&releases, config.include_prereleases)
-        .ok_or_else(|| FetchFailure::Error("No matching published release was found.".to_string()))
+    select_release(client, config, &releases)
 }
 
 fn apply_request_headers(builder: RequestBuilder, config: &GitHubReleaseConfig) -> RequestBuilder {
@@ -339,142 +434,337 @@ fn classify_http_failure(
     FetchFailure::Error(format!("GitHub Releases returned HTTP {}.", status))
 }
 
-fn release_from_list(releases: &[GitHubRelease], include_prereleases: bool) -> Option<ReleaseInfo> {
-    releases
+fn select_release(
+    client: &Client,
+    config: &GitHubReleaseConfig,
+    releases: &[GitHubRelease],
+) -> Result<ReleaseInfo, FetchFailure> {
+    let mut candidates = Vec::new();
+    let mut selection_failures = Vec::new();
+
+    for release in releases
         .iter()
         .filter(|release| !release.draft)
-        .filter(|release| include_prereleases || !release.prerelease)
-        .find_map(convert_release)
+        .filter(|release| config.include_prereleases || !release.prerelease)
+    {
+        let Some(parsed_version) = parse_version_option(&release.tag_name) else {
+            continue;
+        };
+
+        match select_platform_asset(&release.assets) {
+            AssetSelectionOutcome::Selected(selection) => {
+                let checksum =
+                    resolve_checksum_for_asset(client, config, &selection.asset, &release.assets)?;
+                candidates.push(ReleaseCandidate {
+                    version: parsed_version.clone(),
+                    published_at: release
+                        .published_at
+                        .clone()
+                        .or_else(|| release.created_at.clone())
+                        .unwrap_or_default(),
+                    release: ReleaseInfo {
+                        version: parsed_version.normalized.clone(),
+                        tag_name: release.tag_name.trim().to_string(),
+                        published_at: release
+                            .published_at
+                            .clone()
+                            .or_else(|| release.created_at.clone())
+                            .unwrap_or_default(),
+                        html_url: release.html_url.clone(),
+                        body: release.body.clone().unwrap_or_default(),
+                        asset_name: selection.asset.name.clone(),
+                        asset_url: selection.asset.browser_download_url.clone(),
+                        asset_content_type: selection.asset.content_type.clone(),
+                        asset_match_reason: selection.reason,
+                        checksum_asset_name: checksum.asset_name,
+                        checksum_asset_url: checksum.asset_url,
+                        expected_sha256: checksum.sha256,
+                        checksum_status: checksum.status,
+                    },
+                });
+            }
+            AssetSelectionOutcome::Ambiguous(reason) | AssetSelectionOutcome::Missing(reason) => {
+                selection_failures.push(format!("{}: {}", release.tag_name.trim(), reason));
+            }
+        }
+    }
+
+    candidates.sort_by(|left, right| compare_release_candidates(right, left));
+    candidates
+        .into_iter()
+        .next()
+        .map(|candidate| candidate.release)
+        .ok_or_else(|| {
+            let mut message =
+                "No suitable published release asset was found for this platform.".to_string();
+            if !selection_failures.is_empty() {
+                message.push(' ');
+                message.push_str(&selection_failures.join(" | "));
+            }
+            FetchFailure::Error(message)
+        })
 }
 
-fn convert_release(release: &GitHubRelease) -> Option<ReleaseInfo> {
-    let tag_name = release.tag_name.trim().to_string();
-    if tag_name.is_empty() {
-        return None;
-    }
-    let version = normalize_version_label(&tag_name);
-    if version.is_empty() {
-        return None;
-    }
-    let asset = select_platform_asset(&release.assets)?;
+fn compare_release_candidates(left: &ReleaseCandidate, right: &ReleaseCandidate) -> Ordering {
+    compare_parsed_versions(&left.version, &right.version)
+        .then_with(|| left.published_at.cmp(&right.published_at))
+}
 
-    Some(ReleaseInfo {
-        version,
-        tag_name,
-        published_at: release
-            .published_at
-            .clone()
-            .or_else(|| release.created_at.clone())
-            .unwrap_or_default(),
-        html_url: release.html_url.clone(),
-        asset_name: asset.name.clone(),
-        asset_url: asset.browser_download_url.clone(),
-        body: release.body.clone().unwrap_or_default(),
+fn select_platform_asset(assets: &[GitHubAsset]) -> AssetSelectionOutcome {
+    let target_os = current_target_os();
+    let target_arch = current_target_arch();
+    let candidates = assets
+        .iter()
+        .filter(|asset| !is_checksum_asset_name(&asset.name))
+        .filter_map(|asset| score_asset(asset, target_os, target_arch))
+        .collect::<Vec<_>>();
+
+    if candidates.is_empty() {
+        return AssetSelectionOutcome::Missing(format!(
+            "no asset matched {} {}",
+            target_os.label(),
+            target_arch.label()
+        ));
+    }
+
+    let mut candidates = candidates;
+    candidates.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.asset.name.cmp(&right.asset.name))
+    });
+
+    let best = &candidates[0];
+    if candidates
+        .get(1)
+        .is_some_and(|other| other.score == best.score)
+    {
+        let tied = candidates
+            .iter()
+            .take_while(|candidate| candidate.score == best.score)
+            .map(|candidate| candidate.asset.name.clone())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return AssetSelectionOutcome::Ambiguous(format!(
+            "multiple assets matched equally well: {tied}"
+        ));
+    }
+
+    AssetSelectionOutcome::Selected(AssetSelection {
+        asset: best.asset.clone(),
+        reason: best.reason.clone(),
     })
 }
 
-fn select_platform_asset(assets: &[GitHubAsset]) -> Option<&GitHubAsset> {
-    let expected_platform = if cfg!(target_os = "windows") {
-        "windows"
-    } else if cfg!(target_os = "macos") {
-        "macos"
-    } else {
-        "linux"
-    };
+fn score_asset(
+    asset: &GitHubAsset,
+    target_os: TargetOs,
+    target_arch: TargetArch,
+) -> Option<ScoredAsset> {
+    let name = asset.name.to_ascii_lowercase();
+    let ext = detect_asset_extension(&name)?;
+    let mut score = package_score(target_os, ext)?;
+    let mut reasons = vec![format!("package {}", ext.label())];
 
-    let mut matching = assets
+    match os_hint_score(&name, target_os) {
+        OsHint::Match(label) => {
+            score += 60;
+            reasons.push(format!("os {label}"));
+        }
+        OsHint::Conflict(_label) => return None,
+        OsHint::Unknown => {}
+    }
+
+    match arch_hint_score(&name, target_arch) {
+        ArchHint::Match(label) => {
+            score += 25;
+            reasons.push(format!("arch {label}"));
+        }
+        ArchHint::Conflict(_label) => return None,
+        ArchHint::Unknown => {}
+    }
+
+    if name.contains("projectx") {
+        score += 8;
+        reasons.push("project name".to_string());
+    }
+    if asset
+        .content_type
+        .to_ascii_lowercase()
+        .contains(ext.content_type_hint())
+    {
+        score += 4;
+        reasons.push("content-type hint".to_string());
+    }
+
+    Some(ScoredAsset {
+        asset: asset.clone(),
+        score,
+        reason: reasons.join(", "),
+    })
+}
+
+fn resolve_checksum_for_asset(
+    client: &Client,
+    config: &GitHubReleaseConfig,
+    asset: &GitHubAsset,
+    assets: &[GitHubAsset],
+) -> Result<ChecksumResolution, FetchFailure> {
+    let matching = assets
         .iter()
-        .filter(|asset| {
-            let name = asset.name.to_ascii_lowercase();
-            name.contains(expected_platform) && !name.ends_with(".sha256")
-        })
+        .filter(|candidate| is_checksum_asset_name(&candidate.name))
+        .filter(|candidate| checksum_matches_asset_name(&candidate.name, &asset.name))
         .collect::<Vec<_>>();
 
-    matching.sort_by_key(|asset| platform_asset_rank(&asset.name));
-    matching.into_iter().next()
+    let checksum_asset = match matching.as_slice() {
+        [] => {
+            return Ok(ChecksumResolution {
+                asset_name: None,
+                asset_url: None,
+                sha256: None,
+                status: "No matching SHA-256 asset was published for this release.".to_string(),
+            })
+        }
+        [single] => (*single).clone(),
+        many => {
+            return Ok(ChecksumResolution {
+                asset_name: None,
+                asset_url: None,
+                sha256: None,
+                status: format!(
+                "Checksum verification is ambiguous because multiple checksum assets matched: {}",
+                many.iter()
+                    .map(|asset| asset.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            })
+        }
+    };
+
+    let text = apply_request_headers(client.get(&checksum_asset.browser_download_url), config)
+        .send()
+        .map_err(classify_request_error)?
+        .text()
+        .map_err(|error| {
+            FetchFailure::Error(format!(
+                "Failed to read checksum asset {}: {error}",
+                checksum_asset.name
+            ))
+        })?;
+
+    let Some(sha256) = parse_sha256_asset(&text, &asset.name) else {
+        return Ok(ChecksumResolution {
+            asset_name: Some(checksum_asset.name.clone()),
+            asset_url: Some(checksum_asset.browser_download_url.clone()),
+            sha256: None,
+            status: "A checksum asset exists, but ProjectX could not parse a SHA-256 value for the selected download."
+                .to_string(),
+        });
+    };
+
+    Ok(ChecksumResolution {
+        asset_name: Some(checksum_asset.name.clone()),
+        asset_url: Some(checksum_asset.browser_download_url.clone()),
+        sha256: Some(sha256),
+        status: format!("SHA-256 metadata is available in {}.", checksum_asset.name),
+    })
 }
 
-fn platform_asset_rank(name: &str) -> usize {
-    let lower = name.to_ascii_lowercase();
-    if cfg!(target_os = "macos") {
-        if lower.ends_with(".dmg") {
-            return 0;
-        }
-        if lower.ends_with(".zip") {
-            return 1;
-        }
-    } else if cfg!(target_os = "windows") {
-        if lower.ends_with(".exe") {
-            return 0;
-        }
-        if lower.ends_with(".zip") {
-            return 1;
-        }
-    } else {
-        if lower.ends_with(".appimage") {
-            return 0;
-        }
-        if lower.ends_with(".tar.gz") {
-            return 1;
+fn parse_sha256_asset(text: &str, asset_name: &str) -> Option<String> {
+    let lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
+    for line in lines {
+        if let Some(hash) = extract_leading_sha256(line) {
+            if line.contains(asset_name) || line.split_whitespace().count() == 1 {
+                return Some(hash);
+            }
         }
     }
-    10
+    None
 }
 
-pub fn normalize_version_label(version: &str) -> String {
-    version
-        .trim()
-        .trim_start_matches('v')
-        .trim_start_matches('V')
-        .to_string()
+fn extract_leading_sha256(line: &str) -> Option<String> {
+    let first = line.split_whitespace().next()?;
+    normalize_sha256(first)
 }
 
-pub fn is_version_newer(candidate: &str, current: &str) -> bool {
-    compare_versions(candidate, current).is_gt()
+fn normalize_sha256(value: &str) -> Option<String> {
+    let trimmed = value.trim().trim_start_matches('*');
+    let candidate = trimmed
+        .chars()
+        .take_while(|ch| ch.is_ascii_hexdigit())
+        .collect::<String>();
+    (candidate.len() == 64 && candidate.chars().all(|ch| ch.is_ascii_hexdigit()))
+        .then(|| candidate.to_ascii_lowercase())
 }
 
-pub fn compare_versions(left: &str, right: &str) -> std::cmp::Ordering {
-    let left = parse_version(left);
-    let right = parse_version(right);
-
-    for index in 0..left.parts.len().max(right.parts.len()) {
-        let left_part = *left.parts.get(index).unwrap_or(&0);
-        let right_part = *right.parts.get(index).unwrap_or(&0);
-        match left_part.cmp(&right_part) {
-            std::cmp::Ordering::Equal => {}
-            ordering => return ordering,
+fn sha256_file(path: &Path) -> Result<String, String> {
+    let mut file = fs::File::open(path)
+        .map_err(|error| format!("Failed to open {}: {error}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| format!("Failed to read {}: {error}", path.display()))?;
+        if read == 0 {
+            break;
         }
+        hasher.update(&buffer[..read]);
     }
-
-    match (left.prerelease.is_empty(), right.prerelease.is_empty()) {
-        (true, true) | (false, false) => std::cmp::Ordering::Equal,
-        (true, false) => std::cmp::Ordering::Greater,
-        (false, true) => std::cmp::Ordering::Less,
-    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
-pub fn releases_page_url(owner: &str, repo: &str) -> String {
-    format!("https://github.com/{owner}/{repo}/releases")
-}
-
-fn load_cached_release() -> Option<UpdateCache> {
+fn load_update_cache() -> Option<UpdateCache> {
     let path = crate::app_paths::update_cache_path();
     let text = fs::read_to_string(path).ok()?;
     serde_json::from_str::<UpdateCache>(&text).ok()
 }
 
-fn save_cached_release(
+fn save_update_cache(
     config: &GitHubReleaseConfig,
-    release: &ReleaseInfo,
+    report: &UpdateCheckReport,
     now_epoch: u64,
 ) -> Result<(), String> {
-    let cache = UpdateCache {
-        checked_epoch: now_epoch,
+    let mut cache = load_update_cache().unwrap_or_else(|| UpdateCache {
         owner: config.owner.clone(),
         repo: config.repo.clone(),
         include_prereleases: config.include_prereleases,
-        release: release.clone(),
-    };
+        last_attempt_epoch: 0,
+        last_successful_check_epoch: 0,
+        last_status_kind: UpdateStatusKind::Unknown,
+        last_error: None,
+        latest_release: None,
+        recent_attempts: Vec::new(),
+    });
+
+    cache.owner = config.owner.clone();
+    cache.repo = config.repo.clone();
+    cache.include_prereleases = config.include_prereleases;
+    cache.last_attempt_epoch = now_epoch;
+    cache.last_status_kind = report.status_kind;
+    cache.last_error = report.last_error.clone();
+    if report.latest_release.is_some() && report.status_kind != UpdateStatusKind::Error {
+        cache.latest_release = report.latest_release.clone();
+    }
+    if report.last_successful_check_epoch > 0 {
+        cache.last_successful_check_epoch = report.last_successful_check_epoch;
+    }
+    cache.recent_attempts.push(CachedAttempt {
+        checked_epoch: now_epoch,
+        status_kind: report.status_kind,
+        error: report.last_error.clone(),
+        latest_version: report
+            .latest_release
+            .as_ref()
+            .map(|release| release.version.clone()),
+    });
+    if cache.recent_attempts.len() > MAX_CACHE_ATTEMPTS {
+        let drain = cache.recent_attempts.len() - MAX_CACHE_ATTEMPTS;
+        cache.recent_attempts.drain(0..drain);
+    }
+
     let path = crate::app_paths::update_cache_path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -498,6 +788,164 @@ fn parse_env_bool(value: &str) -> bool {
         value.trim().to_ascii_lowercase().as_str(),
         "1" | "true" | "yes" | "on"
     )
+}
+
+fn current_target_os() -> TargetOs {
+    if cfg!(target_os = "macos") {
+        TargetOs::MacOs
+    } else if cfg!(target_os = "windows") {
+        TargetOs::Windows
+    } else {
+        TargetOs::Linux
+    }
+}
+
+fn current_target_arch() -> TargetArch {
+    match std::env::consts::ARCH {
+        "x86_64" => TargetArch::X86_64,
+        "aarch64" => TargetArch::Aarch64,
+        _ => TargetArch::Other,
+    }
+}
+
+fn os_aliases(target: TargetOs) -> (&'static [&'static str], &'static [&'static str]) {
+    match target {
+        TargetOs::MacOs => (&["macos", "darwin", "osx", "mac"], &["windows", "linux"]),
+        TargetOs::Windows => (
+            &["windows", "win64", "win32", "win"],
+            &["macos", "darwin", "linux"],
+        ),
+        TargetOs::Linux => (
+            &["linux", "appimage", "gnu"],
+            &["windows", "macos", "darwin"],
+        ),
+    }
+}
+
+fn arch_aliases(target: TargetArch) -> (&'static [&'static str], &'static [&'static str]) {
+    match target {
+        TargetArch::X86_64 => (&["x86_64", "amd64", "x64", "win64"], &["arm64", "aarch64"]),
+        TargetArch::Aarch64 => (&["arm64", "aarch64"], &["x86_64", "amd64", "x64"]),
+        TargetArch::Other => (&[], &[]),
+    }
+}
+
+fn os_hint_score(name: &str, target: TargetOs) -> OsHint {
+    let (positive, negative) = os_aliases(target);
+    if let Some(label) = negative.iter().find(|label| name.contains(**label)) {
+        return OsHint::Conflict((*label).to_string());
+    }
+    if let Some(label) = positive.iter().find(|label| name.contains(**label)) {
+        return OsHint::Match((*label).to_string());
+    }
+    OsHint::Unknown
+}
+
+fn arch_hint_score(name: &str, target: TargetArch) -> ArchHint {
+    let (positive, negative) = arch_aliases(target);
+    if let Some(label) = negative.iter().find(|label| name.contains(**label)) {
+        return ArchHint::Conflict((*label).to_string());
+    }
+    if let Some(label) = positive.iter().find(|label| name.contains(**label)) {
+        return ArchHint::Match((*label).to_string());
+    }
+    ArchHint::Unknown
+}
+
+fn checksum_matches_asset_name(checksum_name: &str, asset_name: &str) -> bool {
+    let checksum_lower = checksum_name.to_ascii_lowercase();
+    let asset_lower = asset_name.to_ascii_lowercase();
+    checksum_lower.contains(&asset_lower)
+        || checksum_lower == format!("{asset_lower}.sha256")
+        || checksum_lower == format!("{asset_lower}.sha256.txt")
+}
+
+fn is_checksum_asset_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".sha256") || lower.ends_with(".sha256.txt")
+}
+
+fn parse_version_option(value: &str) -> Option<ParsedVersion> {
+    let parsed = parse_version(value);
+    (!parsed.numeric_parts.is_empty()).then_some(parsed)
+}
+
+fn parse_version(value: &str) -> ParsedVersion {
+    let normalized = normalize_version_label(value);
+    let mut version_and_build = normalized.splitn(2, '+');
+    let without_build = version_and_build.next().unwrap_or_default();
+    let mut version_and_pre = without_build.splitn(2, '-');
+    let core = version_and_pre.next().unwrap_or_default();
+    let prerelease = version_and_pre.next().unwrap_or_default();
+    let numeric_parts = core
+        .split('.')
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| part.parse::<u64>().ok())
+        .collect::<Vec<_>>();
+    let prerelease = prerelease
+        .split('.')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            if part.chars().all(|ch| ch.is_ascii_digit()) {
+                PreIdentifier::Numeric(part.parse::<u64>().unwrap_or(0))
+            } else {
+                PreIdentifier::Text(part.to_ascii_lowercase())
+            }
+        })
+        .collect::<Vec<_>>();
+
+    ParsedVersion {
+        normalized: without_build.to_string(),
+        numeric_parts,
+        prerelease,
+    }
+}
+
+fn compare_parsed_versions(left: &ParsedVersion, right: &ParsedVersion) -> Ordering {
+    for index in 0..left.numeric_parts.len().max(right.numeric_parts.len()) {
+        let left_part = *left.numeric_parts.get(index).unwrap_or(&0);
+        let right_part = *right.numeric_parts.get(index).unwrap_or(&0);
+        match left_part.cmp(&right_part) {
+            Ordering::Equal => {}
+            ordering => return ordering,
+        }
+    }
+
+    match (left.prerelease.is_empty(), right.prerelease.is_empty()) {
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Greater,
+        (false, true) => Ordering::Less,
+        (false, false) => compare_prerelease(&left.prerelease, &right.prerelease),
+    }
+}
+
+fn compare_prerelease(left: &[PreIdentifier], right: &[PreIdentifier]) -> Ordering {
+    for index in 0..left.len().max(right.len()) {
+        match (left.get(index), right.get(index)) {
+            (Some(PreIdentifier::Numeric(lhs)), Some(PreIdentifier::Numeric(rhs))) => {
+                match lhs.cmp(rhs) {
+                    Ordering::Equal => {}
+                    ordering => return ordering,
+                }
+            }
+            (Some(PreIdentifier::Text(lhs)), Some(PreIdentifier::Text(rhs))) => {
+                match lhs.cmp(rhs) {
+                    Ordering::Equal => {}
+                    ordering => return ordering,
+                }
+            }
+            (Some(PreIdentifier::Numeric(_)), Some(PreIdentifier::Text(_))) => {
+                return Ordering::Less
+            }
+            (Some(PreIdentifier::Text(_)), Some(PreIdentifier::Numeric(_))) => {
+                return Ordering::Greater
+            }
+            (Some(_), None) => return Ordering::Greater,
+            (None, Some(_)) => return Ordering::Less,
+            (None, None) => return Ordering::Equal,
+        }
+    }
+    Ordering::Equal
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -526,32 +974,147 @@ struct GitHubAsset {
     name: String,
     #[serde(default)]
     browser_download_url: String,
+    #[serde(default)]
+    content_type: String,
 }
 
-#[derive(Debug, Clone, Default)]
-struct ParsedVersion {
-    parts: Vec<u64>,
-    prerelease: String,
+#[derive(Debug, Clone)]
+struct ScoredAsset {
+    asset: GitHubAsset,
+    score: i32,
+    reason: String,
 }
 
-fn parse_version(value: &str) -> ParsedVersion {
-    let normalized = normalize_version_label(value);
-    let mut split = normalized.splitn(2, '-');
-    let base = split.next().unwrap_or_default();
-    let prerelease = split.next().unwrap_or_default().to_string();
-    let parts = base
-        .split('.')
-        .filter_map(|part| {
-            let digits = part
-                .chars()
-                .take_while(|ch| ch.is_ascii_digit())
-                .collect::<String>();
-            (!digits.is_empty())
-                .then(|| digits.parse::<u64>().ok())
-                .flatten()
-        })
-        .collect::<Vec<_>>();
-    ParsedVersion { parts, prerelease }
+#[derive(Debug, Clone)]
+struct ChecksumResolution {
+    asset_name: Option<String>,
+    asset_url: Option<String>,
+    sha256: Option<String>,
+    status: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum AssetExtension {
+    Dmg,
+    Zip,
+    Exe,
+    Msi,
+    AppImage,
+    TarGz,
+    TarXz,
+    Deb,
+    Rpm,
+}
+
+impl AssetExtension {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Dmg => "dmg",
+            Self::Zip => "zip",
+            Self::Exe => "exe",
+            Self::Msi => "msi",
+            Self::AppImage => "AppImage",
+            Self::TarGz => "tar.gz",
+            Self::TarXz => "tar.xz",
+            Self::Deb => "deb",
+            Self::Rpm => "rpm",
+        }
+    }
+
+    fn content_type_hint(self) -> &'static str {
+        match self {
+            Self::Dmg => "diskimage",
+            Self::Zip => "zip",
+            Self::Exe | Self::Msi => "octet-stream",
+            Self::AppImage => "octet-stream",
+            Self::TarGz | Self::TarXz => "gzip",
+            Self::Deb => "debian",
+            Self::Rpm => "rpm",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum OsHint {
+    Match(String),
+    Conflict(String),
+    Unknown,
+}
+
+#[derive(Debug, Clone)]
+enum ArchHint {
+    Match(String),
+    Conflict(String),
+    Unknown,
+}
+
+impl TargetOs {
+    fn label(self) -> &'static str {
+        match self {
+            Self::MacOs => "macOS",
+            Self::Windows => "Windows",
+            Self::Linux => "Linux",
+        }
+    }
+}
+
+impl TargetArch {
+    fn label(self) -> &'static str {
+        match self {
+            Self::X86_64 => "x86_64",
+            Self::Aarch64 => "arm64",
+            Self::Other => "current architecture",
+        }
+    }
+}
+
+fn detect_asset_extension(name: &str) -> Option<AssetExtension> {
+    if name.ends_with(".tar.gz") {
+        Some(AssetExtension::TarGz)
+    } else if name.ends_with(".tar.xz") {
+        Some(AssetExtension::TarXz)
+    } else if name.ends_with(".appimage") {
+        Some(AssetExtension::AppImage)
+    } else if name.ends_with(".dmg") {
+        Some(AssetExtension::Dmg)
+    } else if name.ends_with(".zip") {
+        Some(AssetExtension::Zip)
+    } else if name.ends_with(".exe") {
+        Some(AssetExtension::Exe)
+    } else if name.ends_with(".msi") {
+        Some(AssetExtension::Msi)
+    } else if name.ends_with(".deb") {
+        Some(AssetExtension::Deb)
+    } else if name.ends_with(".rpm") {
+        Some(AssetExtension::Rpm)
+    } else {
+        None
+    }
+}
+
+fn package_score(target_os: TargetOs, ext: AssetExtension) -> Option<i32> {
+    match target_os {
+        TargetOs::MacOs => match ext {
+            AssetExtension::Dmg => Some(120),
+            AssetExtension::Zip => Some(90),
+            AssetExtension::TarGz | AssetExtension::TarXz => Some(55),
+            _ => None,
+        },
+        TargetOs::Windows => match ext {
+            AssetExtension::Exe => Some(120),
+            AssetExtension::Msi => Some(110),
+            AssetExtension::Zip => Some(95),
+            _ => None,
+        },
+        TargetOs::Linux => match ext {
+            AssetExtension::AppImage => Some(120),
+            AssetExtension::TarGz => Some(100),
+            AssetExtension::TarXz => Some(95),
+            AssetExtension::Deb => Some(90),
+            AssetExtension::Rpm => Some(90),
+            _ => None,
+        },
+    }
 }
 
 #[cfg(test)]
@@ -565,64 +1128,98 @@ mod tests {
             .collect()
     }
 
+    fn release(tag: &str, prerelease: bool, asset_names: &[&str]) -> GitHubRelease {
+        GitHubRelease {
+            tag_name: tag.to_string(),
+            prerelease,
+            html_url: format!("https://example.invalid/{tag}"),
+            published_at: Some(format!("{tag}T00:00:00Z")),
+            assets: asset_names
+                .iter()
+                .map(|name| GitHubAsset {
+                    name: (*name).to_string(),
+                    browser_download_url: format!("https://example.invalid/{name}"),
+                    content_type: if name.ends_with(".dmg") {
+                        "application/x-apple-diskimage".to_string()
+                    } else if name.ends_with(".zip") {
+                        "application/zip".to_string()
+                    } else {
+                        "application/octet-stream".to_string()
+                    },
+                })
+                .collect(),
+            ..GitHubRelease::default()
+        }
+    }
+
     #[test]
     fn stable_release_is_selected_over_prerelease_by_default() {
         let releases = vec![
-            GitHubRelease {
-                tag_name: "v1.3.0-beta.1".to_string(),
-                prerelease: true,
-                html_url: "https://example.invalid/pre".to_string(),
-                assets: vec![GitHubAsset {
-                    name: "ProjectX-macos.dmg".to_string(),
-                    browser_download_url: "https://example.invalid/pre.dmg".to_string(),
-                }],
-                ..GitHubRelease::default()
-            },
-            GitHubRelease {
-                tag_name: "v1.2.0".to_string(),
-                html_url: "https://example.invalid/stable".to_string(),
-                assets: vec![GitHubAsset {
-                    name: "ProjectX-macos.dmg".to_string(),
-                    browser_download_url: "https://example.invalid/stable.dmg".to_string(),
-                }],
-                ..GitHubRelease::default()
-            },
+            release("v1.3.0-beta.1", true, &["ProjectX-macos.dmg"]),
+            release("v1.2.0", false, &["ProjectX-macos.dmg"]),
         ];
-
-        let release = release_from_list(&releases, false).expect("stable release");
+        let result = select_release(
+            &Client::new(),
+            &GitHubReleaseConfig {
+                owner: DEFAULT_OWNER.to_string(),
+                repo: DEFAULT_REPO.to_string(),
+                token: None,
+                include_prereleases: false,
+            },
+            &releases,
+        );
+        let release = result.expect("stable release");
         assert_eq!(release.version, "1.2.0");
     }
 
     #[test]
     fn prereleases_can_be_included_explicitly() {
-        let releases = vec![GitHubRelease {
-            tag_name: "v1.3.0-beta.1".to_string(),
-            prerelease: true,
-            html_url: "https://example.invalid/pre".to_string(),
-            assets: vec![GitHubAsset {
-                name: "ProjectX-macos.dmg".to_string(),
-                browser_download_url: "https://example.invalid/pre.dmg".to_string(),
-            }],
-            ..GitHubRelease::default()
-        }];
-
-        let release = release_from_list(&releases, true).expect("prerelease");
+        let releases = vec![release("v1.3.0-beta.1", true, &["ProjectX-macos.dmg"])];
+        let result = select_release(
+            &Client::new(),
+            &GitHubReleaseConfig {
+                owner: DEFAULT_OWNER.to_string(),
+                repo: DEFAULT_REPO.to_string(),
+                token: None,
+                include_prereleases: true,
+            },
+            &releases,
+        );
+        let release = result.expect("prerelease");
         assert_eq!(release.version, "1.3.0-beta.1");
     }
 
     #[test]
-    fn version_comparison_handles_v_prefixes() {
-        assert_eq!(
-            compare_versions("v1.2.3", "1.2.3"),
-            std::cmp::Ordering::Equal
+    fn release_selection_sorts_by_version_not_input_order() {
+        let releases = vec![
+            release("v1.2.0", false, &["ProjectX-macos.dmg"]),
+            release("v1.10.0", false, &["ProjectX-macos.dmg"]),
+        ];
+        let result = select_release(
+            &Client::new(),
+            &GitHubReleaseConfig {
+                owner: DEFAULT_OWNER.to_string(),
+                repo: DEFAULT_REPO.to_string(),
+                token: None,
+                include_prereleases: false,
+            },
+            &releases,
         );
+        let release = result.expect("sorted release");
+        assert_eq!(release.version, "1.10.0");
+    }
+
+    #[test]
+    fn version_comparison_handles_v_prefixes() {
+        assert_eq!(compare_versions("v1.2.3", "1.2.3"), Ordering::Equal);
         assert!(is_version_newer("v1.2.4", "1.2.3"));
     }
 
     #[test]
-    fn stable_release_beats_matching_prerelease() {
-        assert!(is_version_newer("1.2.3", "1.2.3-beta.1"));
-        assert!(!is_version_newer("1.2.3-beta.1", "1.2.3"));
+    fn semver_prerelease_comparison_is_more_precise() {
+        assert!(is_version_newer("1.2.3-beta.11", "1.2.3-beta.2"));
+        assert!(is_version_newer("1.2.3", "1.2.3-rc.1"));
+        assert!(!is_version_newer("1.2.3-alpha", "1.2.3"));
     }
 
     #[test]
@@ -664,31 +1261,105 @@ mod tests {
     #[test]
     fn offline_failure_uses_cached_release_without_claiming_success() {
         let config = github_release_config_from_env_map(&env_map(&[]));
-        let report = build_report_from_failure(
+        let report = build_failure_report(
             &config,
             "0.1.0".to_string(),
             200,
             FetchFailure::Offline("offline".to_string()),
             Some(UpdateCache {
-                checked_epoch: 100,
                 owner: config.owner.clone(),
                 repo: config.repo.clone(),
                 include_prereleases: false,
-                release: ReleaseInfo {
+                last_attempt_epoch: 150,
+                last_successful_check_epoch: 100,
+                last_status_kind: UpdateStatusKind::UpToDate,
+                last_error: None,
+                latest_release: Some(ReleaseInfo {
                     version: "0.2.0".to_string(),
                     tag_name: "v0.2.0".to_string(),
                     published_at: "2026-04-01T00:00:00Z".to_string(),
                     html_url: "https://example.invalid/releases/v0.2.0".to_string(),
+                    body: String::new(),
                     asset_name: "ProjectX-macos.dmg".to_string(),
                     asset_url: "https://example.invalid/ProjectX-macos.dmg".to_string(),
-                    body: String::new(),
-                },
+                    asset_content_type: "application/x-apple-diskimage".to_string(),
+                    asset_match_reason: "package dmg, os macos".to_string(),
+                    checksum_asset_name: Some("ProjectX-macos.dmg.sha256".to_string()),
+                    checksum_asset_url: Some(
+                        "https://example.invalid/ProjectX-macos.dmg.sha256".to_string(),
+                    ),
+                    expected_sha256: Some("a".repeat(64)),
+                    checksum_status: "SHA-256 metadata is available.".to_string(),
+                }),
+                recent_attempts: Vec::new(),
             }),
-            releases_page_url(&config.owner, &config.repo),
-            format!("{}/{}", config.owner, config.repo),
         );
         assert_eq!(report.status_kind, UpdateStatusKind::Offline);
         assert!(report.used_cached_release);
         assert!(report.available_update.is_some());
+    }
+
+    #[test]
+    fn asset_matching_prefers_native_package_type() {
+        let assets = vec![
+            GitHubAsset {
+                name: "ProjectX-macos.zip".to_string(),
+                browser_download_url: String::new(),
+                content_type: "application/zip".to_string(),
+            },
+            GitHubAsset {
+                name: "ProjectX-macos.dmg".to_string(),
+                browser_download_url: String::new(),
+                content_type: "application/x-apple-diskimage".to_string(),
+            },
+        ];
+        match select_platform_asset(&assets) {
+            AssetSelectionOutcome::Selected(selection) => {
+                assert_eq!(selection.asset.name, "ProjectX-macos.dmg");
+            }
+            other => panic!("unexpected asset selection result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ambiguous_asset_selection_is_reported() {
+        let assets = vec![
+            GitHubAsset {
+                name: "ProjectX-macos-universal.zip".to_string(),
+                browser_download_url: String::new(),
+                content_type: "application/zip".to_string(),
+            },
+            GitHubAsset {
+                name: "ProjectX-darwin.zip".to_string(),
+                browser_download_url: String::new(),
+                content_type: "application/zip".to_string(),
+            },
+        ];
+        assert!(matches!(
+            select_platform_asset(&assets),
+            AssetSelectionOutcome::Ambiguous(_)
+        ));
+    }
+
+    #[test]
+    fn checksum_assets_can_be_parsed() {
+        let parsed = parse_sha256_asset(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  ProjectX-macos.dmg",
+            "ProjectX-macos.dmg",
+        );
+        assert_eq!(
+            parsed,
+            Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string())
+        );
+    }
+
+    #[test]
+    fn verify_downloaded_asset_works() {
+        let path = std::env::temp_dir().join("projectx-update-test.bin");
+        fs::write(&path, b"projectx").expect("write temp file");
+        let hash = sha256_file(&path).expect("hash");
+        let result = verify_downloaded_asset(&path, &hash);
+        fs::remove_file(&path).ok();
+        assert!(result.is_ok());
     }
 }

@@ -600,6 +600,7 @@ pub struct UpdateCheckState {
     pub repo_label: String,
     pub release_page_url: String,
     pub used_cached_release: bool,
+    pub verification_status: Option<String>,
 }
 
 impl Default for UpdateCheckState {
@@ -624,6 +625,7 @@ impl Default for UpdateCheckState {
                 &crate::update::github_release_config().repo,
             ),
             used_cached_release: false,
+            verification_status: None,
         }
     }
 }

@@ -69,8 +69,15 @@ Behavior notes:
 
 - Public repositories do not require a token.
 - Private repositories can be checked if `PROJECTX_GITHUB_TOKEN` is provided.
+- Draft releases are ignored.
+- Prereleases are ignored unless `PROJECTX_INCLUDE_PRERELEASES=true`.
+- Release selection is explicit rather than trusting raw API order: ProjectX filters releases, parses version tags, prefers the newest appropriate version, and uses publish time only as a fallback.
+- Asset matching is scored by OS, architecture hints, package type, and naming clues instead of relying on one filename substring.
+- If multiple assets match equally well, the updater reports the ambiguity instead of guessing.
 - If GitHub is offline, rate-limited, or misconfigured, the app reports that state explicitly instead of pretending it is up to date.
-- The app stores the last successful release lookup in local app config so it can show cached metadata when the network check fails.
+- The app stores updater cache metadata in local app config, including the last attempted lookup, the last successful lookup, the last error state, the selected release metadata, and a short recent-attempt history.
+- When a matching `.sha256` release asset exists, the updater records the expected SHA-256 and can verify a user-selected downloaded file without auto-running it.
+- The updater remains manual and safe: it can open a release page, open a download, and verify a downloaded artifact, but it does not auto-install updates.
 
 macOS note:
 - The macOS release contains a real `ProjectX.app` bundle inside a DMG.

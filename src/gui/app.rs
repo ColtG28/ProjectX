@@ -919,6 +919,7 @@ impl MyApp {
         }
         state.checking = true;
         state.last_error = None;
+        state.verification_status = None;
         state.status = if manual {
             "Checking for updates...".to_string()
         } else {
@@ -961,6 +962,50 @@ impl MyApp {
             Ok(()) => format!("Opened {} for download.", update.asset_name),
             Err(error) => format!("Failed to open update download: {error}"),
         };
+    }
+
+    pub(crate) fn verify_downloaded_update(&mut self) {
+        let latest_release = self
+            .update_state
+            .lock()
+            .ok()
+            .and_then(|state| state.latest_release.clone());
+        let Some(release) = latest_release else {
+            self.status_message =
+                "No release metadata is available to verify against yet.".to_string();
+            return;
+        };
+        let Some(expected_sha256) = release.expected_sha256.as_deref() else {
+            let message = release.checksum_status.clone();
+            if let Ok(mut state) = self.update_state.lock() {
+                state.verification_status = Some(message.clone());
+            }
+            self.status_message = message;
+            return;
+        };
+
+        let Some(path) = FileDialog::new()
+            .set_title("Select downloaded update to verify")
+            .pick_file()
+        else {
+            return;
+        };
+
+        let result = crate::update::verify_downloaded_asset(&path, expected_sha256);
+        match result {
+            Ok(message) => {
+                if let Ok(mut state) = self.update_state.lock() {
+                    state.verification_status = Some(message.clone());
+                }
+                self.status_message = message;
+            }
+            Err(error) => {
+                if let Ok(mut state) = self.update_state.lock() {
+                    state.verification_status = Some(error.clone());
+                }
+                self.status_message = error;
+            }
+        }
     }
 
     pub(crate) fn open_release_notes(&mut self) {

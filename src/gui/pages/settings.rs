@@ -1,6 +1,6 @@
 use eframe::egui;
 
-use crate::gui::app::{home_dir, save_gui_settings};
+use crate::gui::app::{format_timestamp_with_relative, home_dir, save_gui_settings};
 use crate::gui::state::MyApp;
 
 impl MyApp {
@@ -201,13 +201,15 @@ impl MyApp {
                     if update_snapshot.last_checked_epoch > 0 {
                         ui.label(format!(
                             "Last checked: {}",
-                            update_snapshot.last_checked_epoch
+                            format_timestamp_with_relative(update_snapshot.last_checked_epoch)
                         ));
                     }
                     if update_snapshot.last_successful_check_epoch > 0 {
                         ui.label(format!(
                             "Last successful lookup: {}",
-                            update_snapshot.last_successful_check_epoch
+                            format_timestamp_with_relative(
+                                update_snapshot.last_successful_check_epoch
+                            )
                         ));
                     }
                     if update_snapshot.used_cached_release {
@@ -238,6 +240,20 @@ impl MyApp {
                             self.open_available_update();
                         }
 
+                        if ui
+                            .add_enabled(
+                                update_snapshot
+                                    .latest_release
+                                    .as_ref()
+                                    .and_then(|release| release.expected_sha256.as_ref())
+                                    .is_some(),
+                                egui::Button::new("Verify downloaded update"),
+                            )
+                            .clicked()
+                        {
+                            self.verify_downloaded_update();
+                        }
+
                         if ui.button("Open release page").clicked() {
                             self.open_release_notes();
                         }
@@ -254,6 +270,16 @@ impl MyApp {
                         }
                         if !update.asset_name.is_empty() {
                             ui.label(format!("Download asset: {}", update.asset_name));
+                        }
+                        if !update.asset_match_reason.is_empty() {
+                            ui.label(format!("Asset selection: {}", update.asset_match_reason));
+                        }
+                        if !update.checksum_status.is_empty() {
+                            ui.label(format!("Checksum: {}", update.checksum_status));
+                        }
+                        if let Some(hash) = update.expected_sha256.as_deref() {
+                            let preview_len = hash.len().min(16);
+                            ui.label(format!("Expected SHA-256: {}...", &hash[..preview_len]));
                         }
                         if !update.body.trim().is_empty() {
                             ui.label("Release notes preview:");
@@ -276,6 +302,11 @@ impl MyApp {
 
                     if update_snapshot.latest_release.is_none() {
                         ui.label("Latest stable release metadata is not available yet.");
+                    }
+
+                    if let Some(message) = &update_snapshot.verification_status {
+                        ui.add_space(4.0 * self.ui_metrics.scale_factor);
+                        ui.label(format!("Verification: {message}"));
                     }
                 });
 
