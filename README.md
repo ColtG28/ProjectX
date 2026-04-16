@@ -4,7 +4,6 @@ ProjectX is a GUI-first defensive file scanner built in Rust with `egui`/`eframe
 
 ## Downloads
 
-- [Downloads](./DOWNLOADS.md)
 - [GitHub releases](https://github.com/ColtG-28/ProjectX/releases)
 
 ## Scope
