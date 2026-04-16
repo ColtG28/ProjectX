@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::path::PathBuf;
 
 pub const APP_DIR_NAME: &str = "ProjectX";
 const ENV_DATA_DIR: &str = "PROJECTX_DATA_DIR";
@@ -16,18 +15,16 @@ struct AppPaths {
     cache_root: PathBuf,
 }
 
-static APP_PATHS: OnceLock<AppPaths> = OnceLock::new();
-
-pub fn config_root() -> &'static Path {
-    &paths().config_root
+pub fn config_root() -> PathBuf {
+    paths().config_root
 }
 
-pub fn data_root() -> &'static Path {
-    &paths().data_root
+pub fn data_root() -> PathBuf {
+    paths().data_root
 }
 
-pub fn cache_root() -> &'static Path {
-    &paths().cache_root
+pub fn cache_root() -> PathBuf {
+    paths().cache_root
 }
 
 pub fn quarantine_dir() -> PathBuf {
@@ -124,9 +121,9 @@ pub fn yara_rules_override_dir() -> PathBuf {
 
 pub fn ensure_app_dirs() -> Result<(), String> {
     let required = [
-        config_root().to_path_buf(),
-        data_root().to_path_buf(),
-        cache_root().to_path_buf(),
+        config_root(),
+        data_root(),
+        cache_root(),
         quarantine_dir(),
         reports_dir(),
         intelligence_dir(),
@@ -147,11 +144,9 @@ pub fn ensure_app_dirs() -> Result<(), String> {
     Ok(())
 }
 
-fn paths() -> &'static AppPaths {
-    APP_PATHS.get_or_init(|| {
-        let env_map = env::vars().collect::<HashMap<String, String>>();
-        compute_paths(std::env::consts::OS, &env_map)
-    })
+fn paths() -> AppPaths {
+    let env_map = env::vars().collect::<HashMap<String, String>>();
+    compute_paths(std::env::consts::OS, &env_map)
 }
 
 fn compute_paths(os: &str, env_map: &HashMap<String, String>) -> AppPaths {

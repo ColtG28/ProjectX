@@ -10,6 +10,12 @@ pub fn guess_from_extension(ext: &str) -> &'static str {
         "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         "pdf" => "application/pdf",
         "zip" => "application/zip",
+        "mp4" => "video/mp4",
+        "m4v" => "video/x-m4v",
+        "mov" => "video/quicktime",
+        "avi" => "video/x-msvideo",
+        "mkv" => "video/x-matroska",
+        "webm" => "video/webm",
         "elf" => "application/x-elf",
         "lzfse" => "application/x-apple-lzfse",
         "car" => "application/x-apple-asset-catalog",
@@ -32,6 +38,22 @@ pub fn sniff_from_bytes(bytes: &[u8], ext: &str) -> &'static str {
     }
     if bytes.starts_with(b"%PDF") {
         return "application/pdf";
+    }
+    if looks_like_mp4_family(bytes) {
+        return match ext.to_ascii_lowercase().as_str() {
+            "mov" => "video/quicktime",
+            "m4v" => "video/x-m4v",
+            _ => "video/mp4",
+        };
+    }
+    if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"AVI ") {
+        return "video/x-msvideo";
+    }
+    if bytes.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
+        return match ext.to_ascii_lowercase().as_str() {
+            "webm" => "video/webm",
+            _ => "video/x-matroska",
+        };
     }
     if bytes.starts_with(b"BOMStore") {
         return "application/x-apple-asset-catalog";
@@ -62,4 +84,8 @@ pub fn sniff_from_bytes(bytes: &[u8], ext: &str) -> &'static str {
     } else {
         guess_from_extension(ext)
     }
+}
+
+fn looks_like_mp4_family(bytes: &[u8]) -> bool {
+    bytes.len() >= 12 && bytes.get(4..8) == Some(b"ftyp")
 }

@@ -330,10 +330,76 @@ impl MyApp {
         );
         ui.add_space(theme::section_gap(self.ui_metrics.scale_factor));
 
+        let diagnostics = self.suspicious_diagnostics_summary();
+        theme::card_frame().show(ui, |ui| {
+            ui.label(egui::RichText::new("Suspicious placement diagnostics").strong());
+            ui.small(
+                "Live breakdown of the current suspicious and retained population so weak patterns are visible before any tuning.",
+            );
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                stat_chip(
+                    ui,
+                    "Suspicious total",
+                    diagnostics.suspicious_total.to_string(),
+                    Color32::from_rgb(224, 185, 105),
+                );
+                stat_chip(
+                    ui,
+                    "Retained in quarantine",
+                    diagnostics.retained_total.to_string(),
+                    Color32::from_rgb(132, 170, 214),
+                );
+                stat_chip(
+                    ui,
+                    "Top reason",
+                    diagnostics
+                        .by_reason_name
+                        .first()
+                        .map(|entry| format!("{} ({})", entry.label, entry.count))
+                        .unwrap_or_else(|| "None".to_string()),
+                    Color32::from_rgb(176, 221, 255),
+                );
+                stat_chip(
+                    ui,
+                    "Top extension",
+                    diagnostics
+                        .by_extension
+                        .first()
+                        .map(|entry| format!("{} ({})", entry.label, entry.count))
+                        .unwrap_or_else(|| "None".to_string()),
+                    Color32::from_rgb(176, 221, 255),
+                );
+            });
+            ui.add_space(6.0);
+            render_diagnostic_list(ui, "Top reasons", &diagnostics.by_reason_name, 5);
+            render_diagnostic_list(ui, "Top reason sources", &diagnostics.by_reason_source, 5);
+            render_diagnostic_list(ui, "Top dispositions", &diagnostics.by_disposition, 5);
+            render_diagnostic_list(
+                ui,
+                "Top weak/repeated combinations",
+                &diagnostics.weak_reason_combinations,
+                5,
+            );
+            render_diagnostic_list(
+                ui,
+                "Top quarantined extensions",
+                &diagnostics.retained_by_extension,
+                5,
+            );
+        });
+        ui.add_space(theme::item_gap(self.ui_metrics.scale_factor));
+
         let displayed_ids = indices
             .iter()
             .map(|&index| self.records[index].record_id())
             .collect::<HashSet<_>>();
+        let selected_visible = self
+            .selected_report_ids
+            .iter()
+            .filter(|id| displayed_ids.contains(*id))
+            .count();
+        let selected_quarantined = self.selected_visible_quarantined_ids(&displayed_ids);
         let toolbar = render_record_workspace_toolbar(
             ui,
             &mut self.history_search,
@@ -343,8 +409,10 @@ impl MyApp {
             &mut self.report_sort_order,
             Some(&mut self.history_quarantine_only),
             indices.len(),
-            None,
+            Some(selected_visible),
+            Some(selected_quarantined.len()),
             false,
+            true,
             "Operations keeps the long-running audit view while Results stays focused on active triage.",
         );
         if toolbar.select_all_shown {
@@ -356,6 +424,44 @@ impl MyApp {
                 self.selected_report_ids.remove(id);
             }
         }
+        if toolbar.restore_selected_quarantined {
+            self.queue_restore_selected_confirmation(selected_quarantined.clone());
+        }
+        theme::card_frame().show(ui, |ui| {
+            ui.label(egui::RichText::new("Bulk quarantine actions").strong());
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Select visible quarantined").clicked() {
+                    self.selected_report_ids
+                        .extend(indices.iter().filter_map(|index| {
+                            let record = &self.records[*index];
+                            (record.resolved_storage_state() == RecordStorageState::InQuarantine
+                                && record.quarantine_path.is_some())
+                                .then(|| record.record_id())
+                        }));
+                }
+                if ui
+                    .add_enabled(
+                        !selected_quarantined.is_empty(),
+                        egui::Button::new("Restore selected quarantined"),
+                    )
+                    .clicked()
+                {
+                    self.queue_restore_selected_confirmation(selected_quarantined.clone());
+                }
+                if ui.button("Clear selection").clicked() {
+                    for id in &displayed_ids {
+                        self.selected_report_ids.remove(id);
+                    }
+                }
+            });
+            ui.small(format!(
+                "{} visible quarantined item(s) selected for restore.",
+                selected_quarantined.len()
+            ));
+            ui.small(
+                "Bulk restore never overwrites a conflicting destination file. Items that cannot be restored stay in quarantine and report a per-item failure.",
+            );
+        });
         ui.separator();
         self.render_record_workspace(
             ui,
@@ -364,5 +470,22 @@ impl MyApp {
             "Run a scan or clear the quarantine-only toggle to see more operational history.",
             "Operations is optimized for audit review, quarantine handling, and automatic protection outcomes. Restore and delete remain limited to quarantined files and always require confirmation.",
         );
+    }
+}
+
+fn render_diagnostic_list(
+    ui: &mut egui::Ui,
+    title: &str,
+    values: &[crate::gui::app::DiagnosticCount],
+    limit: usize,
+) {
+    ui.add_space(4.0);
+    ui.label(egui::RichText::new(title).strong());
+    if values.is_empty() {
+        ui.small("No matching data yet.");
+        return;
+    }
+    for entry in values.iter().take(limit) {
+        ui.small(format!("{}: {}", entry.label, entry.count));
     }
 }

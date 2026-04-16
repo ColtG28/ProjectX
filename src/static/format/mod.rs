@@ -109,6 +109,13 @@ pub fn run(ctx: &mut ScanContext) {
                 ));
             }
         }
+        detect::FormatKind::MediaContainer => {
+            ctx.log_event(
+                "format",
+                "Recognized media/container structure; keeping passive analysis focused on corroborated signals."
+                    .to_string(),
+            );
+        }
         detect::FormatKind::Unknown => {}
     }
 

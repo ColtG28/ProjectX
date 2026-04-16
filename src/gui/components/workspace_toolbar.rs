@@ -6,6 +6,7 @@ use crate::gui::state::{ReportSortOrder, ReportStorageFilter, ReportVerdictFilte
 pub struct WorkspaceToolbarResponse {
     pub select_all_shown: bool,
     pub clear_shown: bool,
+    pub restore_selected_quarantined: bool,
     pub delete_selected_reports: bool,
 }
 
@@ -20,7 +21,9 @@ pub fn render_record_workspace_toolbar(
     quarantine_only: Option<&mut bool>,
     shown_count: usize,
     selected_visible: Option<usize>,
+    selected_quarantined_visible: Option<usize>,
     allow_bulk_delete: bool,
+    allow_bulk_restore: bool,
     note: &str,
 ) -> WorkspaceToolbarResponse {
     let mut response = WorkspaceToolbarResponse::default();
@@ -87,6 +90,15 @@ pub fn render_record_workspace_toolbar(
                 }
                 if ui.button("Clear selection").clicked() {
                     response.clear_shown = true;
+                }
+                if ui
+                    .add_enabled(
+                        allow_bulk_restore && selected_quarantined_visible.unwrap_or(0) > 0,
+                        egui::Button::new("Restore selected quarantined"),
+                    )
+                    .clicked()
+                {
+                    response.restore_selected_quarantined = true;
                 }
                 if ui
                     .add_enabled(

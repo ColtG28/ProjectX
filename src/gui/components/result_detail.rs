@@ -109,6 +109,10 @@ pub fn render_result_detail(
         if let Some(safety) = record.safety_score {
             ui.label(format!("Safety score: {safety:.2}"));
         }
+        if let Some(primary_reason) = primary_reason_summary(record) {
+            ui.label(format!("Primary reason: {primary_reason}"));
+        }
+        ui.label(format!("Signal profile: {}", signal_profile_label(record)));
         if record
             .signal_sources
             .iter()
@@ -192,11 +196,21 @@ pub fn render_result_detail(
     ui.add_space(8.0 * scale);
     detail_section(ui, "Provenance and storage", |ui| {
         ui.monospace(&record.path);
+        ui.label(format!(
+            "Disposition: {}",
+            record.resolved_storage_state().label()
+        ));
         ui.label("Viewing or copying metadata does not modify local files.");
+        if !record.action_note.is_empty() {
+            ui.add_space(4.0 * scale);
+            ui.label(&record.action_note);
+        }
         if let Some(path) = record.quarantine_path.as_deref() {
             ui.label("Quarantine");
             ui.monospace(path);
             ui.label("Restore and delete actions modify local disk state and always require confirmation.");
+        } else {
+            ui.label("No retained quarantine copy is associated with this result.");
         }
         if let Some(path) = record.report_path.as_deref() {
             ui.label("Report");
@@ -259,4 +273,58 @@ fn signal_reason_card(
             ui.label(description);
             ui.small(format!("weight {:.2}", reason.weight));
         });
+}
+
+fn primary_reason_summary(record: &ScanRecord) -> Option<String> {
+    let mut reasons = record.detection_reasons.iter().collect::<Vec<_>>();
+    reasons.sort_by(|left, right| right.weight.total_cmp(&left.weight));
+    reasons.first().map(|reason| {
+        if !reason.name.trim().is_empty() {
+            reason.name.clone()
+        } else if !reason.reason_type.trim().is_empty() {
+            reason.reason_type.clone()
+        } else {
+            "Unknown reason".to_string()
+        }
+    })
+}
+
+fn signal_profile_label(record: &ScanRecord) -> String {
+    if record.detection_reasons.is_empty() {
+        return "No structured detection reasons recorded".to_string();
+    }
+
+    let sources = record
+        .detection_reasons
+        .iter()
+        .map(|reason| {
+            if reason.source.is_empty() {
+                "unknown"
+            } else {
+                reason.source.as_str()
+            }
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let strongest = record
+        .detection_reasons
+        .iter()
+        .map(|reason| reason.weight)
+        .fold(0.0, f64::max);
+    let trust_context = if record
+        .signal_sources
+        .iter()
+        .any(|source| source == "intelligence")
+    {
+        " with trust/provenance context"
+    } else {
+        ""
+    };
+
+    if sources.len() <= 1 && strongest < 0.9 {
+        format!("Single-source weak signal{trust_context}")
+    } else if sources.len() >= 2 || strongest >= 1.1 {
+        format!("Corroborated detection path{trust_context}")
+    } else {
+        format!("Supporting signal path{trust_context}")
+    }
 }

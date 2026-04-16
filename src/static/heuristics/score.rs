@@ -146,7 +146,22 @@ pub fn calculate(ctx: &ScanContext) -> f64 {
         extension.as_str(),
         "docm" | "dotm" | "xlsm" | "xltm" | "pptm" | "doc" | "xls" | "ppt"
     );
+    let json_data_context = matches!(extension.as_str(), "json" | "json5" | "map" | "har")
+        || ctx.sniffed_mime.contains("json")
+        || file_name.ends_with(".json")
+        || file_name.contains("manifest")
+        || file_name.contains("package-lock")
+        || file_name.contains("tsconfig")
+        || file_name.contains("composer.lock")
+        || file_name.contains("pnpm-lock")
+        || file_name.contains("yarn.lock");
     let archive_context = matches!(extension.as_str(), "zip" | "jar" | "docx" | "xlsx" | "pptx");
+    let media_container_context = matches!(
+        extension.as_str(),
+        "mp4" | "m4v" | "mov" | "avi" | "mkv" | "webm" | "mp3" | "m4a"
+    ) || ctx.sniffed_mime.starts_with("video/")
+        || ctx.sniffed_mime.starts_with("audio/")
+        || matches!(ctx.detected_format.as_deref(), Some("MediaContainer"));
 
     let adjusted = ctx
         .findings
@@ -161,7 +176,9 @@ pub fn calculate(ctx: &ScanContext) -> f64 {
                 automation_context,
                 benign_encoded_context,
                 office_document_context,
+                json_data_context,
                 archive_context,
+                media_container_context,
                 has_rule_match,
                 has_decode_or_emulation,
                 has_strong_structural_signal,
@@ -275,7 +292,9 @@ fn adjusted_weight(
     automation_context: bool,
     benign_encoded_context: bool,
     office_document_context: bool,
+    json_data_context: bool,
     archive_context: bool,
+    media_container_context: bool,
     has_rule_match: bool,
     has_decode_or_emulation: bool,
     has_strong_structural_signal: bool,
@@ -427,6 +446,15 @@ fn adjusted_weight(
         weight *= 0.55;
     }
 
+    if json_data_context
+        && matches!(finding.code.as_str(), "DECODED_ACTIVE_CONTENT")
+        && !has_rule_match
+        && !has_strong_structural_signal
+        && !has_bad_reputation
+    {
+        weight *= 0.14;
+    }
+
     if archive_context
         && matches!(
             finding.code.as_str(),
@@ -443,6 +471,24 @@ fn adjusted_weight(
         && !has_strong_structural_signal
     {
         weight *= 0.75;
+    }
+
+    if media_container_context
+        && matches!(
+            finding.code.as_str(),
+            "DECODED_ACTIVE_CONTENT" | "DECODED_FOLLOW_ON_BEHAVIOR" | "HIGH_ENTROPY" | "FILE_SMALL"
+        )
+        && !has_rule_match
+        && !has_strong_structural_signal
+        && !has_bad_reputation
+    {
+        weight *= match finding.code.as_str() {
+            "DECODED_ACTIVE_CONTENT" => 0.12,
+            "DECODED_FOLLOW_ON_BEHAVIOR" => 0.4,
+            "HIGH_ENTROPY" => 0.35,
+            "FILE_SMALL" => 0.5,
+            _ => 1.0,
+        };
     }
 
     if has_bad_reputation
@@ -671,4 +717,176 @@ fn has_structural_content_corroboration(ctx: &ScanContext) -> bool {
     (has_pe_structure && has_pe_content)
         || (has_elf_structure && has_elf_content)
         || (has_macho_structure && has_macho_content)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::r#static::config::ScanConfig;
+    use crate::r#static::context::ScanContext;
+    use crate::r#static::heuristics::decision;
+    use crate::r#static::types::{Finding, Score, Severity, StringPool};
+    use std::path::PathBuf;
+
+    fn test_ctx(path: &str, extension: &str, mime: &str, format: Option<&str>) -> ScanContext {
+        ScanContext {
+            input_path: PathBuf::from(path),
+            file_name: PathBuf::from(path)
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string(),
+            extension: extension.to_string(),
+            original_size_bytes: 1024,
+            input_truncated: false,
+            bytes: Vec::new(),
+            sha256: "0".repeat(64),
+            sniffed_mime: mime.to_string(),
+            detected_format: format.map(str::to_string),
+            normalized_strings: Vec::new(),
+            decoded_strings: Vec::new(),
+            score: Score::default(),
+            findings: Vec::new(),
+            views: Vec::new(),
+            strings: StringPool::default(),
+            stage_timings: Vec::new(),
+            artifacts: Vec::new(),
+            telemetry: Vec::new(),
+            cache: None,
+            rules_version: String::new(),
+            emulation: None,
+            intelligence: None,
+            ml_assessment: None,
+            threat_severity: None,
+            config: ScanConfig::default(),
+        }
+    }
+
+    #[test]
+    fn weak_decoded_noise_is_dampened_for_media_containers() {
+        let mut media = test_ctx(
+            "/Users/test/Videos/obs-clip.mp4",
+            "mp4",
+            "video/mp4",
+            Some("MediaContainer"),
+        );
+        media.findings.push(Finding::new(
+            "DECODED_ACTIVE_CONTENT",
+            "accidental decoded string noise",
+            1.8,
+        ));
+        media.findings.push(Finding::new(
+            "DECODED_FOLLOW_ON_BEHAVIOR",
+            "single weak follow-on marker",
+            1.6,
+        ));
+
+        let risk = calculate(&media);
+        let verdict = decision::classify(&media, risk, &media.config.thresholds);
+
+        assert!(risk < media.config.thresholds.suspicious_min);
+        assert_eq!(verdict, Severity::Clean);
+    }
+
+    #[test]
+    fn corroborated_non_media_signals_still_escalate() {
+        let mut script = test_ctx("/tmp/dropper.ps1", "ps1", "text/plain", None);
+        script.findings.push(Finding::new(
+            "DECODED_ACTIVE_CONTENT",
+            "decoded powershell command",
+            2.0,
+        ));
+        script
+            .findings
+            .push(Finding::new("YARA_MATCH", "rule match", 2.2));
+        script.findings.push(Finding::new(
+            "PE_SCRIPTED_DOWNLOADER_STRINGS",
+            "network downloader strings",
+            1.8,
+        ));
+
+        let risk = calculate(&script);
+        let verdict = decision::classify(&script, risk, &script.config.thresholds);
+
+        assert!(risk >= script.config.thresholds.suspicious_min);
+        assert_ne!(verdict, Severity::Clean);
+    }
+
+    #[test]
+    fn weak_decoded_noise_is_dampened_for_json_data_files() {
+        let mut json = test_ctx(
+            "/Users/test/AppData/package-lock.json",
+            "json",
+            "application/json",
+            None,
+        );
+        json.findings.push(Finding::new(
+            "DECODED_ACTIVE_CONTENT",
+            "accidental decoded marker in dependency metadata",
+            1.8,
+        ));
+
+        let risk = calculate(&json);
+        let verdict = decision::classify(&json, risk, &json.config.thresholds);
+
+        assert!(risk < json.config.thresholds.suspicious_min);
+        assert_eq!(verdict, Severity::Clean);
+    }
+
+    #[test]
+    fn corroborated_json_findings_can_still_escalate() {
+        let mut json = test_ctx(
+            "/tmp/suspicious/package-lock.json",
+            "json",
+            "application/json",
+            None,
+        );
+        json.findings.push(Finding::new(
+            "DECODED_ACTIVE_CONTENT",
+            "decoded network marker",
+            1.8,
+        ));
+        json.findings
+            .push(Finding::new("YARA_MATCH", "suspicious rule hit", 2.4));
+
+        let risk = calculate(&json);
+        let verdict = decision::classify(&json, risk, &json.config.thresholds);
+
+        assert!(risk >= json.config.thresholds.suspicious_min);
+        assert_ne!(verdict, Severity::Clean);
+    }
+
+    #[test]
+    fn trust_context_does_not_override_strong_corroborated_signals() {
+        let mut script = test_ctx(
+            "/opt/homebrew/Cellar/example/bin/suspicious.sh",
+            "sh",
+            "text/plain",
+            None,
+        );
+        script.findings.push(Finding::new(
+            "TRUST_PACKAGE_MANAGER_CONTEXT",
+            "homebrew layout",
+            0.0,
+        ));
+        script
+            .findings
+            .push(Finding::new("YARA_MATCH", "matched suspicious rule", 2.5));
+        script.findings.push(Finding::new(
+            "DECODED_FOLLOW_ON_BEHAVIOR",
+            "follow-on shell behavior",
+            2.0,
+        ));
+        script.findings.push(Finding::new(
+            "ELF_EXEC_NETWORK_SYMBOL_CHAIN",
+            "network exec chain",
+            2.4,
+        ));
+
+        let risk = calculate(&script);
+        let verdict = decision::classify(&script, risk, &script.config.thresholds);
+
+        assert!(risk >= script.config.thresholds.suspicious_min);
+        assert_ne!(verdict, Severity::Clean);
+    }
 }

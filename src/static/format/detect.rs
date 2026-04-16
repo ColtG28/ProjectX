@@ -8,6 +8,7 @@ pub enum FormatKind {
     Pdf,
     Zip,
     Office,
+    MediaContainer,
     Unknown,
 }
 
@@ -25,6 +26,9 @@ pub fn kind(bytes: &[u8], extension: &str) -> FormatKind {
     }
     if bytes.starts_with(b"%PDF") || ext == "pdf" {
         return FormatKind::Pdf;
+    }
+    if is_media_container(bytes, &ext) {
+        return FormatKind::MediaContainer;
     }
     if office::ole::is_ole(bytes)
         && (matches!(
@@ -46,6 +50,13 @@ pub fn kind(bytes: &[u8], extension: &str) -> FormatKind {
     }
 
     FormatKind::Unknown
+}
+
+fn is_media_container(bytes: &[u8], ext: &str) -> bool {
+    matches!(ext, "mp4" | "m4v" | "mov" | "avi" | "mkv" | "webm")
+        || (bytes.len() >= 12 && bytes.get(4..8) == Some(b"ftyp"))
+        || (bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"AVI "))
+        || bytes.starts_with(&[0x1A, 0x45, 0xDF, 0xA3])
 }
 
 fn looks_like_legacy_office(bytes: &[u8]) -> bool {

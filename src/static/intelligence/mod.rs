@@ -215,6 +215,8 @@ fn evaluate(
         }
     }
 
+    apply_runtime_provenance(ctx, &mut summary, &path_text, &file_name);
+
     if let Some(detail) = lookup_hash_note(sha256(ctx), known_bad_paths) {
         ctx.push_finding(Finding::new(
             "REPUTATION_KNOWN_BAD_HASH",
@@ -356,6 +358,245 @@ fn evaluate(
         serde_json::to_string(&summary).unwrap_or_else(|_| "{}".to_string()),
     ));
     ctx.intelligence = Some(summary);
+}
+
+fn apply_runtime_provenance(
+    ctx: &mut ScanContext,
+    summary: &mut IntelligenceSummary,
+    path_text: &str,
+    file_name: &str,
+) {
+    for signal in runtime_provenance_signals(path_text, file_name) {
+        ctx.push_finding(Finding::new(
+            signal.finding_code,
+            signal.message.clone(),
+            0.0,
+        ));
+        summary
+            .trust_reasons
+            .push(format!("{}: {}", signal.source, signal.note));
+        if !summary.trust_categories.contains(&signal.category) {
+            summary.trust_categories.push(signal.category.clone());
+        }
+        if !summary.trust_ecosystems.contains(&signal.ecosystem) {
+            summary.trust_ecosystems.push(signal.ecosystem.clone());
+        }
+        if !summary.trust_vendors.contains(&signal.vendor) {
+            summary.trust_vendors.push(signal.vendor.clone());
+        }
+        summary.policy_effects.push(signal.policy_effect.clone());
+        summary.records.push(IntelligenceRecord {
+            kind: signal.kind,
+            category: signal.category,
+            source: signal.source,
+            confidence: signal.confidence,
+            trust_level: Some(signal.trust_level),
+            note: signal.note,
+            platform: signal.platform,
+            version: None,
+            expires: None,
+            allowed_dampen: signal.allowed_dampen,
+            matched_markers: signal.matched_markers,
+            vendor: Some(signal.vendor),
+            ecosystem: Some(signal.ecosystem),
+            rationale: Some(signal.rationale),
+            version_range: None,
+            typical_files: Vec::new(),
+            signer_hint: signal.signer_hint,
+            package_source: signal.package_source,
+            distribution_channel: signal.distribution_channel,
+            confidence_weight: None,
+            trust_scope: signal.trust_scope,
+            confidence_score: None,
+            source_quality: None,
+            last_verified: None,
+            decay_factor: Some(1.0),
+        });
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeProvenanceSignal {
+    finding_code: &'static str,
+    kind: String,
+    category: String,
+    source: String,
+    confidence: String,
+    trust_level: String,
+    note: String,
+    message: String,
+    platform: Option<String>,
+    vendor: String,
+    ecosystem: String,
+    rationale: String,
+    package_source: Option<String>,
+    distribution_channel: Option<String>,
+    signer_hint: Option<String>,
+    allowed_dampen: Vec<String>,
+    trust_scope: Vec<String>,
+    matched_markers: Vec<String>,
+    policy_effect: String,
+}
+
+fn runtime_provenance_signals(path_text: &str, file_name: &str) -> Vec<RuntimeProvenanceSignal> {
+    let mut signals = Vec::new();
+
+    if path_text.starts_with("/system/applications/")
+        || path_text.starts_with("/system/library/coreservices/")
+    {
+        signals.push(RuntimeProvenanceSignal {
+            finding_code: "TRUST_BENIGN_TOOLING_CONTEXT",
+            kind: "trusted_vendor_context".to_string(),
+            category: "platform_trust".to_string(),
+            source: "runtime_path_context".to_string(),
+            confidence: "medium".to_string(),
+            trust_level: "medium".to_string(),
+            note: "Recognized protected macOS system-application path context.".to_string(),
+            message: "Runtime path context recognized a protected macOS system application layout [medium_trust] (/System application path)".to_string(),
+            platform: Some("macos".to_string()),
+            vendor: "Apple".to_string(),
+            ecosystem: "macos".to_string(),
+            rationale: "Built-in macOS applications under protected system paths are commonly benign software locations.".to_string(),
+            package_source: Some("system_applications".to_string()),
+            distribution_channel: Some("apple_system_install".to_string()),
+            signer_hint: Some("Apple system application path".to_string()),
+            allowed_dampen: vec!["binary_loader_noise".to_string(), "file_profile_noise".to_string()],
+            trust_scope: vec!["binary_loader_noise".to_string(), "file_profile_noise".to_string()],
+            matched_markers: vec!["/System/Applications".to_string()],
+            policy_effect: "Protected macOS system-app provenance dampened only weak unsupported loader/profile noise.".to_string(),
+        });
+    } else if path_text.starts_with("/applications/") && path_text.contains(".app/") {
+        signals.push(RuntimeProvenanceSignal {
+            finding_code: "TRUST_BENIGN_TOOLING_CONTEXT",
+            kind: "trusted_vendor_context".to_string(),
+            category: "platform_trust".to_string(),
+            source: "runtime_path_context".to_string(),
+            confidence: "low".to_string(),
+            trust_level: "low".to_string(),
+            note: "Recognized installed macOS app-bundle path context.".to_string(),
+            message: "Runtime path context recognized an installed macOS app bundle [low_trust] (/Applications bundle path)".to_string(),
+            platform: Some("macos".to_string()),
+            vendor: "macOS application bundle".to_string(),
+            ecosystem: "macos".to_string(),
+            rationale: "Installed app bundles under /Applications are a common benign software layout, but path alone is not a strong trust signal.".to_string(),
+            package_source: Some("application_bundle".to_string()),
+            distribution_channel: Some("user_installed_app".to_string()),
+            signer_hint: Some("Bundle path only; no signer verification".to_string()),
+            allowed_dampen: vec!["binary_loader_noise".to_string(), "file_profile_noise".to_string()],
+            trust_scope: vec!["binary_loader_noise".to_string(), "file_profile_noise".to_string()],
+            matched_markers: vec!["/Applications".to_string(), ".app".to_string()],
+            policy_effect: "Installed app-bundle provenance dampened only weak unsupported loader/profile noise.".to_string(),
+        });
+    }
+
+    if path_text.contains("/opt/homebrew/cellar/")
+        || path_text.contains("/usr/local/cellar/")
+        || path_text.contains("/opt/homebrew/caskroom/")
+    {
+        signals.push(RuntimeProvenanceSignal {
+            finding_code: "TRUST_PACKAGE_MANAGER_CONTEXT",
+            kind: "package_manager_context".to_string(),
+            category: "package_ecosystem".to_string(),
+            source: "runtime_path_context".to_string(),
+            confidence: "medium".to_string(),
+            trust_level: "medium".to_string(),
+            note: "Recognized Homebrew package-management layout.".to_string(),
+            message: "Runtime path context recognized Homebrew-managed software [medium_trust] (Homebrew Cellar/Caskroom layout)".to_string(),
+            platform: Some("macos".to_string()),
+            vendor: "Homebrew".to_string(),
+            ecosystem: "homebrew".to_string(),
+            rationale: "Homebrew cellar and cask layouts are common provenance signals for benign packaged software.".to_string(),
+            package_source: Some("homebrew".to_string()),
+            distribution_channel: Some("package_manager".to_string()),
+            signer_hint: None,
+            allowed_dampen: vec!["binary_loader_noise".to_string(), "file_profile_noise".to_string()],
+            trust_scope: vec!["binary_loader_noise".to_string(), "file_profile_noise".to_string()],
+            matched_markers: vec!["homebrew".to_string()],
+            policy_effect: "Homebrew provenance dampened only weak unsupported loader/profile noise.".to_string(),
+        });
+    }
+
+    if path_text.contains("/node_modules/") || path_text.contains("\\node_modules\\") {
+        signals.push(RuntimeProvenanceSignal {
+            finding_code: "TRUST_PACKAGE_MANAGER_CONTEXT",
+            kind: "package_manager_context".to_string(),
+            category: "package_ecosystem".to_string(),
+            source: "runtime_path_context".to_string(),
+            confidence: "medium".to_string(),
+            trust_level: "medium".to_string(),
+            note: "Recognized npm-style dependency layout.".to_string(),
+            message: "Runtime path context recognized npm-style dependency packaging [medium_trust] (node_modules layout)".to_string(),
+            platform: None,
+            vendor: "npm ecosystem".to_string(),
+            ecosystem: "npm".to_string(),
+            rationale: "node_modules directories are a common benign packaging structure for JavaScript dependencies.".to_string(),
+            package_source: Some("npm".to_string()),
+            distribution_channel: Some("package_manager".to_string()),
+            signer_hint: None,
+            allowed_dampen: vec!["script_noise".to_string(), "file_profile_noise".to_string()],
+            trust_scope: vec!["script_noise".to_string(), "file_profile_noise".to_string()],
+            matched_markers: vec!["node_modules".to_string()],
+            policy_effect: "npm packaging provenance dampened only weak unsupported script/profile noise.".to_string(),
+        });
+    }
+
+    if path_text.contains("/site-packages/")
+        || path_text.contains("/dist-packages/")
+        || path_text.contains("\\site-packages\\")
+    {
+        signals.push(RuntimeProvenanceSignal {
+            finding_code: "TRUST_PACKAGE_MANAGER_CONTEXT",
+            kind: "package_manager_context".to_string(),
+            category: "package_ecosystem".to_string(),
+            source: "runtime_path_context".to_string(),
+            confidence: "medium".to_string(),
+            trust_level: "medium".to_string(),
+            note: "Recognized Python package-installation layout.".to_string(),
+            message: "Runtime path context recognized Python package-manager layout [medium_trust] (site-packages/dist-packages)".to_string(),
+            platform: None,
+            vendor: "Python packaging".to_string(),
+            ecosystem: "pip".to_string(),
+            rationale: "site-packages and dist-packages are common benign layouts for Python-installed dependencies.".to_string(),
+            package_source: Some("pip".to_string()),
+            distribution_channel: Some("package_manager".to_string()),
+            signer_hint: None,
+            allowed_dampen: vec!["script_noise".to_string(), "file_profile_noise".to_string()],
+            trust_scope: vec!["script_noise".to_string(), "file_profile_noise".to_string()],
+            matched_markers: vec!["site-packages".to_string()],
+            policy_effect: "Python package provenance dampened only weak unsupported script/profile noise.".to_string(),
+        });
+    }
+
+    if path_text.contains("/.cargo/registry/")
+        || path_text.contains("/.cargo/bin/")
+        || path_text.contains("/rustup/toolchains/")
+        || file_name == "cargo"
+        || file_name == "rustup"
+    {
+        signals.push(RuntimeProvenanceSignal {
+            finding_code: "TRUST_PACKAGE_MANAGER_CONTEXT",
+            kind: "package_manager_context".to_string(),
+            category: "package_ecosystem".to_string(),
+            source: "runtime_path_context".to_string(),
+            confidence: "medium".to_string(),
+            trust_level: "medium".to_string(),
+            note: "Recognized Rust toolchain or cargo package layout.".to_string(),
+            message: "Runtime path context recognized cargo/rustup-managed software [medium_trust] (cargo registry/toolchain layout)".to_string(),
+            platform: None,
+            vendor: "Rust toolchain".to_string(),
+            ecosystem: "cargo".to_string(),
+            rationale: "cargo registry and rustup toolchain paths are common benign layouts for Rust dependencies and tooling.".to_string(),
+            package_source: Some("cargo".to_string()),
+            distribution_channel: Some("package_manager".to_string()),
+            signer_hint: None,
+            allowed_dampen: vec!["binary_loader_noise".to_string(), "file_profile_noise".to_string()],
+            trust_scope: vec!["binary_loader_noise".to_string(), "file_profile_noise".to_string()],
+            matched_markers: vec!["cargo".to_string(), "rustup".to_string()],
+            policy_effect: "Cargo/rustup provenance dampened only weak unsupported loader/profile noise.".to_string(),
+        });
+    }
+
+    signals
 }
 
 fn load_store(paths: &[std::path::PathBuf]) -> LoadedStore {
@@ -905,4 +1146,88 @@ fn lookup_hash_note_in_text(sha256: &str, text: &str) -> Option<String> {
                 .to_string();
             hash.eq_ignore_ascii_case(sha256).then_some(note)
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::r#static::config::ScanConfig;
+    use crate::r#static::context::ScanContext;
+    use crate::r#static::types::{Finding, Score, StringPool};
+    use std::path::PathBuf;
+
+    fn test_ctx(path: &str) -> ScanContext {
+        ScanContext {
+            input_path: PathBuf::from(path),
+            file_name: PathBuf::from(path)
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string(),
+            extension: PathBuf::from(path)
+                .extension()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string(),
+            original_size_bytes: 1024,
+            input_truncated: false,
+            bytes: Vec::new(),
+            sha256: "0".repeat(64),
+            sniffed_mime: "application/octet-stream".to_string(),
+            detected_format: Some("Mach-O".to_string()),
+            normalized_strings: Vec::new(),
+            decoded_strings: Vec::new(),
+            score: Score::default(),
+            findings: Vec::new(),
+            views: Vec::new(),
+            strings: StringPool::default(),
+            stage_timings: Vec::new(),
+            artifacts: Vec::new(),
+            telemetry: Vec::new(),
+            cache: None,
+            rules_version: String::new(),
+            emulation: None,
+            intelligence: None,
+            ml_assessment: None,
+            threat_severity: None,
+            config: ScanConfig::default(),
+        }
+    }
+
+    #[test]
+    fn runtime_provenance_recognizes_system_macos_app_paths() {
+        let signals = runtime_provenance_signals(
+            "/system/applications/reminders.app/contents/macos/reminders",
+            "reminders",
+        );
+        assert!(signals.iter().any(|signal| signal.ecosystem == "macos"));
+        assert!(signals
+            .iter()
+            .any(|signal| signal.finding_code == "TRUST_BENIGN_TOOLING_CONTEXT"));
+    }
+
+    #[test]
+    fn runtime_provenance_recognizes_package_manager_layouts() {
+        let signals = runtime_provenance_signals(
+            "/users/test/project/node_modules/react/index.js",
+            "index.js",
+        );
+        assert!(signals.iter().any(|signal| signal.ecosystem == "npm"));
+    }
+
+    #[test]
+    fn runtime_provenance_is_recorded_in_summary() {
+        let mut ctx = test_ctx("/System/Applications/Dictionary.app/Contents/MacOS/Dictionary");
+        ctx.findings
+            .push(Finding::new("DECODED_ACTIVE_CONTENT", "noise", 1.0));
+
+        evaluate(&mut ctx, &[], &[], &[]);
+
+        let summary = ctx.intelligence.expect("summary");
+        assert!(!summary.trust_reasons.is_empty());
+        assert!(summary
+            .trust_ecosystems
+            .iter()
+            .any(|value| value == "macos"));
+    }
 }

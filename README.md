@@ -251,6 +251,13 @@ Avoid real malware samples.
   - macOS DMG builds are opened for drag-to-Applications replacement
   - Windows `.exe` / `.msi` packages are launched explicitly by the user from the GUI
   - Linux and archive-style packages are revealed with clear install guidance instead of silent replacement
+- macOS `.app` bundles are treated as application bundles rather than flat directories during scanning. ProjectX resolves the primary bundle executable, scans that entrypoint read-only, and reports when protected or unreadable helper/framework components were skipped.
+- Common media/container files such as MP4 now carry a narrow benign-context dampener so weak decoded-string noise does not escalate normal clips without stronger corroboration.
+- Result detail now spells out whether a target was scanned in place, restored after temporary quarantine analysis, or retained in quarantine.
+- Regular files are now moved into ProjectX quarantine immediately when they enter the active scan queue, so queued scans operate on a staged copy under scanner control rather than leaving the original file live in place.
+- Operations now includes a live suspicious/quarantine diagnostic summary so dominant reason patterns, extensions, and repeated weak-signal combinations are visible before tuning.
+- Quarantine management now supports selecting visible quarantined items in bulk and restoring them safely without overwriting an existing conflicting destination file.
+- Provenance now includes runtime path/ecosystem trust for protected macOS app paths plus Homebrew, npm, pip, and cargo-style layouts, and that trust only dampens weak unsupported noise signals.
 - The Scan page now uses a proper vertical workspace scroll path and wraps controls/cards earlier so narrower windows do not push content off the right edge as aggressively.
 - The app now launches directly into the GUI from `src/main.rs`.
 - Older CLI and sandbox-execution-oriented product paths have been removed from the desktop app.

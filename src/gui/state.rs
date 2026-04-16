@@ -11,6 +11,7 @@ pub use crate::r#static::report::{
     QuarantineStatus as RecordStorageState, ReportReason as DetectionReason,
     ReportSummary as ScanRecord, SummaryVerdict as Verdict,
 };
+pub use crate::r#static::{PreservedPermissions, QueueStage};
 pub use crate::update::{ReleaseInfo as AvailableUpdate, UpdateStatusKind};
 
 pub const SCAN_RECORD_LIMIT: usize = 500;
@@ -275,6 +276,14 @@ pub struct PersistedIndex {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanTarget {
     pub path: PathBuf,
+    #[serde(default)]
+    pub staged_path: Option<PathBuf>,
+    #[serde(default)]
+    pub preserved_permissions: Option<PreservedPermissions>,
+    #[serde(default)]
+    pub queue_stage: QueueStage,
+    #[serde(default)]
+    pub queue_note: String,
     pub last_modified_epoch: u64,
     pub size_bytes: u64,
     pub origin: ScanOrigin,
@@ -791,6 +800,9 @@ pub enum PendingConfirmationTarget {
         record_id: String,
         action: RecordAction,
     },
+    RestoreRecords {
+        record_ids: Vec<String>,
+    },
     DeleteReports {
         record_ids: Vec<String>,
     },
@@ -1095,6 +1107,7 @@ pub struct MyApp {
     pub last_update_poll: Instant,
     pub update_state: std::sync::Arc<std::sync::Mutex<UpdateCheckState>>,
     pub notifications: VecDeque<NotificationEntry>,
+    pub ui_context: Option<eframe::egui::Context>,
 }
 
 #[derive(Debug, Clone)]

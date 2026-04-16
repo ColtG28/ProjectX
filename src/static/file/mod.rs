@@ -1,3 +1,4 @@
+pub mod bundle;
 pub mod cache;
 pub mod discovery;
 pub mod entropy;

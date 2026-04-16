@@ -22,6 +22,29 @@ use super::theme;
 
 const AUTO_UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 const AUTO_UPDATE_CHECK_INTERVAL_SECS: u64 = 6 * 60 * 60;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DiagnosticCount {
+    pub label: String,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SuspiciousDiagnosticsSummary {
+    pub suspicious_total: usize,
+    pub retained_total: usize,
+    pub by_extension: Vec<DiagnosticCount>,
+    pub by_format: Vec<DiagnosticCount>,
+    pub by_severity: Vec<DiagnosticCount>,
+    pub by_reason_name: Vec<DiagnosticCount>,
+    pub by_reason_source: Vec<DiagnosticCount>,
+    pub by_workflow_origin: Vec<DiagnosticCount>,
+    pub by_disposition: Vec<DiagnosticCount>,
+    pub by_reason_combination: Vec<DiagnosticCount>,
+    pub weak_reason_combinations: Vec<DiagnosticCount>,
+    pub retained_by_extension: Vec<DiagnosticCount>,
+    pub retained_by_reason_name: Vec<DiagnosticCount>,
+}
 pub fn gui() -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -34,6 +57,12 @@ pub fn gui() -> Result<(), eframe::Error> {
 }
 
 impl MyApp {
+    fn request_ui_refresh(ctx: Option<&egui::Context>) {
+        if let Some(ctx) = ctx {
+            ctx.request_repaint();
+        }
+    }
+
     pub fn new() -> Self {
         let persisted = load_history();
         let settings = load_gui_settings();
@@ -86,6 +115,7 @@ impl MyApp {
             last_update_poll: Instant::now() - AUTO_UPDATE_CHECK_INTERVAL,
             update_state: Arc::new(Mutex::new(UpdateCheckState::default())),
             notifications: VecDeque::new(),
+            ui_context: None,
         };
         app.refresh_protection_summary();
         app.refresh_update_install_state();
@@ -742,6 +772,7 @@ impl MyApp {
             message,
         );
         save_history(&self.records, &self.timing_samples);
+        Self::request_ui_refresh(self.ui_context.as_ref());
     }
 
     fn queue_record_action_confirmation(&mut self, record_id: String, action: RecordAction) {
@@ -787,6 +818,45 @@ impl MyApp {
         });
     }
 
+    pub(crate) fn queue_restore_selected_confirmation(&mut self, record_ids: Vec<String>) {
+        if record_ids.is_empty() {
+            return;
+        }
+
+        let mut missing_original_paths = 0usize;
+        for record_id in &record_ids {
+            if let Some(record) = self
+                .records
+                .iter()
+                .find(|record| record.record_id() == *record_id)
+            {
+                if record.path.trim().is_empty() {
+                    missing_original_paths += 1;
+                }
+            }
+        }
+
+        let detail = if missing_original_paths > 0 {
+            format!(
+                " {} item(s) are missing a valid original path and will be reported as restore failures.",
+                missing_original_paths
+            )
+        } else {
+            String::new()
+        };
+
+        self.pending_confirmation = Some(PendingConfirmation {
+            title: "Restore selected quarantined files".to_string(),
+            message: format!(
+                "Restore {} quarantined item(s) back to their original locations? ProjectX will skip items that no longer have a retained quarantine copy, and it will refuse to overwrite a conflicting file already present at the destination.{}",
+                record_ids.len(),
+                detail
+            ),
+            confirm_label: "Restore selected files".to_string(),
+            target: PendingConfirmationTarget::RestoreRecords { record_ids },
+        });
+    }
+
     fn queue_delete_selected_confirmation(&mut self, record_ids: Vec<String>) {
         if record_ids.is_empty() {
             return;
@@ -800,6 +870,76 @@ impl MyApp {
             confirm_label: "Delete selected reports".to_string(),
             target: PendingConfirmationTarget::DeleteReports { record_ids },
         });
+    }
+
+    pub(crate) fn restore_records_by_ids(&mut self, record_ids: &[String]) {
+        if record_ids.is_empty() {
+            return;
+        }
+
+        let mut restored = 0usize;
+        let mut failed = Vec::new();
+
+        for record_id in record_ids {
+            let Some(index) = self
+                .records
+                .iter()
+                .position(|record| record.record_id() == *record_id)
+            else {
+                failed.push(format!("{record_id}: record no longer exists"));
+                continue;
+            };
+
+            let Some(record) = self.records.get_mut(index) else {
+                continue;
+            };
+            let Some(quarantine_path) = record.quarantine_path.clone() else {
+                failed.push(format!(
+                    "{}: no retained quarantine copy is recorded",
+                    record.display_name()
+                ));
+                continue;
+            };
+            if record.path.trim().is_empty() {
+                failed.push(format!(
+                    "{}: original restore path is missing",
+                    record.display_name()
+                ));
+                continue;
+            }
+
+            match crate::r#static::restore_quarantined_file(&quarantine_path, &record.path) {
+                Ok(()) => {
+                    restored += 1;
+                    record.storage_state = RecordStorageState::Restored;
+                    record.quarantine_path = None;
+                    record.action_note = "Bulk restore: restored to original path.".to_string();
+                    self.selected_report_ids.remove(record_id);
+                }
+                Err(error) => failed.push(format!("{}: {error}", record.display_name())),
+            }
+        }
+
+        let severity = if failed.is_empty() {
+            FeedbackSeverity::Success
+        } else if restored == 0 {
+            FeedbackSeverity::Error
+        } else {
+            FeedbackSeverity::Warning
+        };
+        let mut message = format!("Restored {restored} quarantined item(s).");
+        if !failed.is_empty() {
+            let preview = failed
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" | ");
+            message.push_str(&format!(" {} restore(s) failed. {}", failed.len(), preview));
+        }
+        self.set_feedback(FeedbackScope::FileAction, severity, message);
+        save_history(&self.records, &self.timing_samples);
+        Self::request_ui_refresh(self.ui_context.as_ref());
     }
 
     pub(crate) fn queue_scan_all_confirmation(&mut self) {
@@ -844,7 +984,8 @@ impl MyApp {
                     if ui
                         .add(egui::Button::new(dialog.confirm_label.clone()).fill(
                             match dialog.target {
-                                PendingConfirmationTarget::StartScanFromRoots { .. } => {
+                                PendingConfirmationTarget::StartScanFromRoots { .. }
+                                | PendingConfirmationTarget::RestoreRecords { .. } => {
                                     egui::Color32::from_rgb(66, 97, 130)
                                 }
                                 _ => egui::Color32::from_rgb(130, 67, 67),
@@ -857,6 +998,9 @@ impl MyApp {
                         match target {
                             PendingConfirmationTarget::RecordAction { record_id, action } => {
                                 self.apply_record_action_by_id(&record_id, action);
+                            }
+                            PendingConfirmationTarget::RestoreRecords { record_ids } => {
+                                self.restore_records_by_ids(&record_ids);
                             }
                             PendingConfirmationTarget::DeleteReports { record_ids } => {
                                 self.delete_reports_by_ids(&record_ids);
@@ -990,6 +1134,129 @@ impl MyApp {
         indices.into_iter().take(limit).collect()
     }
 
+    pub(crate) fn suspicious_diagnostics_summary(&self) -> SuspiciousDiagnosticsSummary {
+        let mut summary = SuspiciousDiagnosticsSummary::default();
+        let mut by_extension = HashMap::new();
+        let mut by_format = HashMap::new();
+        let mut by_severity = HashMap::new();
+        let mut by_reason_name = HashMap::new();
+        let mut by_reason_source = HashMap::new();
+        let mut by_workflow_origin = HashMap::new();
+        let mut by_disposition = HashMap::new();
+        let mut by_reason_combination = HashMap::new();
+        let mut weak_reason_combinations = HashMap::new();
+        let mut retained_by_extension = HashMap::new();
+        let mut retained_by_reason_name = HashMap::new();
+
+        for record in self
+            .records
+            .iter()
+            .filter(|record| matches!(record.verdict, Verdict::Suspicious | Verdict::Malicious))
+        {
+            summary.suspicious_total += 1;
+            increment_count(&mut by_extension, suspicious_extension_label(record));
+            increment_count(
+                &mut by_format,
+                record
+                    .detected_format
+                    .clone()
+                    .or_else(|| record.sniffed_mime.clone())
+                    .unwrap_or_else(|| "Unknown".to_string()),
+            );
+            increment_count(&mut by_severity, record.severity.label().to_string());
+            increment_count(
+                &mut by_workflow_origin,
+                record
+                    .workflow_origin
+                    .clone()
+                    .unwrap_or_else(|| "Unknown".to_string()),
+            );
+            increment_count(
+                &mut by_disposition,
+                record.resolved_storage_state().label().to_string(),
+            );
+
+            let reason_combo = record_reason_combination_label(record);
+            increment_count(&mut by_reason_combination, reason_combo.clone());
+            if is_single_source_weak_signal(record) {
+                increment_count(&mut weak_reason_combinations, reason_combo);
+            }
+
+            if record.detection_reasons.is_empty() {
+                increment_count(&mut by_reason_name, "No structured reason".to_string());
+            } else {
+                let mut seen_names = HashSet::new();
+                let mut seen_sources = HashSet::new();
+                for reason in &record.detection_reasons {
+                    let name = primary_reason_label(reason);
+                    if seen_names.insert(name.clone()) {
+                        increment_count(&mut by_reason_name, name);
+                    }
+                    let source = if reason.source.is_empty() {
+                        "Unknown".to_string()
+                    } else {
+                        reason.source.clone()
+                    };
+                    if seen_sources.insert(source.clone()) {
+                        increment_count(&mut by_reason_source, source);
+                    }
+                }
+            }
+
+            if record.resolved_storage_state() == RecordStorageState::InQuarantine {
+                summary.retained_total += 1;
+                increment_count(
+                    &mut retained_by_extension,
+                    suspicious_extension_label(record),
+                );
+                if record.detection_reasons.is_empty() {
+                    increment_count(
+                        &mut retained_by_reason_name,
+                        "No structured reason".to_string(),
+                    );
+                } else {
+                    let mut seen_names = HashSet::new();
+                    for reason in &record.detection_reasons {
+                        let name = primary_reason_label(reason);
+                        if seen_names.insert(name.clone()) {
+                            increment_count(&mut retained_by_reason_name, name);
+                        }
+                    }
+                }
+            }
+        }
+
+        summary.by_extension = finalize_diagnostic_counts(by_extension);
+        summary.by_format = finalize_diagnostic_counts(by_format);
+        summary.by_severity = finalize_diagnostic_counts(by_severity);
+        summary.by_reason_name = finalize_diagnostic_counts(by_reason_name);
+        summary.by_reason_source = finalize_diagnostic_counts(by_reason_source);
+        summary.by_workflow_origin = finalize_diagnostic_counts(by_workflow_origin);
+        summary.by_disposition = finalize_diagnostic_counts(by_disposition);
+        summary.by_reason_combination = finalize_diagnostic_counts(by_reason_combination);
+        summary.weak_reason_combinations = finalize_diagnostic_counts(weak_reason_combinations);
+        summary.retained_by_extension = finalize_diagnostic_counts(retained_by_extension);
+        summary.retained_by_reason_name = finalize_diagnostic_counts(retained_by_reason_name);
+        summary
+    }
+
+    pub(crate) fn selected_visible_quarantined_ids(
+        &self,
+        visible_ids: &HashSet<String>,
+    ) -> Vec<String> {
+        self.records
+            .iter()
+            .filter(|record| {
+                let record_id = record.record_id();
+                visible_ids.contains(&record_id)
+                    && self.selected_report_ids.contains(&record_id)
+                    && record.resolved_storage_state() == RecordStorageState::InQuarantine
+                    && record.quarantine_path.is_some()
+            })
+            .map(|record| record.record_id())
+            .collect()
+    }
+
     pub(crate) fn filtered_protection_event_indices(&self, limit: usize) -> Vec<usize> {
         let query = self.protection_event_search.trim().to_ascii_lowercase();
         let mut indices = (0..self.protection_events.len())
@@ -1080,6 +1347,7 @@ impl MyApp {
             self.timing_samples.extend(maybe_timing_samples);
             trim_timing_samples(&mut self.timing_samples);
             save_history(&self.records, &self.timing_samples);
+            Self::request_ui_refresh(self.ui_context.as_ref());
         }
     }
 
@@ -1132,18 +1400,21 @@ impl MyApp {
         }
 
         self.download_watch.retain(|path, _| seen.contains(path));
-        if !queued_targets.is_empty() {
-            self.start_scan(queued_targets.clone());
-            for target in &queued_targets {
+        let prepared_targets = if !queued_targets.is_empty() {
+            self.start_scan(queued_targets.clone())
+        } else {
+            Vec::new()
+        };
+        if !prepared_targets.is_empty() {
+            for target in &prepared_targets {
                 self.record_protection_event(ProtectionEventInput {
                     kind: ProtectionEventKind::Queued,
                     path: target.path.to_string_lossy().to_string(),
-                    note: "Captured an in-progress download snapshot for passive scanning."
-                        .to_string(),
+                    note: target.queue_note.clone(),
                     workflow_source: target.origin.label().to_string(),
                     event_source: "Download snapshot".to_string(),
                     verdict: None,
-                    storage_state: None,
+                    storage_state: Some(target.queue_stage.label().to_string()),
                     scan_id: None,
                     grouped_change_count: 1,
                     burst_window_seconds: 0,
@@ -1153,10 +1424,10 @@ impl MyApp {
                 });
             }
         }
-        self.download_status = if !queued_targets.is_empty() {
+        self.download_status = if !prepared_targets.is_empty() {
             format!(
                 "Queued {} download snapshot(s) from {}.",
-                queued_targets.len(),
+                prepared_targets.len(),
                 downloads_dir.display()
             )
         } else if seen.is_empty() {
@@ -1164,6 +1435,7 @@ impl MyApp {
         } else {
             format!("Watching {} active download(s).", seen.len())
         };
+        Self::request_ui_refresh(self.ui_context.as_ref());
     }
 
     fn poll_update_checker(&mut self) {
@@ -1190,6 +1462,7 @@ impl MyApp {
 
     pub(crate) fn start_update_check(&mut self, manual: bool) {
         self.last_update_poll = Instant::now();
+        let refresh_ctx = self.ui_context.clone();
 
         let Ok(mut state) = self.update_state.lock() else {
             return;
@@ -1260,11 +1533,12 @@ impl MyApp {
                 state.install_guidance = plan.instructions;
                 MyApp::sync_update_snapshot_locked(&mut state);
             }
+            MyApp::request_ui_refresh(refresh_ctx.as_ref());
             if !manual {
                 let _ = crate::update::persist_automatic_check_epoch(last_checked_epoch);
             }
             if auto_download {
-                maybe_auto_download_update(&update_state);
+                maybe_auto_download_update(&update_state, refresh_ctx.clone());
             }
         });
     }
@@ -1965,6 +2239,10 @@ impl MyApp {
                         .entry(path_string)
                         .or_insert_with(|| ScanTarget {
                             path: event.path.clone(),
+                            staged_path: None,
+                            preserved_permissions: None,
+                            queue_stage: QueueStage::Queued,
+                            queue_note: String::new(),
                             last_modified_epoch: metadata
                                 .modified()
                                 .ok()
@@ -2135,10 +2413,25 @@ impl MyApp {
             });
         }
 
-        let queued_count = queued_targets.len();
-        if !queued_targets.is_empty() {
-            self.start_scan(queued_targets);
+        let prepared_targets = self.start_scan(queued_targets);
+        for target in &prepared_targets {
+            self.record_protection_event(ProtectionEventInput {
+                kind: ProtectionEventKind::Queued,
+                path: target.path.to_string_lossy().to_string(),
+                note: target.queue_note.clone(),
+                workflow_source: ScanOrigin::RealTimeProtection.label().to_string(),
+                event_source: self.protection_monitor.source_label.clone(),
+                verdict: None,
+                storage_state: Some(target.queue_stage.label().to_string()),
+                scan_id: None,
+                grouped_change_count: target.grouped_change_count.max(1),
+                burst_window_seconds: target.burst_window_seconds,
+                change_class: target.change_class,
+                file_class: target.file_class,
+                priority: target.priority,
+            });
         }
+        let queued_count = prepared_targets.len();
         self.protection_status = format!(
             "Protection active using {} across {} watched path(s), queued {} grouped event(s){}{}{}.",
             self.protection_monitor.source_label,
@@ -2161,6 +2454,7 @@ impl MyApp {
             }
         );
         self.refresh_protection_summary();
+        Self::request_ui_refresh(self.ui_context.as_ref());
     }
 
     fn poll_real_time_protection(&mut self) {
@@ -2388,10 +2682,25 @@ impl MyApp {
         self.protection_watch
             .retain(|path, _| seen_paths.contains(path));
 
-        let queued_count = queued_targets.len();
-        if !queued_targets.is_empty() {
-            self.start_scan(queued_targets);
+        let prepared_targets = self.start_scan(queued_targets);
+        for target in &prepared_targets {
+            self.record_protection_event(ProtectionEventInput {
+                kind: ProtectionEventKind::Queued,
+                path: target.path.to_string_lossy().to_string(),
+                note: target.queue_note.clone(),
+                workflow_source: ScanOrigin::RealTimeProtection.label().to_string(),
+                event_source: "Polling fallback".to_string(),
+                verdict: None,
+                storage_state: Some(target.queue_stage.label().to_string()),
+                scan_id: None,
+                grouped_change_count: target.grouped_change_count.max(1),
+                burst_window_seconds: target.burst_window_seconds,
+                change_class: target.change_class,
+                file_class: target.file_class,
+                priority: target.priority,
+            });
         }
+        let queued_count = prepared_targets.len();
 
         self.protection_status = format!(
             "Protection watching {} location(s), tracking {} file(s), queued {} grouped event(s){}{}{}.",
@@ -2515,12 +2824,12 @@ impl MyApp {
             return;
         }
         save_protection_backlog(&self.protection_backlog);
+        let resumed = self.start_scan(resumed);
         for target in &resumed {
             self.record_protection_event(ProtectionEventInput {
                 kind: ProtectionEventKind::Queued,
                 path: target.path.to_string_lossy().to_string(),
-                note: "Queued a previously deferred protection event after queue pressure dropped."
-                    .to_string(),
+                note: target.queue_note.clone(),
                 workflow_source: target.origin.label().to_string(),
                 event_source: if matches!(
                     self.protection_monitor.mode,
@@ -2531,7 +2840,7 @@ impl MyApp {
                     "Polling fallback".to_string()
                 },
                 verdict: None,
-                storage_state: None,
+                storage_state: Some(target.queue_stage.label().to_string()),
                 scan_id: None,
                 grouped_change_count: target.grouped_change_count.max(1),
                 burst_window_seconds: target.burst_window_seconds,
@@ -2540,7 +2849,6 @@ impl MyApp {
                 priority: target.priority,
             });
         }
-        self.start_scan(resumed);
     }
 
     fn remove_report_files(&self, report_path: Option<&str>) -> bool {
@@ -2619,7 +2927,10 @@ impl MyApp {
             ui.separator();
             self.render_workspace_selection_summary(ui, indices);
             ui.add_space(8.0);
-            self.render_record_detail(ui);
+            egui::ScrollArea::vertical()
+                .id_source("record_detail_compact")
+                .auto_shrink([false, false])
+                .show(ui, |ui| self.render_record_detail(ui));
             ui.add_space(8.0);
             self.render_workspace_note(ui, note);
         } else {
@@ -2630,11 +2941,16 @@ impl MyApp {
                         .show(ui, |ui| self.render_record_list(ui, indices, true));
                 });
                 columns[1].vertical(|ui| {
-                    self.render_workspace_selection_summary(ui, indices);
-                    ui.add_space(8.0);
-                    self.render_record_detail(ui);
-                    ui.add_space(8.0);
-                    self.render_workspace_note(ui, note);
+                    egui::ScrollArea::vertical()
+                        .id_source("record_detail_desktop")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            self.render_workspace_selection_summary(ui, indices);
+                            ui.add_space(8.0);
+                            self.render_record_detail(ui);
+                            ui.add_space(8.0);
+                            self.render_workspace_note(ui, note);
+                        });
                 });
             });
         }
@@ -2955,10 +3271,10 @@ impl MyApp {
             self.settings.max_files_per_bulk_scan,
             ScanOrigin::Manual,
         );
-        self.start_scan(targets);
+        let _ = self.start_scan(targets);
     }
 
-    fn start_scan(&mut self, targets: Vec<ScanTarget>) {
+    fn start_scan(&mut self, targets: Vec<ScanTarget>) -> Vec<ScanTarget> {
         let targets = dedupe_targets(targets);
         if targets.is_empty() {
             self.set_feedback(
@@ -2966,12 +3282,36 @@ impl MyApp {
                 FeedbackSeverity::Warning,
                 "No files found to scan for this selection.",
             );
-            return;
+            return Vec::new();
+        }
+
+        let requested_count = targets.len();
+        let known_paths = self
+            .job
+            .lock()
+            .map(|job| queued_scan_paths(&job))
+            .unwrap_or_default();
+        let fresh_targets = targets
+            .into_iter()
+            .filter(|target| !known_paths.contains(&target.path))
+            .collect::<Vec<_>>();
+        let already_queued_count = requested_count.saturating_sub(fresh_targets.len());
+
+        let (prepared_targets, staging_failures) = self.prepare_targets_for_queue(fresh_targets);
+        if prepared_targets.is_empty() {
+            let message = if !staging_failures.is_empty() {
+                staging_failures.join(" | ")
+            } else {
+                "Those files are already queued or currently scanning.".to_string()
+            };
+            self.set_feedback(FeedbackScope::Scan, FeedbackSeverity::Warning, message);
+            return Vec::new();
         }
 
         let queued_message = if let Ok(mut job) = self.job.lock() {
             if job.running {
-                let (added_count, added_bytes) = queue_targets_into_job(&mut job, targets.clone());
+                let (added_count, added_bytes) =
+                    queue_targets_into_job(&mut job, prepared_targets.clone());
                 Some(if added_count == 0 {
                     (
                         FeedbackSeverity::Info,
@@ -2994,15 +3334,19 @@ impl MyApp {
             None
         };
         if let Some((severity, message)) = queued_message {
-            self.set_feedback(FeedbackScope::Scan, severity, message);
-            return;
+            let combined = append_scan_feedback(message, &staging_failures, already_queued_count);
+            self.set_feedback(FeedbackScope::Scan, severity, combined);
+            return prepared_targets;
         }
 
         let latest_by_path = latest_record_map(&self.records);
         let timing_profile = TimingProfile::from_samples(&self.timing_samples);
         let config = self.scan_config();
-        let total = targets.len();
-        let total_bytes = targets.iter().map(|target| target.size_bytes).sum::<u64>();
+        let total = prepared_targets.len();
+        let total_bytes = prepared_targets
+            .iter()
+            .map(|target| target.size_bytes)
+            .sum::<u64>();
 
         if let Ok(mut job) = self.job.lock() {
             *job = ScanJobState {
@@ -3013,7 +3357,7 @@ impl MyApp {
                 queued_bytes: total_bytes,
                 average_file_ms: timing_profile.average_file_ms,
                 current_stage: "Queued".to_string(),
-                pending_targets: targets.into_iter().collect(),
+                pending_targets: prepared_targets.clone().into_iter().collect(),
                 ..ScanJobState::default()
             };
         }
@@ -3021,14 +3365,19 @@ impl MyApp {
         self.set_feedback(
             FeedbackScope::Scan,
             FeedbackSeverity::Success,
-            format!(
-                "Started scan for {} files ({} total).",
-                total,
-                format_bytes(total_bytes)
+            append_scan_feedback(
+                format!(
+                    "Started scan for {} files ({} total).",
+                    total,
+                    format_bytes(total_bytes)
+                ),
+                &staging_failures,
+                already_queued_count,
             ),
         );
 
         let job_ref = Arc::clone(&self.job);
+        let refresh_ctx = self.ui_context.clone();
         let check_cached = self.settings.check_cached_scans;
         thread::spawn(move || {
             run_scan_worker(
@@ -3037,8 +3386,66 @@ impl MyApp {
                 timing_profile,
                 config,
                 check_cached,
+                refresh_ctx,
             );
         });
+        prepared_targets
+    }
+
+    fn prepare_targets_for_queue(
+        &mut self,
+        targets: Vec<ScanTarget>,
+    ) -> (Vec<ScanTarget>, Vec<String>) {
+        let mut prepared = Vec::new();
+        let mut failures = Vec::new();
+
+        for mut target in targets {
+            if target.staged_path.is_some()
+                || matches!(target.queue_stage, QueueStage::ScannedInPlace)
+            {
+                prepared.push(target);
+                continue;
+            }
+
+            match crate::r#static::stage_path_for_scan(&target.path) {
+                Ok(staged) => {
+                    target.staged_path = Some(staged.analysis_path);
+                    target.preserved_permissions = staged.preserved_permissions;
+                    target.queue_stage = staged.queue_stage;
+                    target.queue_note = staged.note;
+                    prepared.push(target);
+                }
+                Err(error) => {
+                    let message = format!(
+                        "Could not quarantine '{}' before queueing: {}",
+                        target.path.display(),
+                        error
+                    );
+                    target.queue_stage = QueueStage::QuarantineFailed;
+                    target.queue_note = message.clone();
+                    if !matches!(target.origin, ScanOrigin::Manual) {
+                        self.record_protection_event(ProtectionEventInput {
+                            kind: ProtectionEventKind::Error,
+                            path: target.path.to_string_lossy().to_string(),
+                            note: message.clone(),
+                            workflow_source: target.origin.label().to_string(),
+                            event_source: "Queue staging".to_string(),
+                            verdict: None,
+                            storage_state: Some(target.queue_stage.label().to_string()),
+                            scan_id: None,
+                            grouped_change_count: target.grouped_change_count.max(1),
+                            burst_window_seconds: target.burst_window_seconds,
+                            change_class: target.change_class,
+                            file_class: target.file_class,
+                            priority: target.priority,
+                        });
+                    }
+                    failures.push(message);
+                }
+            }
+        }
+
+        (prepared, failures)
     }
 }
 
@@ -3050,6 +3457,7 @@ impl Default for MyApp {
 
 impl eframe::App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.ui_context = Some(ctx.clone());
         self.apply_responsive_scaling(ctx);
         self.poll_finished_job();
         self.ensure_protection_monitor();
@@ -3162,6 +3570,7 @@ fn run_scan_worker(
     timing_profile: TimingProfile,
     config: crate::r#static::config::ScanConfig,
     check_cached: bool,
+    refresh_ctx: Option<egui::Context>,
 ) {
     let started = Instant::now();
     let mut local_records = Vec::new();
@@ -3179,7 +3588,10 @@ fn run_scan_worker(
                 Ok(job) => job,
                 Err(_) => return,
             };
-            let target = job.pending_targets.pop_front();
+            let target = job.pending_targets.pop_front().map(|mut target| {
+                target.queue_stage = QueueStage::Scanning;
+                target
+            });
             job.queued_files = job.pending_targets.len();
             job.queued_bytes = job
                 .pending_targets
@@ -3206,6 +3618,7 @@ fn run_scan_worker(
                     job.processed, good, malicious, unsure, errors
                 );
             }
+            MyApp::request_ui_refresh(refresh_ctx.as_ref());
             break;
         };
 
@@ -3238,6 +3651,7 @@ fn run_scan_worker(
                             historical_bytes_per_ms: timing_profile.average_bytes_per_ms,
                         },
                     );
+                    MyApp::request_ui_refresh(refresh_ctx.as_ref());
                     reused_cached_record(
                         previous,
                         target.last_modified_epoch,
@@ -3264,6 +3678,7 @@ fn run_scan_worker(
                                 historical_bytes_per_ms: timing_profile.average_bytes_per_ms,
                             },
                         );
+                        MyApp::request_ui_refresh(refresh_ctx.as_ref());
                     });
                     duration_ms = current_file_started.elapsed().as_millis() as u64;
                     record.duration_ms = duration_ms;
@@ -3289,6 +3704,7 @@ fn run_scan_worker(
                             historical_bytes_per_ms: timing_profile.average_bytes_per_ms,
                         },
                     );
+                    MyApp::request_ui_refresh(refresh_ctx.as_ref());
                 });
                 duration_ms = current_file_started.elapsed().as_millis() as u64;
                 record.duration_ms = duration_ms;
@@ -3313,6 +3729,7 @@ fn run_scan_worker(
                         historical_bytes_per_ms: timing_profile.average_bytes_per_ms,
                     },
                 );
+                MyApp::request_ui_refresh(refresh_ctx.as_ref());
             });
             duration_ms = current_file_started.elapsed().as_millis() as u64;
             record.duration_ms = duration_ms;
@@ -3361,6 +3778,7 @@ fn run_scan_worker(
                 historical_bytes_per_ms: timing_profile.average_bytes_per_ms,
             },
         );
+        MyApp::request_ui_refresh(refresh_ctx.as_ref());
     }
 }
 
@@ -3464,17 +3882,20 @@ fn run_scan<F>(
 where
     F: FnMut(crate::r#static::ScanProgress),
 {
-    let path = &target.path;
+    let path = target.staged_path.as_ref().unwrap_or(&target.path);
     let path_string = path.to_string_lossy().to_string();
-    let file_name = path
+    let display_path = target.path.to_string_lossy().to_string();
+    let file_name = target
+        .path
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
-        .unwrap_or_else(|| path_string.clone());
+        .unwrap_or_else(|| display_path.clone());
 
     let error_record = |message: String| ScanRecord {
-        path: path_string.clone(),
+        path: display_path.clone(),
         file_name: file_name.clone(),
-        extension: path
+        extension: target
+            .path
             .extension()
             .map(|value| value.to_string_lossy().to_string()),
         sha256: None,
@@ -3492,7 +3913,7 @@ where
         verdict: Verdict::Error,
         severity: SeverityLevel::Error,
         summary_text: message,
-        action_note: String::new(),
+        action_note: target.queue_note.clone(),
         workflow_origin: Some(target.origin.label().to_string()),
         risk_score: None,
         safety_score: None,
@@ -3508,12 +3929,26 @@ where
         return error_record("Path is not valid UTF-8".to_string());
     };
 
-    if !path.is_file() {
-        return error_record("Not a file".to_string());
+    if !crate::r#static::is_supported_scan_path(path) {
+        return error_record("Not a file or supported app bundle".to_string());
     }
 
-    match crate::r#static::scan_path_with_progress(path_str, Some(config.clone()), progress) {
+    let outcome = if let Some(staged_path) = target.staged_path.as_ref() {
+        crate::r#static::scan_staged_path_with_progress(
+            &target.path,
+            staged_path,
+            target.preserved_permissions.as_ref(),
+            Some(config.clone()),
+            progress,
+        )
+    } else {
+        crate::r#static::scan_path_with_progress(path_str, Some(config.clone()), progress)
+    };
+
+    match outcome {
         Ok(outcome) => {
+            let action_note =
+                compose_action_note(&target.queue_note, disposition_note_for_outcome(&outcome));
             let warning_count = outcome.reason_entries.len();
             let mut note_parts = vec![outcome.summary];
             if !matches!(target.origin, ScanOrigin::Manual) {
@@ -3532,7 +3967,7 @@ where
             }
 
             ScanRecord {
-                path: path_string.clone(),
+                path: display_path,
                 file_name: outcome.file_name,
                 extension: Some(outcome.extension),
                 sha256: Some(outcome.sha256),
@@ -3541,10 +3976,10 @@ where
                 quarantine_path: (!outcome.restored_to_original_path)
                     .then(|| outcome.quarantine_path.to_string_lossy().to_string()),
                 report_path: Some(outcome.report_path.to_string_lossy().to_string()),
-                storage_state: if outcome.restored_to_original_path {
-                    RecordStorageState::Restored
-                } else {
-                    RecordStorageState::InQuarantine
+                storage_state: match target.queue_stage {
+                    QueueStage::ScannedInPlace => RecordStorageState::Restored,
+                    _ if outcome.restored_to_original_path => RecordStorageState::Restored,
+                    _ => RecordStorageState::InQuarantine,
                 },
                 last_modified_epoch: target.last_modified_epoch,
                 scanned_at_epoch: now_epoch(),
@@ -3555,7 +3990,7 @@ where
                 verdict: outcome.verdict,
                 severity: outcome.normalized_severity,
                 summary_text: note_parts.join(" | "),
-                action_note: String::new(),
+                action_note,
                 workflow_origin: Some(target.origin.label().to_string()),
                 risk_score: Some(outcome.risk_score),
                 safety_score: Some(outcome.safety_score),
@@ -3581,6 +4016,38 @@ where
             }
         }
         Err(error) => error_record(error),
+    }
+}
+
+fn disposition_note_for_outcome(outcome: &crate::r#static::ScanOutcome) -> String {
+    let original = outcome.original_path.to_string_lossy();
+    let quarantine = outcome.quarantine_path.to_string_lossy();
+
+    if outcome.original_path == outcome.quarantine_path {
+        if outcome.restored_to_original_path {
+            "Scanned in place without retaining a quarantine copy. ProjectX analyzed this target read-only and left the original path intact.".to_string()
+        } else {
+            "Scanned an existing quarantined copy. The original source path was not modified during this scan.".to_string()
+        }
+    } else if outcome.restored_to_original_path {
+        format!(
+            "Copied into ProjectX quarantine for analysis, then restored to the original path after scanning finished. Original: {} | Temporary analysis copy: {}",
+            original, quarantine
+        )
+    } else {
+        format!(
+            "Copied into ProjectX quarantine for analysis and retained there because the outcome was not clean. Original: {} | Quarantine: {}",
+            original, quarantine
+        )
+    }
+}
+
+fn compose_action_note(queue_note: &str, disposition_note: String) -> String {
+    match (queue_note.trim(), disposition_note.trim()) {
+        ("", "") => String::new(),
+        ("", note) => note.to_string(),
+        (queue, "") => queue.to_string(),
+        (queue, note) => format!("{queue} | {note}"),
     }
 }
 
@@ -3655,6 +4122,31 @@ fn queue_targets_into_job(job: &mut ScanJobState, targets: Vec<ScanTarget>) -> (
         .sum::<u64>();
 
     (added_count, added_bytes)
+}
+
+fn queued_scan_paths(job: &ScanJobState) -> HashSet<PathBuf> {
+    let mut known_paths = HashSet::new();
+    if !job.current_path.is_empty() {
+        known_paths.insert(PathBuf::from(&job.current_path));
+    }
+    for target in &job.pending_targets {
+        known_paths.insert(target.path.clone());
+    }
+    known_paths
+}
+
+fn append_scan_feedback(base: String, failures: &[String], already_queued_count: usize) -> String {
+    let mut parts = vec![base];
+    if already_queued_count > 0 {
+        parts.push(format!(
+            "{} file(s) were already queued or currently scanning.",
+            already_queued_count
+        ));
+    }
+    if !failures.is_empty() {
+        parts.push(failures.join(" | "));
+    }
+    parts.join(" ")
 }
 
 fn protection_watch_signature(paths: &[WatchedPathConfig]) -> String {
@@ -3980,6 +4472,83 @@ fn record_matches_query(record: &ScanRecord, query: &str) -> bool {
     haystacks.iter().any(|value| value.contains(&query))
 }
 
+fn increment_count(map: &mut HashMap<String, usize>, label: String) {
+    *map.entry(label).or_insert(0) += 1;
+}
+
+fn finalize_diagnostic_counts(counts: HashMap<String, usize>) -> Vec<DiagnosticCount> {
+    let mut items = counts
+        .into_iter()
+        .map(|(label, count)| DiagnosticCount { label, count })
+        .collect::<Vec<_>>();
+    items.sort_by(|left, right| {
+        right
+            .count
+            .cmp(&left.count)
+            .then_with(|| left.label.cmp(&right.label))
+    });
+    items
+}
+
+fn suspicious_extension_label(record: &ScanRecord) -> String {
+    record
+        .extension
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.to_ascii_lowercase())
+        .or_else(|| {
+            Path::new(&record.path)
+                .extension()
+                .map(|value| value.to_string_lossy().to_ascii_lowercase())
+        })
+        .unwrap_or_else(|| "(none)".to_string())
+}
+
+fn primary_reason_label(reason: &DetectionReason) -> String {
+    if !reason.name.trim().is_empty() {
+        reason.name.trim().to_string()
+    } else if !reason.reason_type.trim().is_empty() {
+        reason.reason_type.trim().to_string()
+    } else {
+        "Unknown reason".to_string()
+    }
+}
+
+fn record_reason_combination_label(record: &ScanRecord) -> String {
+    if record.detection_reasons.is_empty() {
+        return "No structured reason".to_string();
+    }
+
+    let mut labels = record
+        .detection_reasons
+        .iter()
+        .map(primary_reason_label)
+        .collect::<Vec<_>>();
+    labels.sort();
+    labels.dedup();
+    labels.join(" + ")
+}
+
+fn is_single_source_weak_signal(record: &ScanRecord) -> bool {
+    if record.detection_reasons.is_empty() {
+        return false;
+    }
+
+    let unique_sources = record
+        .detection_reasons
+        .iter()
+        .map(|reason| reason.source.as_str())
+        .filter(|source| !source.is_empty())
+        .collect::<HashSet<_>>();
+    let max_weight = record
+        .detection_reasons
+        .iter()
+        .map(|reason| reason.weight)
+        .fold(0.0, f64::max);
+
+    unique_sources.len() <= 1 && max_weight < 0.9
+}
+
 pub(crate) fn home_dir() -> Option<PathBuf> {
     std::env::var("HOME").ok().map(PathBuf::from)
 }
@@ -4247,10 +4816,44 @@ fn collect_scan_targets(
             continue;
         }
 
+        if crate::r#static::file::bundle::is_app_bundle(&path) {
+            files.push(ScanTarget {
+                file_class: ProtectionFileClass::Executable,
+                priority: ProtectionPriority::High,
+                staged_path: None,
+                preserved_permissions: None,
+                queue_stage: QueueStage::Queued,
+                queue_note: String::new(),
+                last_modified_epoch: crate::r#static::file::bundle::bundle_target_modified_epoch(
+                    &path,
+                )
+                .unwrap_or_else(|| {
+                    metadata
+                        .modified()
+                        .ok()
+                        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                        .map(|duration| duration.as_secs())
+                        .unwrap_or(0)
+                }),
+                size_bytes: crate::r#static::file::bundle::bundle_target_size(&path)
+                    .unwrap_or(metadata.len()),
+                path,
+                origin,
+                grouped_change_count: 1,
+                burst_window_seconds: 0,
+                change_class: ProtectionChangeClass::Modified,
+            });
+            continue;
+        }
+
         if metadata.is_file() {
             files.push(ScanTarget {
                 file_class: classify_protection_file(&path),
                 priority: classify_protection_priority(&path, classify_protection_file(&path)),
+                staged_path: None,
+                preserved_permissions: None,
+                queue_stage: QueueStage::Queued,
+                queue_note: String::new(),
                 path,
                 last_modified_epoch: metadata
                     .modified()
@@ -4295,10 +4898,36 @@ fn collect_protection_targets(watched: &WatchedPathConfig, max_files: usize) -> 
         return Vec::new();
     }
 
+    if crate::r#static::file::bundle::is_app_bundle(&root) {
+        return vec![ScanTarget {
+            file_class: ProtectionFileClass::Executable,
+            priority: ProtectionPriority::High,
+            staged_path: None,
+            preserved_permissions: None,
+            queue_stage: QueueStage::Queued,
+            queue_note: String::new(),
+            path: root,
+            last_modified_epoch: crate::r#static::file::bundle::bundle_target_modified_epoch(
+                Path::new(&watched.path),
+            )
+            .unwrap_or(0),
+            size_bytes: crate::r#static::file::bundle::bundle_target_size(Path::new(&watched.path))
+                .unwrap_or(metadata.len()),
+            origin: ScanOrigin::RealTimeProtection,
+            grouped_change_count: 1,
+            burst_window_seconds: 0,
+            change_class: ProtectionChangeClass::Created,
+        }];
+    }
+
     if metadata.is_file() {
         return vec![ScanTarget {
             file_class: classify_protection_file(&root),
             priority: classify_protection_priority(&root, classify_protection_file(&root)),
+            staged_path: None,
+            preserved_permissions: None,
+            queue_stage: QueueStage::Queued,
+            queue_note: String::new(),
             path: root,
             last_modified_epoch: metadata
                 .modified()
@@ -4326,6 +4955,10 @@ fn collect_protection_targets(watched: &WatchedPathConfig, max_files: usize) -> 
             .map(|(path, metadata)| ScanTarget {
                 file_class: classify_protection_file(&path),
                 priority: classify_protection_priority(&path, classify_protection_file(&path)),
+                staged_path: None,
+                preserved_permissions: None,
+                queue_stage: QueueStage::Queued,
+                queue_note: String::new(),
                 path,
                 last_modified_epoch: metadata
                     .modified()
@@ -4354,6 +4987,10 @@ fn collect_protection_targets(watched: &WatchedPathConfig, max_files: usize) -> 
             metadata.is_file().then_some(ScanTarget {
                 file_class: classify_protection_file(&path),
                 priority: classify_protection_priority(&path, classify_protection_file(&path)),
+                staged_path: None,
+                preserved_permissions: None,
+                queue_stage: QueueStage::Queued,
+                queue_note: String::new(),
                 path,
                 last_modified_epoch: metadata
                     .modified()
@@ -4424,7 +5061,14 @@ fn build_download_snapshot_target(path: &Path, size: u64) -> Option<ScanTarget> 
     Some(ScanTarget {
         file_class: ProtectionFileClass::TempCache,
         priority: ProtectionPriority::High,
-        path: snapshot,
+        path: snapshot.clone(),
+        staged_path: Some(snapshot),
+        preserved_permissions: None,
+        queue_stage: QueueStage::QuarantinedWaiting,
+        queue_note: format!(
+            "Download monitoring created an isolated snapshot immediately so scanning can run against the staged copy while the original download remains in place: {}",
+            path.display()
+        ),
         last_modified_epoch: metadata
             .modified()
             .ok()
@@ -4712,7 +5356,10 @@ fn next_update_check_epoch(last_check_epoch: u64) -> u64 {
     }
 }
 
-fn maybe_auto_download_update(update_state: &Arc<Mutex<UpdateCheckState>>) {
+fn maybe_auto_download_update(
+    update_state: &Arc<Mutex<UpdateCheckState>>,
+    refresh_ctx: Option<egui::Context>,
+) {
     let release = update_state.lock().ok().and_then(|state| {
         if state.download_in_progress {
             return None;
@@ -4732,6 +5379,7 @@ fn maybe_auto_download_update(update_state: &Arc<Mutex<UpdateCheckState>>) {
         state.download_status = format!("Downloading {} in the background...", release.asset_name);
         MyApp::sync_update_snapshot_locked(&mut state);
     }
+    MyApp::request_ui_refresh(refresh_ctx.as_ref());
 
     let update_state = Arc::clone(update_state);
     thread::spawn(move || {
@@ -4762,6 +5410,7 @@ fn maybe_auto_download_update(update_state: &Arc<Mutex<UpdateCheckState>>) {
                         )
                     };
                 }
+                MyApp::request_ui_refresh(refresh_ctx.as_ref());
             },
         );
 
@@ -4811,6 +5460,7 @@ fn maybe_auto_download_update(update_state: &Arc<Mutex<UpdateCheckState>>) {
                     state.install_guidance = plan.instructions;
                     MyApp::sync_update_snapshot_locked(&mut state);
                 }
+                MyApp::request_ui_refresh(refresh_ctx.as_ref());
             }
             Err(error) => {
                 let _ =
@@ -4829,6 +5479,7 @@ fn maybe_auto_download_update(update_state: &Arc<Mutex<UpdateCheckState>>) {
                     state.install_guidance = plan.instructions;
                     MyApp::sync_update_snapshot_locked(&mut state);
                 }
+                MyApp::request_ui_refresh(refresh_ctx.as_ref());
             }
         }
     });
@@ -5178,6 +5829,125 @@ fn feedback_scope_label(scope: FeedbackScope) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::r#static::report::{NormalizedSeverity, SummaryVerdict};
+    use crate::r#static::report::{
+        QuarantineMetadata, QuarantineStatus, ReportReason, ReportSummary,
+    };
+    use std::fs;
+    use std::sync::{Mutex, OnceLock};
+
+    fn app_path_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn with_test_app_dirs<T>(root: &Path, run: impl FnOnce() -> T) -> T {
+        let _guard = app_path_test_lock().lock().expect("lock");
+        let previous_data = std::env::var("PROJECTX_DATA_DIR").ok();
+        let previous_config = std::env::var("PROJECTX_CONFIG_DIR").ok();
+        let previous_cache = std::env::var("PROJECTX_CACHE_DIR").ok();
+
+        std::env::set_var("PROJECTX_DATA_DIR", root.join("data"));
+        std::env::set_var("PROJECTX_CONFIG_DIR", root.join("config"));
+        std::env::set_var("PROJECTX_CACHE_DIR", root.join("cache"));
+
+        let result = run();
+
+        if let Some(value) = previous_data {
+            std::env::set_var("PROJECTX_DATA_DIR", value);
+        } else {
+            std::env::remove_var("PROJECTX_DATA_DIR");
+        }
+        if let Some(value) = previous_config {
+            std::env::set_var("PROJECTX_CONFIG_DIR", value);
+        } else {
+            std::env::remove_var("PROJECTX_CONFIG_DIR");
+        }
+        if let Some(value) = previous_cache {
+            std::env::set_var("PROJECTX_CACHE_DIR", value);
+        } else {
+            std::env::remove_var("PROJECTX_CACHE_DIR");
+        }
+
+        result
+    }
+
+    fn test_scan_outcome() -> crate::r#static::ScanOutcome {
+        crate::r#static::ScanOutcome {
+            severity: crate::r#static::types::Severity::Clean,
+            normalized_severity: NormalizedSeverity::Clean,
+            verdict: SummaryVerdict::Clean,
+            summary: String::new(),
+            findings: Vec::new(),
+            finding_details: Vec::new(),
+            reason_entries: Vec::new(),
+            original_path: PathBuf::from("/tmp/original"),
+            quarantine_path: PathBuf::from("/tmp/original"),
+            restored_to_original_path: true,
+            report_path: PathBuf::from("/tmp/report.json"),
+            json_report: "{}".to_string(),
+            cache_hit: false,
+            rules_version: String::new(),
+            file_name: "sample.bin".to_string(),
+            extension: "bin".to_string(),
+            sha256: "0".repeat(64),
+            sniffed_mime: "application/octet-stream".to_string(),
+            detected_format: None,
+            file_size_bytes: 0,
+            risk_score: 0.0,
+            safety_score: 0.0,
+            signal_sources: Vec::new(),
+            ml_assessment: None,
+        }
+    }
+
+    fn test_record(
+        path: &str,
+        verdict: SummaryVerdict,
+        storage_state: QuarantineStatus,
+        quarantine_path: Option<String>,
+        reasons: Vec<ReportReason>,
+    ) -> ReportSummary {
+        ReportSummary {
+            scan_id: format!("scan::{path}"),
+            path: path.to_string(),
+            file_name: Path::new(path)
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string(),
+            extension: Path::new(path)
+                .extension()
+                .map(|value| value.to_string_lossy().to_string()),
+            sha256: None,
+            sniffed_mime: None,
+            detected_format: Some("Unknown".to_string()),
+            quarantine_path,
+            report_path: None,
+            storage_state,
+            quarantine: QuarantineMetadata {
+                retained_in_quarantine: storage_state == QuarantineStatus::InQuarantine,
+                restored_to_original_path: storage_state == QuarantineStatus::Restored,
+            },
+            last_modified_epoch: 0,
+            scanned_at_epoch: 1,
+            started_at_epoch: None,
+            finished_at_epoch: None,
+            duration_ms: 0,
+            file_size_bytes: 32,
+            verdict,
+            severity: NormalizedSeverity::Medium,
+            summary_text: String::new(),
+            action_note: String::new(),
+            workflow_origin: Some("Manual scan".to_string()),
+            risk_score: None,
+            safety_score: None,
+            signal_sources: vec!["heuristic".to_string()],
+            detection_reasons: reasons,
+            warning_count: 0,
+            error_count: 0,
+        }
+    }
 
     #[test]
     fn scoped_feedback_does_not_overwrite_other_channels() {
@@ -5256,8 +6026,77 @@ mod tests {
     }
 
     #[test]
+    fn suspicious_diagnostics_summary_groups_live_patterns() {
+        let root =
+            std::env::temp_dir().join(format!("projectx_suspicious_summary_{}", now_epoch()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("root");
+        with_test_app_dirs(&root, || {
+            let quarantine_dir = crate::app_paths::quarantine_dir();
+            fs::create_dir_all(&quarantine_dir).expect("quarantine dir");
+            let retained_path = quarantine_dir.join("package-lock.json");
+            fs::write(&retained_path, b"{}").expect("retained");
+
+            let mut app = MyApp::default();
+            app.records = vec![
+                test_record(
+                    "/tmp/package-lock.json",
+                    SummaryVerdict::Suspicious,
+                    QuarantineStatus::InQuarantine,
+                    Some(retained_path.to_string_lossy().to_string()),
+                    vec![ReportReason {
+                        name: "Decoded Active Content".to_string(),
+                        source: "heuristic".to_string(),
+                        weight: 0.5,
+                        ..ReportReason::default()
+                    }],
+                ),
+                test_record(
+                    "/tmp/notes.txt",
+                    SummaryVerdict::Suspicious,
+                    QuarantineStatus::Restored,
+                    None,
+                    vec![ReportReason {
+                        name: "Decoded Active Content".to_string(),
+                        source: "heuristic".to_string(),
+                        weight: 0.5,
+                        ..ReportReason::default()
+                    }],
+                ),
+            ];
+
+            let summary = app.suspicious_diagnostics_summary();
+            assert_eq!(summary.suspicious_total, 2);
+            assert_eq!(summary.retained_total, 1);
+            assert_eq!(
+                summary
+                    .by_reason_name
+                    .first()
+                    .map(|entry| entry.label.as_str()),
+                Some("Decoded Active Content")
+            );
+            assert_eq!(
+                summary
+                    .by_extension
+                    .first()
+                    .map(|entry| entry.label.as_str()),
+                Some("json")
+            );
+            assert_eq!(
+                summary
+                    .weak_reason_combinations
+                    .first()
+                    .map(|entry| entry.label.as_str()),
+                Some("Decoded Active Content")
+            );
+        });
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn latest_scan_epoch_is_none_without_records() {
-        let app = MyApp::default();
+        let mut app = MyApp::default();
+        app.records.clear();
         assert_eq!(app.latest_scan_epoch(), None);
     }
 
@@ -5268,6 +6107,90 @@ mod tests {
             100 + AUTO_UPDATE_CHECK_INTERVAL_SECS
         );
         assert_eq!(next_update_check_epoch(0), 0);
+    }
+
+    #[test]
+    fn bulk_restore_updates_records_and_clears_selection() {
+        let root = std::env::temp_dir().join(format!("projectx_bulk_restore_{}", now_epoch()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("root");
+        with_test_app_dirs(&root, || {
+            let quarantine_dir = crate::app_paths::quarantine_dir();
+            fs::create_dir_all(&quarantine_dir).expect("quarantine dir");
+            let quarantine_path = quarantine_dir.join("sample.bin");
+            fs::write(&quarantine_path, b"sample").expect("quarantine file");
+            let original_path = root.join("restore-target").join("sample.bin");
+
+            let mut app = MyApp::default();
+            let record = test_record(
+                original_path.to_string_lossy().as_ref(),
+                SummaryVerdict::Suspicious,
+                QuarantineStatus::InQuarantine,
+                Some(quarantine_path.to_string_lossy().to_string()),
+                vec![ReportReason {
+                    name: "Decoded Active Content".to_string(),
+                    source: "heuristic".to_string(),
+                    weight: 0.5,
+                    ..ReportReason::default()
+                }],
+            );
+            let record_id = record.record_id();
+            app.selected_report_ids.insert(record_id.clone());
+            app.records.push(record);
+
+            app.restore_records_by_ids(&[record_id.clone()]);
+
+            assert!(original_path.is_file());
+            assert!(!quarantine_path.exists());
+            assert_eq!(app.records[0].storage_state, QuarantineStatus::Restored);
+            assert!(app.records[0].quarantine_path.is_none());
+            assert!(!app.selected_report_ids.contains(&record_id));
+        });
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn bulk_restore_reports_conflicts_without_overwriting() {
+        let root =
+            std::env::temp_dir().join(format!("projectx_bulk_restore_conflict_{}", now_epoch()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("root");
+        with_test_app_dirs(&root, || {
+            let quarantine_dir = crate::app_paths::quarantine_dir();
+            fs::create_dir_all(&quarantine_dir).expect("quarantine dir");
+            let quarantine_path = quarantine_dir.join("sample.bin");
+            fs::write(&quarantine_path, b"quarantined").expect("quarantine file");
+            let original_path = root.join("restore-target").join("sample.bin");
+            fs::create_dir_all(original_path.parent().unwrap()).expect("dest dir");
+            fs::write(&original_path, b"existing").expect("existing dest");
+
+            let mut app = MyApp::default();
+            app.records.push(test_record(
+                original_path.to_string_lossy().as_ref(),
+                SummaryVerdict::Suspicious,
+                QuarantineStatus::InQuarantine,
+                Some(quarantine_path.to_string_lossy().to_string()),
+                vec![ReportReason {
+                    name: "Decoded Active Content".to_string(),
+                    source: "heuristic".to_string(),
+                    weight: 0.5,
+                    ..ReportReason::default()
+                }],
+            ));
+
+            let record_id = app.records[0].record_id();
+            app.restore_records_by_ids(&[record_id]);
+
+            assert_eq!(fs::read(&original_path).expect("dest"), b"existing");
+            assert!(quarantine_path.is_file());
+            assert_eq!(app.records[0].storage_state, QuarantineStatus::InQuarantine);
+            assert!(app
+                .feedback(FeedbackScope::FileAction)
+                .expect("feedback")
+                .message
+                .contains("failed"));
+        });
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -5344,5 +6267,100 @@ mod tests {
             .feedback(FeedbackScope::Updater)
             .map(|feedback| feedback.message.contains("No downloaded update"))
             .unwrap_or(false));
+    }
+
+    #[test]
+    fn prepare_targets_for_queue_stages_multiple_files() {
+        let root = std::env::temp_dir().join(format!(
+            "projectx_queue_stage_{}_{}",
+            std::process::id(),
+            now_epoch()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("root");
+        let first = root.join("one.bin");
+        let second = root.join("two.bin");
+        std::fs::write(&first, b"one").expect("first");
+        std::fs::write(&second, b"two").expect("second");
+
+        with_test_app_dirs(&root, || {
+            let mut app = MyApp::default();
+            let targets = vec![
+                ScanTarget {
+                    path: first.clone(),
+                    staged_path: None,
+                    preserved_permissions: None,
+                    queue_stage: QueueStage::Queued,
+                    queue_note: String::new(),
+                    last_modified_epoch: now_epoch(),
+                    size_bytes: 3,
+                    origin: ScanOrigin::Manual,
+                    priority: ProtectionPriority::Normal,
+                    file_class: ProtectionFileClass::Other,
+                    grouped_change_count: 1,
+                    burst_window_seconds: 0,
+                    change_class: ProtectionChangeClass::Modified,
+                },
+                ScanTarget {
+                    path: second.clone(),
+                    staged_path: None,
+                    preserved_permissions: None,
+                    queue_stage: QueueStage::Queued,
+                    queue_note: String::new(),
+                    last_modified_epoch: now_epoch(),
+                    size_bytes: 3,
+                    origin: ScanOrigin::Manual,
+                    priority: ProtectionPriority::Normal,
+                    file_class: ProtectionFileClass::Other,
+                    grouped_change_count: 1,
+                    burst_window_seconds: 0,
+                    change_class: ProtectionChangeClass::Modified,
+                },
+            ];
+
+            let (prepared, failures) = app.prepare_targets_for_queue(targets);
+
+            assert!(failures.is_empty());
+            assert_eq!(prepared.len(), 2);
+            assert!(prepared.iter().all(|target| target.staged_path.is_some()));
+            assert!(prepared
+                .iter()
+                .all(|target| matches!(target.queue_stage, QueueStage::QuarantinedWaiting)));
+
+            for target in prepared {
+                if let Some(staged_path) = target.staged_path {
+                    std::fs::remove_file(staged_path).ok();
+                }
+            }
+        });
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn disposition_note_explains_scan_in_place() {
+        let outcome = crate::r#static::ScanOutcome {
+            original_path: PathBuf::from("/tmp/clip.mp4"),
+            quarantine_path: PathBuf::from("/tmp/clip.mp4"),
+            restored_to_original_path: true,
+            ..test_scan_outcome()
+        };
+
+        let note = disposition_note_for_outcome(&outcome);
+        assert!(note.contains("Scanned in place"));
+        assert!(note.contains("read-only"));
+    }
+
+    #[test]
+    fn disposition_note_explains_retained_quarantine_copy() {
+        let outcome = crate::r#static::ScanOutcome {
+            original_path: PathBuf::from("/Users/test/Downloads/clip.mp4"),
+            quarantine_path: PathBuf::from("/tmp/projectx/quarantine/clip.mp4"),
+            restored_to_original_path: false,
+            ..test_scan_outcome()
+        };
+
+        let note = disposition_note_for_outcome(&outcome);
+        assert!(note.contains("retained"));
+        assert!(note.contains("Quarantine"));
     }
 }

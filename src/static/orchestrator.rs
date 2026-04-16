@@ -6,9 +6,11 @@ use std::thread;
 use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
+
 use super::config::ScanConfig;
 use super::context::ScanContext;
-use super::file::{cache, discovery};
+use super::file::{bundle, cache, discovery};
 use super::heuristics;
 use super::report;
 use super::report::{NormalizedSeverity, ReportReason, SummaryVerdict};
@@ -60,6 +62,50 @@ impl ScanOutcome {
 pub struct BatchScanResult {
     pub path: PathBuf,
     pub outcome: Result<ScanOutcome, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PreservedPermissions {
+    #[serde(default)]
+    pub readonly: bool,
+    #[cfg(unix)]
+    #[serde(default)]
+    pub unix_mode: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum QueueStage {
+    #[default]
+    Queued,
+    QuarantinedWaiting,
+    Scanning,
+    Restored,
+    Retained,
+    QuarantineFailed,
+    ScannedInPlace,
+}
+
+impl QueueStage {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Queued => "Queued",
+            Self::QuarantinedWaiting => "Quarantined (waiting)",
+            Self::Scanning => "Scanning",
+            Self::Restored => "Restored",
+            Self::Retained => "Retained",
+            Self::QuarantineFailed => "Quarantine failed",
+            Self::ScannedInPlace => "Scanned in place",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StagedScanPath {
+    pub original_path: PathBuf,
+    pub analysis_path: PathBuf,
+    pub preserved_permissions: Option<PreservedPermissions>,
+    pub queue_stage: QueueStage,
+    pub note: String,
 }
 
 pub fn run_pipeline(
@@ -271,29 +317,90 @@ pub fn scan_path(file_path: &str, config: Option<ScanConfig>) -> Result<ScanOutc
     scan_path_with_progress(file_path, config, |_| {})
 }
 
+pub fn stage_path_for_scan(path: &Path) -> Result<StagedScanPath, String> {
+    init_quarantine()?;
+
+    if bundle::is_app_bundle(path) {
+        return Ok(StagedScanPath {
+            original_path: path.to_path_buf(),
+            analysis_path: path.to_path_buf(),
+            preserved_permissions: None,
+            queue_stage: QueueStage::ScannedInPlace,
+            note: "App bundle will be analyzed read-only in place because bundle directories are not moved into quarantine automatically.".to_string(),
+        });
+    }
+
+    if !path.is_file() {
+        return Err(format!(
+            "Not a file or supported app bundle: {}",
+            path.display()
+        ));
+    }
+
+    if is_in_quarantine(path) {
+        return Ok(StagedScanPath {
+            original_path: path.to_path_buf(),
+            analysis_path: path.to_path_buf(),
+            preserved_permissions: None,
+            queue_stage: QueueStage::QuarantinedWaiting,
+            note: "File was already in ProjectX quarantine before it entered the queue."
+                .to_string(),
+        });
+    }
+
+    let preserved_permissions = fs::metadata(path)
+        .ok()
+        .map(|metadata| capture_permissions(&metadata));
+    let analysis_path =
+        quarantine_file(path).map_err(|error| format!("Failed to quarantine file: {error}"))?;
+
+    Ok(StagedScanPath {
+        original_path: path.to_path_buf(),
+        analysis_path,
+        preserved_permissions,
+        queue_stage: QueueStage::QuarantinedWaiting,
+        note: "File was moved into ProjectX quarantine immediately when it entered the queue. Scanning will operate on the quarantined copy.".to_string(),
+    })
+}
+
 pub fn scan_path_with_progress<F>(
     file_path: &str,
+    config: Option<ScanConfig>,
+    progress: F,
+) -> Result<ScanOutcome, String>
+where
+    F: FnMut(ScanProgress),
+{
+    let source = Path::new(file_path);
+    if bundle::is_app_bundle(source) {
+        return scan_app_bundle_with_progress(source, config, progress);
+    }
+    let staged = stage_path_for_scan(source)?;
+    scan_staged_path_with_progress(
+        &staged.original_path,
+        &staged.analysis_path,
+        staged.preserved_permissions.as_ref(),
+        config,
+        progress,
+    )
+}
+
+pub fn scan_staged_path_with_progress<F>(
+    source: &Path,
+    staged_path: &Path,
+    original_permissions: Option<&PreservedPermissions>,
     config: Option<ScanConfig>,
     mut progress: F,
 ) -> Result<ScanOutcome, String>
 where
     F: FnMut(ScanProgress),
 {
-    init_quarantine()?;
     progress(ScanProgress {
         fraction: 0.0,
         stage: "Preparing scan",
     });
 
-    let source = Path::new(file_path);
-    if !source.is_file() {
-        return Err(format!("Not a file: {}", file_path));
-    }
-
-    let original_permissions = fs::metadata(source)
-        .map(|metadata| metadata.permissions())
-        .ok();
-    let already_quarantined = is_in_quarantine(source);
+    let already_quarantined = source == staged_path || is_in_quarantine(source);
     progress(ScanProgress {
         fraction: 0.08,
         stage: if already_quarantined {
@@ -302,13 +409,8 @@ where
             "Quarantining file"
         },
     });
-    let quarantine_path = if already_quarantined {
-        source.to_path_buf()
-    } else {
-        quarantine_file(source).map_err(|e| format!("Failed to quarantine file: {}", e))?
-    };
 
-    let pipeline_path = quarantine_path
+    let pipeline_path = staged_path
         .to_str()
         .ok_or_else(|| "Quarantine path is not valid UTF-8".to_string())?;
 
@@ -321,7 +423,7 @@ where
         Ok(result) => result,
         Err(error) => {
             if !already_quarantined {
-                let _ = release_file(&quarantine_path, source, original_permissions.as_ref());
+                let _ = release_file(staged_path, source, original_permissions);
             }
             return Err(format!("Static analysis failed: {}", error));
         }
@@ -341,7 +443,7 @@ where
             fraction: 0.94,
             stage: "Restoring clean file",
         });
-        match release_file(&quarantine_path, source, original_permissions.as_ref()) {
+        match release_file(staged_path, source, original_permissions) {
             Ok(()) => {
                 restored_to_original_path = true;
             }
@@ -364,13 +466,10 @@ where
         } else if already_quarantined {
             format!(
                 "Analyzed existing quarantined file {}",
-                quarantine_path.display()
+                staged_path.display()
             )
         } else {
-            format!(
-                "Retained file in quarantine at {}",
-                quarantine_path.display()
-            )
+            format!("Retained file in quarantine at {}", staged_path.display())
         },
     );
 
@@ -378,7 +477,7 @@ where
         &ctx,
         severity,
         source,
-        &quarantine_path,
+        staged_path,
         restored_to_original_path,
     )?;
 
@@ -406,7 +505,7 @@ where
         finding_details: ctx.findings.clone(),
         reason_entries,
         original_path: source.to_path_buf(),
-        quarantine_path,
+        quarantine_path: staged_path.to_path_buf(),
         restored_to_original_path,
         report_path,
         json_report,
@@ -425,10 +524,170 @@ where
     })
 }
 
+pub fn is_supported_scan_path(path: &Path) -> bool {
+    path.is_file() || bundle::is_app_bundle(path)
+}
+
 pub fn scan_file(file_path: &str) -> bool {
     scan_path(file_path, None)
         .map(|outcome| outcome.is_safe())
         .unwrap_or(false)
+}
+
+fn scan_app_bundle_with_progress<F>(
+    source: &Path,
+    config: Option<ScanConfig>,
+    mut progress: F,
+) -> Result<ScanOutcome, String>
+where
+    F: FnMut(ScanProgress),
+{
+    progress(ScanProgress {
+        fraction: 0.0,
+        stage: "Preparing app bundle scan",
+    });
+
+    let bundle_plan = bundle::resolve_app_bundle_plan(source).map_err(|error| {
+        format!(
+            "macOS app bundle scan failed for {}: {error}",
+            source.display()
+        )
+    })?;
+
+    progress(ScanProgress {
+        fraction: 0.08,
+        stage: "Resolving app bundle entrypoint",
+    });
+
+    let pipeline_path = bundle_plan
+        .primary_executable
+        .to_str()
+        .ok_or_else(|| "App bundle executable path is not valid UTF-8".to_string())?;
+
+    let (mut ctx, severity) = run_pipeline_with_progress(pipeline_path, config, |update| {
+        progress(ScanProgress {
+            fraction: 0.12 + update.fraction * 0.78,
+            stage: update.stage,
+        });
+    })
+    .map_err(|error| {
+        format!(
+            "Static analysis failed for app bundle {}: {}",
+            source.display(),
+            error
+        )
+    })?;
+
+    ctx.log_event(
+        "bundle",
+        format!(
+            "Scanned macOS app bundle {} via primary executable {}",
+            bundle_plan.bundle_path.display(),
+            bundle_plan.primary_executable.display()
+        ),
+    );
+    if let Some(info_plist) = bundle_plan.info_plist_path.as_ref() {
+        ctx.log_event(
+            "bundle",
+            format!("Bundle metadata detected at {}", info_plist.display()),
+        );
+    }
+    if !bundle_plan.helper_executables.is_empty() {
+        ctx.log_event(
+            "bundle",
+            format!(
+                "Identified {} helper executable(s) that were not analyzed in this pass.",
+                bundle_plan.helper_executables.len()
+            ),
+        );
+    }
+    for note in &bundle_plan.limited_access_notes {
+        ctx.log_event("bundle", note.clone());
+    }
+    for note in &bundle_plan.skipped_items {
+        ctx.log_event("bundle", note.clone());
+    }
+
+    let findings = ctx
+        .findings
+        .iter()
+        .map(report::finding::format_line)
+        .collect::<Vec<_>>();
+    let mut summary = report::summary::build(&ctx, severity);
+    if bundle_plan.limited_access_notes.is_empty() {
+        summary.push_str(&format!(
+            " | Scanned macOS app bundle by analyzing the main executable at {}.",
+            bundle_plan.primary_executable.display()
+        ));
+    } else {
+        summary.push_str(&format!(
+            " | Scanned macOS app bundle with limited access. Main executable {} was analyzed, but {} protected or unreadable component(s) were skipped.",
+            bundle_plan.primary_executable.display(),
+            bundle_plan.limited_access_notes.len()
+        ));
+    }
+    if !bundle_plan.helper_executables.is_empty() {
+        summary.push_str(&format!(
+            " {} helper executable(s) were identified but not analyzed in this pass.",
+            bundle_plan.helper_executables.len()
+        ));
+    }
+    if !matches!(severity, Severity::Clean) {
+        summary.push_str(
+            " The original app bundle was analyzed read-only and was not automatically quarantined or modified.",
+        );
+    }
+
+    let json_report_path = source;
+    let (json_report, report_path) =
+        report::persist(&ctx, severity, source, json_report_path, true)?;
+
+    progress(ScanProgress {
+        fraction: 1.0,
+        stage: "App bundle scan complete",
+    });
+
+    let signal_sources = scan_signal_sources(&ctx);
+    let reason_entries = ctx
+        .findings
+        .iter()
+        .map(structured_reason_from_finding)
+        .collect::<Vec<_>>();
+
+    Ok(ScanOutcome {
+        severity,
+        normalized_severity: report::normalize_severity(severity, ctx.score.risk),
+        verdict: report::verdict_from_severity(severity),
+        summary,
+        findings,
+        finding_details: ctx.findings.clone(),
+        reason_entries,
+        original_path: source.to_path_buf(),
+        quarantine_path: source.to_path_buf(),
+        restored_to_original_path: true,
+        report_path,
+        json_report,
+        cache_hit: ctx.cache.as_ref().map(|cache| cache.hit).unwrap_or(false),
+        rules_version: ctx.rules_version.clone(),
+        file_name: source
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string(),
+        extension: source
+            .extension()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string(),
+        sha256: ctx.sha256.clone(),
+        sniffed_mime: ctx.sniffed_mime.clone(),
+        detected_format: ctx.detected_format.clone(),
+        file_size_bytes: target_size_u64(ctx.original_size_bytes),
+        risk_score: ctx.score.risk,
+        safety_score: ctx.score.safety,
+        signal_sources,
+        ml_assessment: ctx.ml_assessment.clone(),
+    })
 }
 
 pub fn restore_quarantined_file(quarantine_path: &str, original_path: &str) -> Result<(), String> {
@@ -562,22 +821,69 @@ fn quarantine_file(source: &Path) -> Result<PathBuf, std::io::Error> {
 fn release_file(
     quarantine_path: &Path,
     original_path: &Path,
-    original_permissions: Option<&fs::Permissions>,
+    original_permissions: Option<&PreservedPermissions>,
 ) -> Result<(), std::io::Error> {
+    if original_path.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("A file already exists at {}", original_path.display()),
+        ));
+    }
+
     if let Some(parent) = original_path.parent() {
         fs::create_dir_all(parent)?;
     }
 
     move_or_copy(quarantine_path, original_path)?;
     if let Some(permissions) = original_permissions {
-        fs::set_permissions(original_path, permissions.clone())?;
+        apply_preserved_permissions(original_path, permissions)?;
     }
 
     eprintln!("File released from quarantine: {}", original_path.display());
     Ok(())
 }
 
+fn capture_permissions(metadata: &fs::Metadata) -> PreservedPermissions {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        PreservedPermissions {
+            readonly: metadata.permissions().readonly(),
+            unix_mode: Some(metadata.permissions().mode()),
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        PreservedPermissions {
+            readonly: metadata.permissions().readonly(),
+        }
+    }
+}
+
+fn apply_preserved_permissions(
+    path: &Path,
+    preserved: &PreservedPermissions,
+) -> Result<(), std::io::Error> {
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_readonly(preserved.readonly);
+    #[cfg(unix)]
+    if let Some(mode) = preserved.unix_mode {
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(mode);
+    }
+    fs::set_permissions(path, permissions)
+}
+
 fn describe_restore_error(original_path: &Path, error: &std::io::Error) -> String {
+    if error.kind() == std::io::ErrorKind::AlreadyExists {
+        return format!(
+            "{}. ProjectX will not overwrite an existing file at {} during restore. Move or remove the conflicting file first, then restore again.",
+            error,
+            original_path.display()
+        );
+    }
+
     if error.kind() == std::io::ErrorKind::PermissionDenied {
         let path_text = original_path.display().to_string();
         if path_text.starts_with("/Applications/")
@@ -721,6 +1027,149 @@ fn structured_reason_from_finding(finding: &Finding) -> ReportReason {
         name: report::normalize_reason_name(&finding.code),
         description: report::normalize_reason_description(&finding.message),
         weight: finding.weight,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn app_path_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn with_test_app_dirs<T>(root: &Path, run: impl FnOnce() -> T) -> T {
+        let _guard = app_path_test_lock().lock().expect("lock");
+        let previous_data = std::env::var("PROJECTX_DATA_DIR").ok();
+        let previous_config = std::env::var("PROJECTX_CONFIG_DIR").ok();
+        let previous_cache = std::env::var("PROJECTX_CACHE_DIR").ok();
+
+        std::env::set_var("PROJECTX_DATA_DIR", root.join("data"));
+        std::env::set_var("PROJECTX_CONFIG_DIR", root.join("config"));
+        std::env::set_var("PROJECTX_CACHE_DIR", root.join("cache"));
+
+        let result = run();
+
+        if let Some(value) = previous_data {
+            std::env::set_var("PROJECTX_DATA_DIR", value);
+        } else {
+            std::env::remove_var("PROJECTX_DATA_DIR");
+        }
+        if let Some(value) = previous_config {
+            std::env::set_var("PROJECTX_CONFIG_DIR", value);
+        } else {
+            std::env::remove_var("PROJECTX_CONFIG_DIR");
+        }
+        if let Some(value) = previous_cache {
+            std::env::set_var("PROJECTX_CACHE_DIR", value);
+        } else {
+            std::env::remove_var("PROJECTX_CACHE_DIR");
+        }
+
+        result
+    }
+
+    #[test]
+    fn supported_scan_path_accepts_app_bundle_directories() {
+        let root = unique_test_root("supported");
+        let bundle = create_mock_bundle(&root, "Example");
+        assert!(is_supported_scan_path(&bundle));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn app_bundle_scan_plan_resolves_and_primary_executable_scans() {
+        let root = unique_test_root("scan");
+        let bundle = create_mock_bundle(&root, "Example");
+        let plan =
+            crate::r#static::file::bundle::resolve_app_bundle_plan(&bundle).expect("bundle plan");
+        let (ctx, severity) = run_pipeline_with_progress(
+            plan.primary_executable.to_str().expect("utf8 path"),
+            Some(ScanConfig::default()),
+            |_| {},
+        )
+        .expect("pipeline");
+
+        assert_eq!(plan.bundle_path, bundle);
+        assert_eq!(ctx.file_name, "Example");
+        assert!(matches!(
+            severity,
+            crate::r#static::types::Severity::Clean
+                | crate::r#static::types::Severity::Suspicious
+                | crate::r#static::types::Severity::Malicious
+        ));
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn stage_path_for_scan_moves_regular_file_into_quarantine_immediately() {
+        let root = unique_test_root("stage");
+        let sample = root.join("sample.bin");
+        std::fs::write(&sample, b"hello").expect("sample");
+
+        with_test_app_dirs(&root, || {
+            let staged = stage_path_for_scan(&sample).expect("staged");
+
+            assert_eq!(staged.queue_stage, QueueStage::QuarantinedWaiting);
+            assert_eq!(staged.original_path, sample);
+            assert!(staged
+                .analysis_path
+                .starts_with(crate::app_paths::quarantine_dir()));
+            assert!(!staged.original_path.exists());
+            assert!(staged.analysis_path.is_file());
+
+            std::fs::remove_file(staged.analysis_path).ok();
+        });
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn stage_path_for_scan_keeps_app_bundle_in_place() {
+        let root = unique_test_root("bundle_stage");
+        let bundle = create_mock_bundle(&root, "BundleApp");
+
+        with_test_app_dirs(&root, || {
+            let staged = stage_path_for_scan(&bundle).expect("bundle staged");
+
+            assert_eq!(staged.queue_stage, QueueStage::ScannedInPlace);
+            assert_eq!(staged.original_path, bundle);
+            assert_eq!(staged.analysis_path, staged.original_path);
+        });
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    fn create_mock_bundle(root: &Path, name: &str) -> PathBuf {
+        let bundle = root.join(format!("{name}.app"));
+        let macos = bundle.join("Contents").join("MacOS");
+        std::fs::create_dir_all(&macos).expect("macos dir");
+        std::fs::write(
+            bundle.join("Contents").join("Info.plist"),
+            format!(
+                "<plist><dict><key>CFBundleExecutable</key><string>{name}</string></dict></plist>"
+            ),
+        )
+        .expect("plist");
+        std::fs::write(macos.join(name), b"#!/bin/sh\necho hello\n").expect("primary");
+        bundle
+    }
+
+    fn unique_test_root(label: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "projectx_orchestrator_test_{}_{}_{}",
+            label,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("root dir");
+        root
     }
 }
 

@@ -76,10 +76,8 @@ pub fn run(ctx: &mut ScanContext) {
         decoded.truncate(decode_limit);
     }
 
-    if decoded
-        .iter()
-        .any(|value| contains_suspicious_marker(value))
-    {
+    let media_container_context = likely_media_container_context(ctx);
+    if should_flag_decoded_active_content(media_container_context, &decoded) {
         ctx.push_finding(Finding::new(
             "DECODED_ACTIVE_CONTENT",
             "Decoded content reveals network access or script-launch patterns that were previously hidden",
@@ -99,6 +97,58 @@ pub fn run(ctx: &mut ScanContext) {
 
     ctx.decoded_strings = decoded;
     ctx.push_view(super::views::decoded::build(&ctx.decoded_strings));
+}
+
+fn should_flag_decoded_active_content(media_container_context: bool, decoded: &[String]) -> bool {
+    if !decoded
+        .iter()
+        .any(|value| contains_suspicious_marker(value))
+    {
+        return false;
+    }
+
+    if !media_container_context {
+        return true;
+    }
+
+    decoded
+        .iter()
+        .any(|value| contains_follow_on_behavior(value))
+        || decoded
+            .iter()
+            .filter(|value| contains_distinct_active_marker(value))
+            .count()
+            >= 2
+}
+
+fn contains_distinct_active_marker(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    [
+        "http://",
+        "https://",
+        "downloadstring",
+        "downloadfile",
+        "invoke-webrequest",
+        "cmd.exe",
+        "start-process",
+        "wscript.shell",
+        "rundll32",
+        "mshta",
+    ]
+    .iter()
+    .filter(|marker| lower.contains(**marker))
+    .count()
+        >= 1
+}
+
+fn likely_media_container_context(ctx: &ScanContext) -> bool {
+    let extension = ctx.extension.to_ascii_lowercase();
+    matches!(
+        extension.as_str(),
+        "mp4" | "m4v" | "mov" | "avi" | "mkv" | "webm" | "mp3" | "m4a"
+    ) || ctx.sniffed_mime.starts_with("video/")
+        || ctx.sniffed_mime.starts_with("audio/")
+        || matches!(ctx.detected_format.as_deref(), Some("MediaContainer"))
 }
 
 fn looks_meaningful(value: &str) -> bool {
