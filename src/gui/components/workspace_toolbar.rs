@@ -24,7 +24,6 @@ pub fn render_record_workspace_toolbar(
     selected_quarantined_visible: Option<usize>,
     allow_bulk_delete: bool,
     allow_bulk_restore: bool,
-    note: &str,
 ) -> WorkspaceToolbarResponse {
     let mut response = WorkspaceToolbarResponse::default();
 
@@ -112,7 +111,6 @@ pub fn render_record_workspace_toolbar(
             }
         });
         ui.add_space(2.0);
-        ui.label(note);
     });
 
     response

@@ -18,10 +18,6 @@ pub const SCAN_RECORD_LIMIT: usize = 500;
 pub const TIMING_SAMPLE_LIMIT: usize = 2048;
 pub const PROTECTION_EVENT_LIMIT: usize = 512;
 
-pub fn history_path() -> PathBuf {
-    crate::app_paths::gui_history_path()
-}
-
 pub fn index_path() -> PathBuf {
     crate::app_paths::gui_index_path()
 }
@@ -43,7 +39,6 @@ pub enum Page {
     Analytics,
     Scanner,
     Reports,
-    History,
     Settings,
     About,
 }
@@ -54,7 +49,6 @@ impl Page {
             Self::Analytics => "Overview",
             Self::Scanner => "Scan",
             Self::Reports => "Results",
-            Self::History => "Operations",
             Self::Settings => "Settings",
             Self::About => "About",
         }
@@ -65,7 +59,6 @@ impl Page {
             Self::Analytics => "◪",
             Self::Scanner => "◎",
             Self::Reports => "▤",
-            Self::History => "◷",
             Self::Settings => "⚙",
             Self::About => "ⓘ",
         }

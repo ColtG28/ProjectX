@@ -493,7 +493,6 @@ impl MyApp {
                 self.page_button(ui, Page::Analytics);
                 self.page_button(ui, Page::Scanner);
                 self.page_button(ui, Page::Reports);
-                self.page_button(ui, Page::History);
                 self.page_button(ui, Page::Settings);
                 self.page_button(ui, Page::About);
             });
@@ -1178,10 +1177,6 @@ impl MyApp {
 
             let reason_combo = record_reason_combination_label(record);
             increment_count(&mut by_reason_combination, reason_combo.clone());
-            if is_single_source_weak_signal(record) {
-                increment_count(&mut weak_reason_combinations, reason_combo);
-            }
-
             if record.detection_reasons.is_empty() {
                 increment_count(&mut by_reason_name, "No structured reason".to_string());
             } else {
@@ -3482,7 +3477,6 @@ impl eframe::App for MyApp {
                 Page::Analytics => self.render_analytics(ui),
                 Page::Scanner => self.render_scanner(ui),
                 Page::Reports => self.render_reports(ui),
-                Page::History => self.render_history(ui),
                 Page::Settings => self.render_settings(ui),
                 Page::About => self.render_about(ui),
             }
@@ -4529,26 +4523,6 @@ fn record_reason_combination_label(record: &ScanRecord) -> String {
     labels.join(" + ")
 }
 
-fn is_single_source_weak_signal(record: &ScanRecord) -> bool {
-    if record.detection_reasons.is_empty() {
-        return false;
-    }
-
-    let unique_sources = record
-        .detection_reasons
-        .iter()
-        .map(|reason| reason.source.as_str())
-        .filter(|source| !source.is_empty())
-        .collect::<HashSet<_>>();
-    let max_weight = record
-        .detection_reasons
-        .iter()
-        .map(|reason| reason.weight)
-        .fold(0.0, f64::max);
-
-    unique_sources.len() <= 1 && max_weight < 0.9
-}
-
 pub(crate) fn home_dir() -> Option<PathBuf> {
     std::env::var("HOME").ok().map(PathBuf::from)
 }
@@ -5567,30 +5541,17 @@ pub(crate) fn summarize_record_refs(records: &[&ScanRecord]) -> RecordMetrics {
 }
 
 fn load_history() -> PersistedHistory {
-    let history_path = history_path();
     let index_path = index_path();
-    let timing_samples = fs::read_to_string(&history_path)
-        .ok()
-        .and_then(|text| serde_json::from_str::<PersistedHistory>(&text).ok())
-        .map(|history| history.timing_samples)
-        .unwrap_or_default();
-
     let mut records = fs::read_to_string(&index_path)
         .ok()
         .and_then(|text| serde_json::from_str::<PersistedIndex>(&text).ok())
         .map(|index| index.entries)
-        .or_else(|| {
-            fs::read_to_string(&history_path)
-                .ok()
-                .and_then(|text| serde_json::from_str::<PersistedHistory>(&text).ok())
-                .map(|history| history.records)
-        })
         .unwrap_or_default();
     trim_records(&mut records);
 
     PersistedHistory {
         records,
-        timing_samples,
+        timing_samples: Vec::new()
     }
 }
 
@@ -5670,16 +5631,6 @@ fn save_history(records: &[ScanRecord], timing_samples: &[TimingSample]) {
         records: retained_records.clone(),
         timing_samples: retained_samples,
     };
-    let Ok(text) = serde_json::to_string_pretty(&payload) else {
-        return;
-    };
-
-    let history_path = history_path();
-    if let Some(parent) = history_path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    let _ = fs::write(history_path, text);
-    save_index(&retained_records);
 }
 
 fn trim_records(records: &mut Vec<ScanRecord>) {
@@ -5721,20 +5672,6 @@ fn remove_stale_report_files(all_records: &[ScanRecord], retained_records: &[Sca
             let _ = fs::remove_file(path);
         }
     }
-}
-
-fn save_index(records: &[ScanRecord]) {
-    let index = PersistedIndex {
-        entries: records.to_vec(),
-    };
-    let Ok(text) = serde_json::to_string_pretty(&index) else {
-        return;
-    };
-    let index_path = index_path();
-    if let Some(parent) = index_path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    let _ = fs::write(index_path, text);
 }
 
 fn hydrate_record_from_report(record: &ScanRecord, report_path: &Path) -> Option<ScanRecord> {

@@ -16,10 +16,7 @@ impl MyApp {
             .id_source("results_page")
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.heading("Results Explorer");
-                ui.label(
-                    "Focus on current triage, inspect reasoning, and manage safe report or quarantine actions.",
-                );
+                ui.heading("Results");
                 ui.separator();
                 self.render_feedback_banner(ui, FeedbackScope::FileAction);
                 ui.add_space(theme::item_gap(self.ui_metrics.scale_factor));
@@ -90,9 +87,6 @@ impl MyApp {
                                 self.report_verdict_filter = filter;
                             }
                         }
-                        ui.small(
-                            "Use this row to jump between clean triage and suspicious review quickly.",
-                        );
                     });
                 });
                 ui.separator();
@@ -110,7 +104,7 @@ impl MyApp {
                 let toolbar = render_record_workspace_toolbar(
                     ui,
                     &mut self.report_search,
-                    "Search by path, hash, mime, reason, report path, verdict, or storage state",
+                    "Search reports...",
                     &mut self.report_verdict_filter,
                     &mut self.report_storage_filter,
                     &mut self.report_sort_order,
@@ -130,7 +124,6 @@ impl MyApp {
                     ),
                     true,
                     false,
-                    "Use Results for active triage and latest decisions. Report removal requires confirmation.",
                 );
                 if toolbar.select_all_shown {
                     self.selected_report_ids
@@ -148,12 +141,6 @@ impl MyApp {
                     ui.small(format!("Pinned detail: {}", focused));
                 }
                 ui.add_space(theme::item_gap(self.ui_metrics.scale_factor));
-                self.render_notification_center(
-                    ui,
-                    "Recent file actions",
-                    &[FeedbackScope::FileAction, FeedbackScope::Updater],
-                    4,
-                );
                 ui.separator();
                 self.render_record_workspace(
                     ui,
