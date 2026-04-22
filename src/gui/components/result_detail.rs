@@ -18,7 +18,10 @@ pub fn render_result_detail(
     protection_event: Option<&ProtectionEvent>,
 ) {
     ui.heading("Detection Detail");
-    ui.label("Pinned result summary, strongest signals, and safe follow-up context.");
+    wrapped_text(
+        ui,
+        "Pinned result summary, strongest signals, and safe follow-up context.",
+    );
     ui.separator();
 
     detail_section(ui, "Summary", |ui| {
@@ -72,26 +75,35 @@ pub fn render_result_detail(
             ui.label(format!("Workflow: {origin}"));
         }
         if let Some(event) = protection_event {
-            ui.label(format!(
-                "Protection event: {} | {} | {} | {} priority",
-                event.kind,
-                event.change_class.label(),
-                event.file_class.label(),
-                event.priority.label()
-            ));
-            ui.label(format!(
-                "Protection path: {}",
-                if event.workflow_source.is_empty() {
-                    "Automatic scan".to_string()
-                } else {
-                    event.workflow_source.clone()
-                }
-            ));
+            wrapped_text(
+                ui,
+                format!(
+                    "Protection event: {} | {} | {} | {} priority",
+                    event.kind,
+                    event.change_class.label(),
+                    event.file_class.label(),
+                    event.priority.label()
+                ),
+            );
+            wrapped_text(
+                ui,
+                format!(
+                    "Protection path: {}",
+                    if event.workflow_source.is_empty() {
+                        "Automatic scan".to_string()
+                    } else {
+                        event.workflow_source.clone()
+                    }
+                ),
+            );
             if event.grouped_change_count > 1 || event.burst_window_seconds > 0 {
-                ui.label(format!(
-                    "Grouped {} change(s) across {}s before this scan.",
-                    event.grouped_change_count, event.burst_window_seconds
-                ));
+                wrapped_text(
+                    ui,
+                    format!(
+                        "Grouped {} change(s) across {}s before this scan.",
+                        event.grouped_change_count, event.burst_window_seconds
+                    ),
+                );
             }
             if let Some(verdict) = event.verdict.as_deref() {
                 ui.label(format!("Protection result: {verdict}"));
@@ -110,32 +122,38 @@ pub fn render_result_detail(
             ui.label(format!("Safety score: {safety:.2}"));
         }
         if let Some(primary_reason) = primary_reason_summary(record) {
-            ui.label(format!("Primary reason: {primary_reason}"));
+            wrapped_text(ui, format!("Primary reason: {primary_reason}"));
         }
-        ui.label(format!("Signal profile: {}", signal_profile_label(record)));
+        wrapped_text(
+            ui,
+            format!("Signal profile: {}", signal_profile_label(record)),
+        );
         if record
             .signal_sources
             .iter()
             .any(|source| source == "intelligence")
         {
-            ui.label("Local intelligence influenced confidence for this result.");
+            wrapped_text(
+                ui,
+                "Local intelligence influenced confidence for this result.",
+            );
         }
     });
 
     ui.add_space(8.0 * scale);
     detail_section(ui, "Identity", |ui| {
-        ui.label(format!("Name: {}", record.display_name()));
-        ui.monospace(&record.path);
+        wrapped_text(ui, format!("Name: {}", record.display_name()));
+        clipped_monospace(ui, &record.path);
         if let Some(hash) = record.sha256.as_deref() {
             ui.label("SHA-256");
-            ui.monospace(hash);
+            clipped_monospace(ui, hash);
         }
     });
 
     ui.add_space(8.0 * scale);
     detail_section(ui, "Why it was flagged", |ui| {
         if record.detection_reasons.is_empty() {
-            ui.label("No structured detection reasons were recorded.");
+            wrapped_text(ui, "No structured detection reasons were recorded.");
         } else {
             let mut grouped = BTreeMap::<&str, Vec<_>>::new();
             for reason in &record.detection_reasons {
@@ -167,64 +185,90 @@ pub fn render_result_detail(
     ui.add_space(8.0 * scale);
     detail_section(ui, "Reasoning and actions", |ui| {
         if !record.summary_text.is_empty() {
-            ui.label(&record.summary_text);
+            wrapped_text(ui, &record.summary_text);
         } else {
-            ui.label("No summary note recorded.");
+            wrapped_text(ui, "No summary note recorded.");
         }
         if let Some(event) = protection_event {
             ui.add_space(4.0 * scale);
             ui.label(RichText::new("Protection event").strong());
-            ui.label(&event.note);
-            ui.label(format!(
-                "Origin: {} | Event type: {}{}",
-                event.workflow_source,
-                event.kind,
-                if event.event_source.is_empty() {
-                    String::new()
-                } else {
-                    format!(" | Source: {}", event.event_source)
-                }
-            ));
+            wrapped_text(ui, &event.note);
+            wrapped_text(
+                ui,
+                format!(
+                    "Origin: {} | Event type: {}{}",
+                    event.workflow_source,
+                    event.kind,
+                    if event.event_source.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" | Source: {}", event.event_source)
+                    }
+                ),
+            );
         }
         if !record.action_note.is_empty() {
             ui.add_space(4.0 * scale);
             ui.label(RichText::new("Action history").strong());
-            ui.label(&record.action_note);
+            wrapped_text(ui, &record.action_note);
         }
     });
 
     ui.add_space(8.0 * scale);
     detail_section(ui, "Provenance and storage", |ui| {
-        ui.monospace(&record.path);
+        clipped_monospace(ui, &record.path);
         ui.label(format!(
             "Disposition: {}",
             record.resolved_storage_state().label()
         ));
-        ui.label("Viewing or copying metadata does not modify local files.");
+        wrapped_text(
+            ui,
+            "Viewing or copying metadata does not modify local files.",
+        );
         if !record.action_note.is_empty() {
             ui.add_space(4.0 * scale);
-            ui.label(&record.action_note);
+            wrapped_text(ui, &record.action_note);
         }
         if let Some(path) = record.quarantine_path.as_deref() {
             ui.label("Quarantine");
-            ui.monospace(path);
-            ui.label("Restore and delete actions modify local disk state and always require confirmation.");
+            clipped_monospace(ui, path);
+            wrapped_text(
+                ui,
+                "Restore and delete actions modify local disk state and always require confirmation.",
+            );
         } else {
-            ui.label("No retained quarantine copy is associated with this result.");
+            wrapped_text(
+                ui,
+                "No retained quarantine copy is associated with this result.",
+            );
         }
         if let Some(path) = record.report_path.as_deref() {
             ui.label("Report");
-            ui.monospace(path);
-            ui.label("Removing a report deletes stored report data only.");
+            clipped_monospace(ui, path);
+            wrapped_text(ui, "Removing a report deletes stored report data only.");
         }
     });
 }
 
 fn detail_section(ui: &mut egui::Ui, title: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
     theme::card_frame().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.set_max_width(ui.available_width());
         ui.label(RichText::new(title).strong());
         add_contents(ui);
     });
+}
+
+fn clipped_monospace(ui: &mut egui::Ui, text: &str) {
+    ui.add_sized(
+        [ui.available_width(), 0.0],
+        egui::Label::new(RichText::new(text).monospace()).truncate(true),
+    )
+    .on_hover_text(text);
+}
+
+fn wrapped_text(ui: &mut egui::Ui, text: impl Into<egui::WidgetText>) {
+    ui.add(egui::Label::new(text).wrap(true));
 }
 
 fn signal_reason_card(
@@ -270,7 +314,7 @@ fn signal_reason_card(
             } else {
                 &reason.description
             };
-            ui.label(description);
+            wrapped_text(ui, description);
             ui.small(format!("weight {:.2}", reason.weight));
         });
 }

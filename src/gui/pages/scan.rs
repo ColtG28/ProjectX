@@ -1,21 +1,22 @@
 use eframe::egui;
 use egui::{Color32, ProgressBar, TextEdit};
 
-use crate::gui::app::{format_bytes, format_elapsed_ms, format_eta, overall_progress};
-use crate::gui::components::{empty_state::empty_state, summary_chip::stat_chip};
+use crate::gui::app::{format_bytes, overall_progress};
+use crate::gui::components::summary_chip::stat_chip;
 use crate::gui::state::{FeedbackScope, MyApp};
 use crate::gui::theme;
 
 impl MyApp {
     pub fn render_scanner(&mut self, ui: &mut egui::Ui) {
         ui.heading("Scan Workspace");
-        ui.label("Queue files or folders, watch passive analysis progress, and review the latest result without leaving the page.");
+        ui.label("Queue files or folders, watch passive analysis progress, and review the latest result.");
         ui.separator();
 
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 theme::card_frame().show(ui, |ui| {
+                    ui.set_width(ui.available_width());
                     ui.label(egui::RichText::new("Scan configuration").strong());
                     let path_button_label = if self.is_loading() {
                         "Queue path"
@@ -84,6 +85,7 @@ impl MyApp {
 
                 ui.add_space(theme::section_gap(self.ui_metrics.scale_factor));
                 theme::card_frame().show(ui, |ui| {
+                    ui.set_width(ui.available_width());
                     ui.label(egui::RichText::new("Real-time protection").strong());
                     ui.horizontal_wrapped(|ui| {
                         stat_chip(
@@ -205,38 +207,39 @@ impl MyApp {
                 ui.add_space(theme::section_gap(self.ui_metrics.scale_factor));
                 let snapshot = self.job.lock().map(|job| job.clone()).unwrap_or_default();
                 theme::card_frame().show(ui, |ui| {
+                    ui.set_width(ui.available_width());
                     ui.label(egui::RichText::new("Live job status").strong());
                     ui.horizontal_wrapped(|ui| {
-                stat_chip(
-                    ui,
-                    "Queued",
-                    snapshot.queued_files.to_string(),
-                    Color32::from_rgb(176, 221, 255),
-                );
-                stat_chip(
-                    ui,
-                    "Clean",
-                    snapshot.good.to_string(),
-                    Color32::from_rgb(127, 191, 127),
-                );
-                stat_chip(
-                    ui,
-                    "Malicious",
-                    snapshot.malicious.to_string(),
-                    Color32::from_rgb(216, 100, 100),
-                );
-                stat_chip(
-                    ui,
-                    "Suspicious",
-                    snapshot.unsure.to_string(),
-                    Color32::from_rgb(224, 185, 105),
-                );
-                stat_chip(
-                    ui,
-                    "Errors",
-                    snapshot.errors.to_string(),
-                    Color32::from_rgb(170, 170, 180),
-                );
+                        stat_chip(
+                            ui,
+                            "Queued",
+                            snapshot.queued_files.to_string(),
+                            Color32::from_rgb(176, 221, 255),
+                        );
+                        stat_chip(
+                            ui,
+                            "Clean",
+                            snapshot.good.to_string(),
+                            Color32::from_rgb(127, 191, 127),
+                        );
+                        stat_chip(
+                            ui,
+                            "Malicious",
+                            snapshot.malicious.to_string(),
+                            Color32::from_rgb(216, 100, 100),
+                        );
+                        stat_chip(
+                            ui,
+                            "Suspicious",
+                            snapshot.unsure.to_string(),
+                            Color32::from_rgb(224, 185, 105),
+                        );
+                        stat_chip(
+                            ui,
+                            "Errors",
+                            snapshot.errors.to_string(),
+                            Color32::from_rgb(170, 170, 180),
+                        );
                     });
 
                     let progress_width = ui.available_width().min(560.0).max(220.0);
@@ -278,48 +281,7 @@ impl MyApp {
                             snapshot.current_path.clone()
                         }
                     ));
-                    ui.label(format!(
-                        "Stage: {}",
-                        if snapshot.current_stage.is_empty() {
-                            "Idle".to_string()
-                        } else {
-                            snapshot.current_stage.clone()
-                        }
-                    ));
-                    ui.label(format!(
-                        "Current file elapsed: {} | Estimated time remaining: {}",
-                        format_elapsed_ms(snapshot.current_file_elapsed_ms),
-                        format_eta(snapshot.eta_seconds)
-                    ));
-                    if !snapshot.summary.is_empty() {
-                        ui.label(format!("Last completed batch: {}", snapshot.summary));
-                    }
                 });
-
-                ui.add_space(theme::section_gap(self.ui_metrics.scale_factor));
-                theme::card_frame().show(ui, |ui| {
-                    ui.label(egui::RichText::new("Most recent scan result").strong());
-                    let indices = self.filtered_record_indices(1, "");
-                    if indices.is_empty() {
-                        empty_state(
-                            ui,
-                            self.ui_metrics.scale_factor,
-                            "No completed scans yet",
-                            "Use Browse file, Browse folder, or Scan common folders to start the first scan.",
-                        );
-                    } else {
-                        self.render_record_list(ui, &indices, false);
-                    }
-                });
-
-                ui.add_space(theme::section_gap(self.ui_metrics.scale_factor));
-                self.render_notification_center(
-                    ui,
-                    "Recent scanner activity",
-                    &[FeedbackScope::Scan, FeedbackScope::Protection, FeedbackScope::Updater],
-                    6,
-                );
-                ui.add_space(14.0 * self.ui_metrics.scale_factor);
             });
     }
 }

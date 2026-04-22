@@ -2,16 +2,14 @@ use eframe::egui;
 use egui::{Color32, Layout, RichText};
 
 use crate::gui::app::{
-    draw_pie_chart, draw_segment_bar, format_bytes, format_elapsed_ms,
-    format_timestamp_with_relative, now_epoch, render_chart_legend, summarize_record_refs,
+    draw_pie_chart, draw_segment_bar, now_epoch, render_chart_legend, summarize_record_refs,
 };
-use crate::gui::components::{empty_state::empty_state, summary_chip::stat_chip};
+use crate::gui::components::summary_chip::stat_chip;
 use crate::gui::state::{MyApp, TimePeriod};
 
 impl MyApp {
     pub fn render_analytics(&mut self, ui: &mut egui::Ui) {
         ui.heading("Security Overview");
-        ui.label("High-level scanner activity, verdict distribution, and recent defensive scan outcomes.");
         ui.separator();
 
         let now = now_epoch();
@@ -128,48 +126,6 @@ impl MyApp {
                 });
             });
         });
-
         ui.separator();
-        ui.heading("Most Recent Scan");
-        let recent = filtered.iter().rev().take(1).collect::<Vec<_>>();
-        if recent.is_empty() {
-            empty_state(
-                ui,
-                self.ui_metrics.scale_factor,
-                "No recent scan history",
-                "Run a scan from the Scan page to populate analytics and history.",
-            );
-        } else {
-            for record in recent {
-                ui.group(|ui| {
-                    ui.label(format!("Path: {}", record.path));
-                    ui.label(format!(
-                        "Last scanned: {}",
-                        format_timestamp_with_relative(record.scanned_at_epoch)
-                    ));
-                    ui.label(format!(
-                        "Verdict: {} | Severity: {} | Duration: {} | Size: {} | Warnings: {} | Errors: {}",
-                        record.verdict.label(),
-                        record.severity.label(),
-                        format_elapsed_ms(record.duration_ms),
-                        format_bytes(record.file_size_bytes),
-                        record.warning_count,
-                        record.error_count
-                    ));
-                    ui.label(format!(
-                        "Storage: {} | Signals: {}",
-                        record.resolved_storage_state().label(),
-                        if record.signal_sources.is_empty() {
-                            "none".to_string()
-                        } else {
-                            record.signal_sources.join(", ")
-                        }
-                    ));
-                    if let Some(hash) = record.sha256.as_deref() {
-                        ui.monospace(hash);
-                    }
-                });
-            }
-        }
     }
 }

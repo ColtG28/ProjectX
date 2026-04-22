@@ -2,7 +2,7 @@ use eframe::egui;
 
 use crate::gui::app::format_timestamp_with_relative;
 use crate::gui::components::summary_chip::stat_chip;
-use crate::gui::state::{FeedbackScope, MyApp};
+use crate::gui::state::MyApp;
 use crate::gui::theme;
 
 impl MyApp {
@@ -15,7 +15,6 @@ impl MyApp {
         let last_scan = self.latest_scan_epoch();
 
         ui.heading("About ProjectX");
-        ui.label("Compact health and release status for the current desktop scanner.");
         ui.separator();
 
         ui.horizontal_wrapped(|ui| {
@@ -54,37 +53,7 @@ impl MyApp {
         });
         ui.add_space(theme::section_gap(self.ui_metrics.scale_factor));
 
-        if self.ui_metrics.compact {
-            self.render_about_summary(ui, &update_snapshot, last_scan);
-            ui.add_space(theme::section_gap(self.ui_metrics.scale_factor));
-            self.render_notification_center(
-                ui,
-                "Recent activity",
-                &[
-                    FeedbackScope::Updater,
-                    FeedbackScope::Protection,
-                    FeedbackScope::FileAction,
-                ],
-                8,
-            );
-        } else {
-            ui.columns(2, |columns| {
-                columns[0]
-                    .vertical(|ui| self.render_about_summary(ui, &update_snapshot, last_scan));
-                columns[1].vertical(|ui| {
-                    self.render_notification_center(
-                        ui,
-                        "Recent activity",
-                        &[
-                            FeedbackScope::Updater,
-                            FeedbackScope::Protection,
-                            FeedbackScope::FileAction,
-                        ],
-                        8,
-                    );
-                });
-            });
-        }
+        self.render_about_summary(ui, &update_snapshot, last_scan);
     }
 
     fn render_about_summary(
@@ -94,6 +63,7 @@ impl MyApp {
         last_scan: Option<u64>,
     ) {
         theme::card_frame().show(ui, |ui| {
+            ui.set_width(ui.available_width());
             ui.label(egui::RichText::new("System overview").strong());
             ui.label("ProjectX is a lightweight, high-performance file scanner built for macOS, Windows, and Linux.");
             ui.add_space(6.0);

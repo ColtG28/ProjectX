@@ -16,7 +16,7 @@ use rfd::FileDialog;
 
 use super::components::empty_state::empty_state;
 use super::components::result_detail::render_result_detail;
-use super::components::result_list::render_result_row;
+use super::components::result_list::{render_result_header, render_result_row};
 use super::state::*;
 use super::theme;
 
@@ -24,12 +24,14 @@ const AUTO_UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 const AUTO_UPDATE_CHECK_INTERVAL_SECS: u64 = 6 * 60 * 60;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct DiagnosticCount {
     pub label: String,
     pub count: usize,
 }
 
 #[derive(Debug, Clone, Default)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct SuspiciousDiagnosticsSummary {
     pub suspicious_total: usize,
     pub retained_total: usize,
@@ -93,6 +95,7 @@ impl MyApp {
             settings_panel: SettingsPanel::General,
             selected_report_ids: HashSet::new(),
             focused_report_id: None,
+            detail_return_page: Page::Reports,
             pending_confirmation: None,
             scan_feedback: None,
             file_feedback: None,
@@ -348,9 +351,7 @@ impl MyApp {
     fn apply_responsive_scaling(&mut self, ctx: &egui::Context) {
         let screen = ctx.screen_rect();
         let width_points = screen.width().max(640.0);
-        let height_points = screen.height().max(480.0);
         let physical_width = width_points * ctx.pixels_per_point();
-        let physical_height = height_points * ctx.pixels_per_point();
         let compact = physical_width < 1120.0;
         let scale = if physical_width < 900.0 {
             0.92
@@ -391,15 +392,6 @@ impl MyApp {
                 182.0 * scale
             },
             compact,
-            content_max_width: if compact {
-                width_points - 40.0
-            } else {
-                (width_points * 0.76).min(if physical_height < 900.0 {
-                    780.0
-                } else {
-                    900.0
-                })
-            },
         };
     }
 
@@ -485,15 +477,10 @@ impl MyApp {
             .default_width(self.ui_metrics.menu_width)
             .resizable(!self.ui_metrics.compact)
             .show(ctx, |ui| {
-                ui.vertical_centered(|ui| {
-                    ui.add_space(2.0 * self.ui_metrics.scale_factor);
-                    ui.heading("Workspace");
-                });
-                ui.separator();
+                ui.add_space(2.0 * self.ui_metrics.scale_factor);
                 self.page_button(ui, Page::Analytics);
                 self.page_button(ui, Page::Scanner);
                 self.page_button(ui, Page::Reports);
-                self.page_button(ui, Page::Settings);
                 self.page_button(ui, Page::About);
             });
     }
@@ -534,36 +521,7 @@ impl MyApp {
         let mut pending_reveal = None;
         let mut pending_report_reveal = None;
 
-        ui.horizontal(|ui| {
-            if allow_selection {
-                ui.add_sized([22.0, 0.0], egui::Label::new(""));
-            }
-            ui.add_sized(
-                [72.0, 0.0],
-                egui::Label::new(RichText::new("Verdict").strong()),
-            );
-            ui.add_sized(
-                [82.0, 0.0],
-                egui::Label::new(RichText::new("Name").strong()),
-            );
-            ui.add_sized(
-                [96.0, 0.0],
-                egui::Label::new(RichText::new("Type").strong()),
-            );
-            ui.add_sized(
-                [74.0, 0.0],
-                egui::Label::new(RichText::new("Size").strong()),
-            );
-            ui.add_sized(
-                [88.0, 0.0],
-                egui::Label::new(RichText::new("Timestamp").strong()),
-            );
-            ui.add_sized(
-                [72.0, 0.0],
-                egui::Label::new(RichText::new("Severity").strong()),
-            );
-            ui.label(RichText::new("Signals").strong());
-        });
+        render_result_header(ui, allow_selection);
         ui.add_space(4.0);
 
         for &index in indices {
@@ -587,62 +545,72 @@ impl MyApp {
             }
             if inspect {
                 self.focused_report_id = Some(record_id.clone());
+                self.detail_return_page = self.current_page;
+                self.current_page = Page::ReportDetail;
             }
 
             let in_quarantine = matches!(storage_state, RecordStorageState::InQuarantine)
                 && self.records[index].quarantine_path.is_some();
-            ui.horizontal_wrapped(|ui| {
-                ui.label(egui::RichText::new("Inspect").small().strong());
-                if ui.small_button("Copy path").clicked() {
-                    ui.output_mut(|output| output.copied_text = self.records[index].path.clone());
-                    self.set_feedback(
-                        FeedbackScope::FileAction,
-                        FeedbackSeverity::Success,
-                        "Copied file path.",
-                    );
-                }
-                if let Some(hash) = self.records[index].sha256.as_deref() {
-                    if ui.small_button("Copy hash").clicked() {
-                        ui.output_mut(|output| output.copied_text = hash.to_string());
+            ui.scope(|ui| {
+                let clip_width_from_cursor = (ui.clip_rect().right() - ui.cursor().left()).max(1.0);
+                ui.set_max_width(
+                    (ui.available_width().min(clip_width_from_cursor) - 18.0).max(1.0),
+                );
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(egui::RichText::new("Inspect").small().strong());
+                    if ui.small_button("Copy path").clicked() {
+                        ui.output_mut(|output| {
+                            output.copied_text = self.records[index].path.clone()
+                        });
                         self.set_feedback(
                             FeedbackScope::FileAction,
                             FeedbackSeverity::Success,
-                            "Copied SHA-256 hash.",
+                            "Copied file path.",
                         );
                     }
-                }
-                if ui.small_button("Reveal file").clicked() {
-                    pending_reveal = Some(self.records[index].path.clone());
-                }
-                if let Some(report_path) = self.records[index].report_path.as_deref() {
-                    if ui.small_button("Reveal report").clicked() {
-                        pending_report_reveal = Some(report_path.to_string());
+                    if let Some(hash) = self.records[index].sha256.as_deref() {
+                        if ui.small_button("Copy hash").clicked() {
+                            ui.output_mut(|output| output.copied_text = hash.to_string());
+                            self.set_feedback(
+                                FeedbackScope::FileAction,
+                                FeedbackSeverity::Success,
+                                "Copied SHA-256 hash.",
+                            );
+                        }
                     }
-                }
-            });
-            ui.horizontal_wrapped(|ui| {
-                ui.label(egui::RichText::new("Modify stored items").small().strong());
-                if ui
-                    .add_enabled(in_quarantine, egui::Button::new("Restore from quarantine"))
-                    .clicked()
-                {
-                    pending_action = Some((record_id.clone(), RecordAction::Restore));
-                }
-                if ui
-                    .add_enabled(in_quarantine, egui::Button::new("Delete quarantined copy"))
-                    .clicked()
-                {
-                    pending_action = Some((record_id.clone(), RecordAction::Delete));
-                }
-                if ui
-                    .add_enabled(in_quarantine, egui::Button::new("Keep in quarantine"))
-                    .clicked()
-                {
-                    pending_action = Some((record_id.clone(), RecordAction::Leave));
-                }
-                if ui.small_button("Remove report").clicked() {
-                    pending_action = Some((record_id.clone(), RecordAction::DeleteReport));
-                }
+                    if ui.small_button("Reveal file").clicked() {
+                        pending_reveal = Some(self.records[index].path.clone());
+                    }
+                    if let Some(report_path) = self.records[index].report_path.as_deref() {
+                        if ui.small_button("Reveal report").clicked() {
+                            pending_report_reveal = Some(report_path.to_string());
+                        }
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(egui::RichText::new("Modify stored items").small().strong());
+                    if ui
+                        .add_enabled(in_quarantine, egui::Button::new("Restore from quarantine"))
+                        .clicked()
+                    {
+                        pending_action = Some((record_id.clone(), RecordAction::Restore));
+                    }
+                    if ui
+                        .add_enabled(in_quarantine, egui::Button::new("Delete quarantined copy"))
+                        .clicked()
+                    {
+                        pending_action = Some((record_id.clone(), RecordAction::Delete));
+                    }
+                    if ui
+                        .add_enabled(in_quarantine, egui::Button::new("Keep in quarantine"))
+                        .clicked()
+                    {
+                        pending_action = Some((record_id.clone(), RecordAction::Leave));
+                    }
+                    if ui.small_button("Remove report").clicked() {
+                        pending_action = Some((record_id.clone(), RecordAction::DeleteReport));
+                    }
+                });
             });
             ui.add_space(6.0);
         }
@@ -817,60 +785,6 @@ impl MyApp {
         });
     }
 
-    pub(crate) fn queue_restore_selected_confirmation(&mut self, record_ids: Vec<String>) {
-        if record_ids.is_empty() {
-            return;
-        }
-
-        let mut missing_original_paths = 0usize;
-        for record_id in &record_ids {
-            if let Some(record) = self
-                .records
-                .iter()
-                .find(|record| record.record_id() == *record_id)
-            {
-                if record.path.trim().is_empty() {
-                    missing_original_paths += 1;
-                }
-            }
-        }
-
-        let detail = if missing_original_paths > 0 {
-            format!(
-                " {} item(s) are missing a valid original path and will be reported as restore failures.",
-                missing_original_paths
-            )
-        } else {
-            String::new()
-        };
-
-        self.pending_confirmation = Some(PendingConfirmation {
-            title: "Restore selected quarantined files".to_string(),
-            message: format!(
-                "Restore {} quarantined item(s) back to their original locations? ProjectX will skip items that no longer have a retained quarantine copy, and it will refuse to overwrite a conflicting file already present at the destination.{}",
-                record_ids.len(),
-                detail
-            ),
-            confirm_label: "Restore selected files".to_string(),
-            target: PendingConfirmationTarget::RestoreRecords { record_ids },
-        });
-    }
-
-    fn queue_delete_selected_confirmation(&mut self, record_ids: Vec<String>) {
-        if record_ids.is_empty() {
-            return;
-        }
-        self.pending_confirmation = Some(PendingConfirmation {
-            title: "Delete selected reports".to_string(),
-            message: format!(
-                "Remove {} selected report entrie(s) from the GUI and delete any stored report files still present on disk? This does not restore or execute quarantined files.",
-                record_ids.len()
-            ),
-            confirm_label: "Delete selected reports".to_string(),
-            target: PendingConfirmationTarget::DeleteReports { record_ids },
-        });
-    }
-
     pub(crate) fn restore_records_by_ids(&mut self, record_ids: &[String]) {
         if record_ids.is_empty() {
             return;
@@ -1042,6 +956,23 @@ impl MyApp {
         render_result_detail(ui, self.ui_metrics.scale_factor, &record, protection_event);
     }
 
+    pub(crate) fn render_report_detail_page(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading("Detailed Report");
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.button(RichText::new("X").strong()).clicked() {
+                    self.current_page = self.detail_return_page;
+                }
+            });
+        });
+        ui.separator();
+
+        egui::ScrollArea::vertical()
+            .id_source("report_detail_page")
+            .auto_shrink([false, false])
+            .show(ui, |ui| self.render_record_detail(ui));
+    }
+
     fn hydrate_focused_record_from_report(&mut self) {
         let Some(focused_id) = self.focused_report_id.clone() else {
             return;
@@ -1133,6 +1064,7 @@ impl MyApp {
         indices.into_iter().take(limit).collect()
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn suspicious_diagnostics_summary(&self) -> SuspiciousDiagnosticsSummary {
         let mut summary = SuspiciousDiagnosticsSummary::default();
         let mut by_extension = HashMap::new();
@@ -1177,6 +1109,13 @@ impl MyApp {
 
             let reason_combo = record_reason_combination_label(record);
             increment_count(&mut by_reason_combination, reason_combo.clone());
+            if record
+                .detection_reasons
+                .iter()
+                .all(|reason| reason.weight < 0.7)
+            {
+                increment_count(&mut weak_reason_combinations, reason_combo.clone());
+            }
             if record.detection_reasons.is_empty() {
                 increment_count(&mut by_reason_name, "No structured reason".to_string());
             } else {
@@ -1235,23 +1174,7 @@ impl MyApp {
         summary
     }
 
-    pub(crate) fn selected_visible_quarantined_ids(
-        &self,
-        visible_ids: &HashSet<String>,
-    ) -> Vec<String> {
-        self.records
-            .iter()
-            .filter(|record| {
-                let record_id = record.record_id();
-                visible_ids.contains(&record_id)
-                    && self.selected_report_ids.contains(&record_id)
-                    && record.resolved_storage_state() == RecordStorageState::InQuarantine
-                    && record.quarantine_path.is_some()
-            })
-            .map(|record| record.record_id())
-            .collect()
-    }
-
+    #[allow(dead_code)]
     pub(crate) fn filtered_protection_event_indices(&self, limit: usize) -> Vec<usize> {
         let query = self.protection_event_search.trim().to_ascii_lowercase();
         let mut indices = (0..self.protection_events.len())
@@ -2858,19 +2781,6 @@ impl MyApp {
         }
     }
 
-    pub(crate) fn delete_selected_reports(&mut self, visible_ids: &HashSet<String>) {
-        let selected_visible = self
-            .selected_report_ids
-            .iter()
-            .filter(|id| visible_ids.contains(*id))
-            .cloned()
-            .collect::<HashSet<_>>();
-        if selected_visible.is_empty() {
-            return;
-        }
-        self.queue_delete_selected_confirmation(selected_visible.into_iter().collect());
-    }
-
     fn delete_reports_by_ids(&mut self, record_ids: &[String]) {
         if record_ids.is_empty() {
             return;
@@ -2917,64 +2827,12 @@ impl MyApp {
             return;
         }
 
-        if self.ui_metrics.compact {
-            egui::ScrollArea::vertical().show(ui, |ui| self.render_record_list(ui, indices, true));
-            ui.separator();
-            self.render_workspace_selection_summary(ui, indices);
-            ui.add_space(8.0);
-            egui::ScrollArea::vertical()
-                .id_source("record_detail_compact")
-                .auto_shrink([false, false])
-                .show(ui, |ui| self.render_record_detail(ui));
-            ui.add_space(8.0);
-            self.render_workspace_note(ui, note);
-        } else {
-            ui.columns(2, |columns| {
-                columns[0].vertical(|ui| {
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| self.render_record_list(ui, indices, true));
-                });
-                columns[1].vertical(|ui| {
-                    egui::ScrollArea::vertical()
-                        .id_source("record_detail_desktop")
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            self.render_workspace_selection_summary(ui, indices);
-                            ui.add_space(8.0);
-                            self.render_record_detail(ui);
-                            ui.add_space(8.0);
-                            self.render_workspace_note(ui, note);
-                        });
-                });
-            });
-        }
-    }
-
-    fn render_workspace_selection_summary(&self, ui: &mut egui::Ui, indices: &[usize]) {
-        let selected = self
-            .focused_report_id
-            .as_ref()
-            .and_then(|id| self.records.iter().find(|record| record.record_id() == *id))
-            .or_else(|| indices.last().and_then(|index| self.records.get(*index)));
-        theme::card_frame().show(ui, |ui| {
-            ui.label(egui::RichText::new("Current focus").strong());
-            if let Some(record) = selected {
-                ui.label(
-                    egui::RichText::new(record.display_name())
-                        .strong()
-                        .color(egui::Color32::from_rgb(235, 239, 244)),
-                );
-                ui.small(format!(
-                    "{} | {} | {}",
-                    record.verdict.label(),
-                    record.severity.label(),
-                    format_timestamp_compact(record.scanned_at_epoch)
-                ));
-            } else {
-                ui.small("Select a result to pin its detail view here.");
-            }
-        });
+        egui::ScrollArea::vertical()
+            .id_source("record_results_list")
+            .auto_shrink([false, false])
+            .show(ui, |ui| self.render_record_list(ui, indices, false));
+        ui.add_space(8.0);
+        self.render_workspace_note(ui, note);
     }
 
     fn render_workspace_note(&self, ui: &mut egui::Ui, note: &str) {
@@ -3471,15 +3329,13 @@ impl eframe::App for MyApp {
         self.render_top_bar(ctx);
         self.render_menu(ctx);
 
-        CentralPanel::default().show(ctx, |ui| {
-            ui.set_max_width(self.ui_metrics.content_max_width);
-            match self.current_page {
-                Page::Analytics => self.render_analytics(ui),
-                Page::Scanner => self.render_scanner(ui),
-                Page::Reports => self.render_reports(ui),
-                Page::Settings => self.render_settings(ui),
-                Page::About => self.render_about(ui),
-            }
+        CentralPanel::default().show(ctx, |ui| match self.current_page {
+            Page::Analytics => self.render_analytics(ui),
+            Page::Scanner => self.render_scanner(ui),
+            Page::Reports => self.render_reports(ui),
+            Page::ReportDetail => self.render_report_detail_page(ui),
+            Page::Settings => self.render_settings(ui),
+            Page::About => self.render_about(ui),
         });
 
         self.render_pending_confirmation(ctx);
@@ -4466,10 +4322,12 @@ fn record_matches_query(record: &ScanRecord, query: &str) -> bool {
     haystacks.iter().any(|value| value.contains(&query))
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn increment_count(map: &mut HashMap<String, usize>, label: String) {
     *map.entry(label).or_insert(0) += 1;
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn finalize_diagnostic_counts(counts: HashMap<String, usize>) -> Vec<DiagnosticCount> {
     let mut items = counts
         .into_iter()
@@ -4484,6 +4342,7 @@ fn finalize_diagnostic_counts(counts: HashMap<String, usize>) -> Vec<DiagnosticC
     items
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn suspicious_extension_label(record: &ScanRecord) -> String {
     record
         .extension
@@ -4498,6 +4357,7 @@ fn suspicious_extension_label(record: &ScanRecord) -> String {
         .unwrap_or_else(|| "(none)".to_string())
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn primary_reason_label(reason: &DetectionReason) -> String {
     if !reason.name.trim().is_empty() {
         reason.name.trim().to_string()
@@ -4508,6 +4368,7 @@ fn primary_reason_label(reason: &DetectionReason) -> String {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn record_reason_combination_label(record: &ScanRecord) -> String {
     if record.detection_reasons.is_empty() {
         return "No structured reason".to_string();
@@ -5196,16 +5057,6 @@ pub(crate) fn format_elapsed_ms(duration_ms: u64) -> String {
     }
 }
 
-pub(crate) fn format_eta(seconds: u64) -> String {
-    if seconds >= 3600 {
-        format!("{}h {}m", seconds / 3600, (seconds % 3600) / 60)
-    } else if seconds >= 60 {
-        format!("{}m {}s", seconds / 60, seconds % 60)
-    } else {
-        format!("{seconds}s")
-    }
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct GuidedInstallPlan {
     pub(crate) ready: bool,
@@ -5542,16 +5393,24 @@ pub(crate) fn summarize_record_refs(records: &[&ScanRecord]) -> RecordMetrics {
 
 fn load_history() -> PersistedHistory {
     let index_path = index_path();
-    let mut records = fs::read_to_string(&index_path)
-        .ok()
-        .and_then(|text| serde_json::from_str::<PersistedIndex>(&text).ok())
+    let Ok(text) = fs::read_to_string(&index_path) else {
+        return PersistedHistory::default();
+    };
+
+    if let Ok(mut history) = serde_json::from_str::<PersistedHistory>(&text) {
+        trim_records(&mut history.records);
+        trim_timing_samples(&mut history.timing_samples);
+        return history;
+    }
+
+    let mut records = serde_json::from_str::<PersistedIndex>(&text)
         .map(|index| index.entries)
         .unwrap_or_default();
     trim_records(&mut records);
 
     PersistedHistory {
         records,
-        timing_samples: Vec::new()
+        timing_samples: Vec::new(),
     }
 }
 
@@ -5631,6 +5490,12 @@ fn save_history(records: &[ScanRecord], timing_samples: &[TimingSample]) {
         records: retained_records.clone(),
         timing_samples: retained_samples,
     };
+    if let Ok(text) = serde_json::to_string_pretty(&payload) {
+        if let Some(parent) = index_path().parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(index_path(), text);
+    }
 }
 
 fn trim_records(records: &mut Vec<ScanRecord>) {

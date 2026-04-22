@@ -39,6 +39,7 @@ pub enum Page {
     Analytics,
     Scanner,
     Reports,
+    ReportDetail,
     Settings,
     About,
 }
@@ -49,6 +50,7 @@ impl Page {
             Self::Analytics => "Overview",
             Self::Scanner => "Scan",
             Self::Reports => "Results",
+            Self::ReportDetail => "Report Detail",
             Self::Settings => "Settings",
             Self::About => "About",
         }
@@ -59,6 +61,7 @@ impl Page {
             Self::Analytics => "◪",
             Self::Scanner => "◎",
             Self::Reports => "▤",
+            Self::ReportDetail => "◇",
             Self::Settings => "⚙",
             Self::About => "ⓘ",
         }
@@ -817,7 +820,6 @@ pub struct UiMetrics {
     pub scale_factor: f32,
     pub menu_width: f32,
     pub compact: bool,
-    pub content_max_width: f32,
 }
 
 impl Default for UiMetrics {
@@ -826,7 +828,6 @@ impl Default for UiMetrics {
             scale_factor: 1.0,
             menu_width: 200.0,
             compact: false,
-            content_max_width: 920.0,
         }
     }
 }
@@ -1078,6 +1079,7 @@ pub struct MyApp {
     pub settings_panel: SettingsPanel,
     pub selected_report_ids: HashSet<String>,
     pub focused_report_id: Option<String>,
+    pub detail_return_page: Page,
     pub pending_confirmation: Option<PendingConfirmation>,
     pub scan_feedback: Option<UiFeedback>,
     pub file_feedback: Option<UiFeedback>,
