@@ -16,7 +16,7 @@ use rfd::FileDialog;
 
 use super::components::empty_state::empty_state;
 use super::components::result_detail::render_result_detail;
-use super::components::result_list::{render_result_header, render_result_row};
+use super::components::result_list::{render_result_card, render_result_header};
 use super::state::*;
 use super::theme;
 
@@ -521,20 +521,22 @@ impl MyApp {
         let mut pending_reveal = None;
         let mut pending_report_reveal = None;
 
-        render_result_header(ui, allow_selection);
-        ui.add_space(4.0);
+        if render_result_header(ui, allow_selection) {
+            ui.add_space(theme::card_row_gap(self.ui_metrics.scale_factor));
+        }
 
         for &index in indices {
             let storage_state = self.records[index].resolved_storage_state();
             let record_id = self.records[index].record_id();
-            let selected_row = self.focused_report_id.as_deref() == Some(record_id.as_str());
             let mut selected = self.selected_report_ids.contains(&record_id);
-            let inspect = render_result_row(
+            let in_quarantine = matches!(storage_state, RecordStorageState::InQuarantine)
+                && self.records[index].quarantine_path.is_some();
+            let actions = render_result_card(
                 ui,
                 &self.records[index],
-                selected_row,
                 allow_selection,
                 &mut selected,
+                in_quarantine,
             );
             if allow_selection {
                 if selected {
@@ -543,76 +545,50 @@ impl MyApp {
                     self.selected_report_ids.remove(&record_id);
                 }
             }
-            if inspect {
+            if actions.inspect {
                 self.focused_report_id = Some(record_id.clone());
                 self.detail_return_page = self.current_page;
                 self.current_page = Page::ReportDetail;
             }
-
-            let in_quarantine = matches!(storage_state, RecordStorageState::InQuarantine)
-                && self.records[index].quarantine_path.is_some();
-            ui.scope(|ui| {
-                let clip_width_from_cursor = (ui.clip_rect().right() - ui.cursor().left()).max(1.0);
-                ui.set_max_width(
-                    (ui.available_width().min(clip_width_from_cursor) - 18.0).max(1.0),
+            if actions.copy_path {
+                ui.output_mut(|output| output.copied_text = self.records[index].path.clone());
+                self.set_feedback(
+                    FeedbackScope::FileAction,
+                    FeedbackSeverity::Success,
+                    "Copied file path.",
                 );
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(egui::RichText::new("Inspect").small().strong());
-                    if ui.small_button("Copy path").clicked() {
-                        ui.output_mut(|output| {
-                            output.copied_text = self.records[index].path.clone()
-                        });
-                        self.set_feedback(
-                            FeedbackScope::FileAction,
-                            FeedbackSeverity::Success,
-                            "Copied file path.",
-                        );
-                    }
-                    if let Some(hash) = self.records[index].sha256.as_deref() {
-                        if ui.small_button("Copy hash").clicked() {
-                            ui.output_mut(|output| output.copied_text = hash.to_string());
-                            self.set_feedback(
-                                FeedbackScope::FileAction,
-                                FeedbackSeverity::Success,
-                                "Copied SHA-256 hash.",
-                            );
-                        }
-                    }
-                    if ui.small_button("Reveal file").clicked() {
-                        pending_reveal = Some(self.records[index].path.clone());
-                    }
-                    if let Some(report_path) = self.records[index].report_path.as_deref() {
-                        if ui.small_button("Reveal report").clicked() {
-                            pending_report_reveal = Some(report_path.to_string());
-                        }
-                    }
-                });
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(egui::RichText::new("Modify stored items").small().strong());
-                    if ui
-                        .add_enabled(in_quarantine, egui::Button::new("Restore from quarantine"))
-                        .clicked()
-                    {
-                        pending_action = Some((record_id.clone(), RecordAction::Restore));
-                    }
-                    if ui
-                        .add_enabled(in_quarantine, egui::Button::new("Delete quarantined copy"))
-                        .clicked()
-                    {
-                        pending_action = Some((record_id.clone(), RecordAction::Delete));
-                    }
-                    if ui
-                        .add_enabled(in_quarantine, egui::Button::new("Keep in quarantine"))
-                        .clicked()
-                    {
-                        pending_action = Some((record_id.clone(), RecordAction::Leave));
-                    }
-                    if ui.small_button("Remove report").clicked() {
-                        pending_action = Some((record_id.clone(), RecordAction::DeleteReport));
-                    }
-                });
-            });
-            ui.add_space(6.0);
+            }
+            if actions.copy_hash {
+                if let Some(hash) = self.records[index].sha256.as_deref() {
+                    ui.output_mut(|output| output.copied_text = hash.to_string());
+                    self.set_feedback(
+                        FeedbackScope::FileAction,
+                        FeedbackSeverity::Success,
+                        "Copied SHA-256 hash.",
+                    );
+                }
+            }
+            if actions.reveal_file {
+                pending_reveal = Some(self.records[index].path.clone());
+            }
+            if actions.reveal_report {
+                if let Some(report_path) = self.records[index].report_path.as_deref() {
+                    pending_report_reveal = Some(report_path.to_string());
+                }
+            }
+            if actions.restore {
+                pending_action = Some((record_id.clone(), RecordAction::Restore));
+            }
+            if actions.delete_quarantined_copy {
+                pending_action = Some((record_id.clone(), RecordAction::Delete));
+            }
+            if actions.keep_in_quarantine {
+                pending_action = Some((record_id.clone(), RecordAction::Leave));
+            }
+            if actions.remove_report {
+                pending_action = Some((record_id.clone(), RecordAction::DeleteReport));
+            }
+            ui.add_space(theme::item_gap(self.ui_metrics.scale_factor));
         }
 
         if let Some((record_id, action)) = pending_action {
@@ -2837,7 +2813,7 @@ impl MyApp {
 
     fn render_workspace_note(&self, ui: &mut egui::Ui, note: &str) {
         theme::card_frame().show(ui, |ui| {
-            ui.label(egui::RichText::new("Operational notes").strong());
+            theme::card_title(ui, "Operational notes", self.ui_metrics.scale_factor);
             ui.label(note);
         });
     }

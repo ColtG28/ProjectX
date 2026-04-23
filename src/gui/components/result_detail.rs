@@ -24,8 +24,9 @@ pub fn render_result_detail(
     );
     ui.separator();
 
-    detail_section(ui, "Summary", |ui| {
+    detail_section(ui, "Summary", scale, |ui| {
         ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = theme::badge_spacing(scale);
             ui.label(
                 RichText::new(record.verdict.label())
                     .strong()
@@ -140,8 +141,8 @@ pub fn render_result_detail(
         }
     });
 
-    ui.add_space(8.0 * scale);
-    detail_section(ui, "Identity", |ui| {
+    ui.add_space(theme::card_section_gap(scale));
+    detail_section(ui, "Identity", scale, |ui| {
         wrapped_text(ui, format!("Name: {}", record.display_name()));
         clipped_monospace(ui, &record.path);
         if let Some(hash) = record.sha256.as_deref() {
@@ -150,8 +151,8 @@ pub fn render_result_detail(
         }
     });
 
-    ui.add_space(8.0 * scale);
-    detail_section(ui, "Why it was flagged", |ui| {
+    ui.add_space(theme::card_section_gap(scale));
+    detail_section(ui, "Why it was flagged", scale, |ui| {
         if record.detection_reasons.is_empty() {
             wrapped_text(ui, "No structured detection reasons were recorded.");
         } else {
@@ -166,15 +167,15 @@ pub fn render_result_detail(
                 .collect::<Vec<_>>();
             strongest.sort_by(|left, right| right.weight.total_cmp(&left.weight));
             if !strongest.is_empty() {
-                ui.label(RichText::new("Highest-confidence signals").strong());
+                theme::section_title(ui, "Highest-confidence signals", scale);
                 for reason in strongest.into_iter().take(3) {
                     signal_reason_card(ui, reason, true);
                 }
-                ui.add_space(6.0 * scale);
+                ui.add_space(theme::card_row_gap(scale));
             }
             for (source, reasons) in grouped {
-                ui.add_space(4.0 * scale);
-                ui.label(RichText::new(source_label(source)).strong());
+                ui.add_space(theme::card_row_gap(scale));
+                theme::section_title(ui, source_label(source), scale);
                 for reason in reasons {
                     signal_reason_card(ui, reason, reason.weight >= 0.7);
                 }
@@ -182,16 +183,16 @@ pub fn render_result_detail(
         }
     });
 
-    ui.add_space(8.0 * scale);
-    detail_section(ui, "Reasoning and actions", |ui| {
+    ui.add_space(theme::card_section_gap(scale));
+    detail_section(ui, "Reasoning and actions", scale, |ui| {
         if !record.summary_text.is_empty() {
             wrapped_text(ui, &record.summary_text);
         } else {
             wrapped_text(ui, "No summary note recorded.");
         }
         if let Some(event) = protection_event {
-            ui.add_space(4.0 * scale);
-            ui.label(RichText::new("Protection event").strong());
+            ui.add_space(theme::card_row_gap(scale));
+            theme::section_title(ui, "Protection event", scale);
             wrapped_text(ui, &event.note);
             wrapped_text(
                 ui,
@@ -208,14 +209,14 @@ pub fn render_result_detail(
             );
         }
         if !record.action_note.is_empty() {
-            ui.add_space(4.0 * scale);
-            ui.label(RichText::new("Action history").strong());
+            ui.add_space(theme::card_row_gap(scale));
+            theme::section_title(ui, "Action history", scale);
             wrapped_text(ui, &record.action_note);
         }
     });
 
-    ui.add_space(8.0 * scale);
-    detail_section(ui, "Provenance and storage", |ui| {
+    ui.add_space(theme::card_section_gap(scale));
+    detail_section(ui, "Provenance and storage", scale, |ui| {
         clipped_monospace(ui, &record.path);
         ui.label(format!(
             "Disposition: {}",
@@ -226,7 +227,7 @@ pub fn render_result_detail(
             "Viewing or copying metadata does not modify local files.",
         );
         if !record.action_note.is_empty() {
-            ui.add_space(4.0 * scale);
+            ui.add_space(theme::card_row_gap(scale));
             wrapped_text(ui, &record.action_note);
         }
         if let Some(path) = record.quarantine_path.as_deref() {
@@ -250,11 +251,17 @@ pub fn render_result_detail(
     });
 }
 
-fn detail_section(ui: &mut egui::Ui, title: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
+fn detail_section(
+    ui: &mut egui::Ui,
+    title: &str,
+    scale: f32,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
     theme::card_frame().show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.set_max_width(ui.available_width());
-        ui.label(RichText::new(title).strong());
+        ui.spacing_mut().item_spacing.y = theme::card_row_gap(scale);
+        theme::card_title(ui, title, scale);
         add_contents(ui);
     });
 }
@@ -279,20 +286,22 @@ fn signal_reason_card(
     let fill = if highlight {
         egui::Color32::from_rgb(45, 36, 21)
     } else {
-        egui::Color32::from_rgb(31, 37, 44)
+        theme::SUBTLE_FILL
     };
     let stroke = if highlight {
         egui::Color32::from_rgb(186, 145, 62)
     } else {
-        egui::Color32::from_rgb(57, 66, 76)
+        theme::SUBTLE_STROKE
     };
     egui::Frame::none()
         .fill(fill)
         .stroke(egui::Stroke::new(1.0, stroke))
         .rounding(6.0)
-        .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+        .inner_margin(egui::Margin::symmetric(10.0, 8.0))
         .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = theme::card_row_gap(1.0);
             ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = theme::badge_spacing(1.0);
                 ui.label(
                     RichText::new(if reason.name.is_empty() {
                         &reason.reason_type

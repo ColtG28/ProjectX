@@ -24,6 +24,7 @@ impl MyApp {
                     .collect::<Vec<_>>();
                 let metrics = summarize_record_refs(&filtered_records);
                 ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = theme::badge_spacing(self.ui_metrics.scale_factor);
                     stat_chip(
                         ui,
                         "Visible results",
@@ -55,17 +56,18 @@ impl MyApp {
                         Color32::from_rgb(132, 170, 214),
                     );
                 });
-                ui.add_space(6.0);
+                ui.add_space(theme::item_gap(self.ui_metrics.scale_factor));
                 theme::card_frame().show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    ui.label(egui::RichText::new("Filters").strong());
+                    theme::card_title(ui, "Filters", self.ui_metrics.scale_factor);
                     ui.add_sized(
                         [ui.available_width().min(520.0), 0.0],
                         egui::TextEdit::singleline(&mut self.report_search)
                             .hint_text("Search reports..."),
                     );
-                    ui.add_space(6.0);
+                    ui.add_space(theme::card_row_gap(self.ui_metrics.scale_factor));
                     ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = theme::badge_spacing(self.ui_metrics.scale_factor);
                         for (label, filter) in [
                             ("All", crate::gui::state::ReportVerdictFilter::All),
                             ("Clean", crate::gui::state::ReportVerdictFilter::Clean),

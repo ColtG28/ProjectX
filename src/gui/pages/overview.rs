@@ -1,11 +1,12 @@
 use eframe::egui;
-use egui::{Color32, Layout, RichText};
+use egui::{Color32, Layout};
 
 use crate::gui::app::{
     draw_pie_chart, draw_segment_bar, now_epoch, render_chart_legend, summarize_record_refs,
 };
 use crate::gui::components::summary_chip::stat_chip;
 use crate::gui::state::{MyApp, TimePeriod};
+use crate::gui::theme;
 
 impl MyApp {
     pub fn render_analytics(&mut self, ui: &mut egui::Ui) {
@@ -22,6 +23,7 @@ impl MyApp {
         let metrics = summarize_record_refs(&filtered);
 
         ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = theme::badge_spacing(self.ui_metrics.scale_factor);
             stat_chip(
                 ui,
                 "Files scanned",
@@ -62,9 +64,9 @@ impl MyApp {
 
         ui.separator();
         ui.columns(2, |columns| {
-            columns[0].group(|ui| {
-                ui.label(RichText::new("Verdict distribution").strong());
-                ui.add_space(8.0);
+            theme::card_frame().show(&mut columns[0], |ui| {
+                ui.set_width(ui.available_width());
+                theme::card_title(ui, "Verdict distribution", self.ui_metrics.scale_factor);
                 let segments = [
                     ("Clean", metrics.clean, Color32::from_rgb(127, 191, 127)),
                     (
@@ -80,12 +82,12 @@ impl MyApp {
                     ("Errors", metrics.errors, Color32::from_rgb(170, 170, 180)),
                 ];
                 draw_pie_chart(ui, "verdict_pie", &segments);
-                ui.add_space(8.0);
+                ui.add_space(theme::card_section_gap(self.ui_metrics.scale_factor));
                 render_chart_legend(ui, &segments);
             });
-            columns[1].group(|ui| {
-                ui.label(RichText::new("Storage and severity").strong());
-                ui.add_space(8.0);
+            theme::card_frame().show(&mut columns[1], |ui| {
+                ui.set_width(ui.available_width());
+                theme::card_title(ui, "Storage and severity", self.ui_metrics.scale_factor);
                 let segments = [
                     (
                         "In quarantine",
@@ -100,9 +102,9 @@ impl MyApp {
                     ("Deleted", metrics.deleted, Color32::from_rgb(160, 160, 165)),
                 ];
                 draw_segment_bar(ui, &segments);
-                ui.add_space(10.0);
+                ui.add_space(theme::card_section_gap(self.ui_metrics.scale_factor));
                 render_chart_legend(ui, &segments);
-                ui.add_space(10.0);
+                ui.add_space(theme::card_section_gap(self.ui_metrics.scale_factor));
                 ui.label(format!(
                     "Severity: high={} medium={} | warning total={} | error total={}",
                     metrics.high_severity,

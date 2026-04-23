@@ -46,6 +46,7 @@ impl MyApp {
             ui,
             "General / Scope",
             "Choose how much ProjectX should scan and how aggressively it reuses previous results.",
+            self.ui_metrics.scale_factor,
         );
         *settings_changed |= ui
             .checkbox(
@@ -71,8 +72,9 @@ impl MyApp {
 
         ui.add_space(theme::section_gap(self.ui_metrics.scale_factor));
         theme::card_frame().show(ui, |ui| {
-            ui.label(egui::RichText::new("Quick status").strong());
+            theme::card_title(ui, "Quick status", self.ui_metrics.scale_factor);
             ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = theme::badge_spacing(self.ui_metrics.scale_factor);
                 settings_pill(
                     ui,
                     "Bulk cap",
@@ -105,6 +107,7 @@ impl MyApp {
             ui,
             "Protection",
             "Watch selected locations and queue passive scans when files change.",
+            self.ui_metrics.scale_factor,
         );
         *settings_changed |= ui
             .checkbox(
@@ -147,7 +150,7 @@ impl MyApp {
 
         ui.add_space(theme::section_gap(self.ui_metrics.scale_factor));
         theme::card_frame().show(ui, |ui| {
-            ui.label(egui::RichText::new("Watched locations").strong());
+            theme::card_title(ui, "Watched locations", self.ui_metrics.scale_factor);
             ui.horizontal(|ui| {
                 ui.label("Watched path");
                 ui.add_sized(
@@ -227,6 +230,7 @@ impl MyApp {
             ui,
             "Updates",
             "ProjectX checks GitHub Releases safely. It can optionally pre-download updates, but it never auto-installs them.",
+            self.ui_metrics.scale_factor,
         );
         *settings_changed |= ui
             .checkbox(
@@ -540,6 +544,7 @@ impl MyApp {
             ui,
             "Advanced",
             "These toggles affect local passive analysis only. ProjectX remains passive-first from the GUI.",
+            self.ui_metrics.scale_factor,
         );
         *settings_changed |= ui
             .checkbox(
@@ -638,16 +643,18 @@ fn render_settings_panel_picker(ui: &mut egui::Ui, active_panel: &mut SettingsPa
     });
 }
 
-fn settings_section(ui: &mut egui::Ui, title: &str, body: &str) {
+fn settings_section(ui: &mut egui::Ui, title: &str, body: &str, scale: f32) {
     theme::card_frame().show(ui, |ui| {
-        ui.label(egui::RichText::new(title).strong());
+        theme::card_title(ui, title, scale);
         ui.small(body);
     });
-    ui.add_space(theme::item_gap(1.0));
+    ui.add_space(theme::item_gap(scale));
 }
 
 fn settings_pill(ui: &mut egui::Ui, label: &str, value: &str) {
     theme::subtle_frame().show(ui, |ui| {
+        ui.spacing_mut().item_spacing =
+            egui::vec2(theme::card_row_gap(1.0), theme::card_row_gap(1.0));
         ui.horizontal(|ui| {
             ui.small(egui::RichText::new(label).strong());
             ui.label(value);

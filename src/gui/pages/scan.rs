@@ -17,7 +17,7 @@ impl MyApp {
             .show(ui, |ui| {
                 theme::card_frame().show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    ui.label(egui::RichText::new("Scan configuration").strong());
+                    theme::card_title(ui, "Scan configuration", self.ui_metrics.scale_factor);
                     let path_button_label = if self.is_loading() {
                         "Queue path"
                     } else {
@@ -86,8 +86,9 @@ impl MyApp {
                 ui.add_space(theme::section_gap(self.ui_metrics.scale_factor));
                 theme::card_frame().show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    ui.label(egui::RichText::new("Real-time protection").strong());
+                    theme::card_title(ui, "Real-time protection", self.ui_metrics.scale_factor);
                     ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = theme::badge_spacing(self.ui_metrics.scale_factor);
                         stat_chip(
                             ui,
                             "Status",
@@ -164,7 +165,7 @@ impl MyApp {
                         ));
                     }
                     if !self.settings.watched_paths.is_empty() {
-                        ui.label("Watched locations");
+                        theme::section_title(ui, "Watched locations", self.ui_metrics.scale_factor);
                         for watched in self.settings.watched_paths.iter().take(4) {
                             ui.horizontal_wrapped(|ui| {
                                 ui.monospace(&watched.path);
@@ -178,7 +179,11 @@ impl MyApp {
                     }
                     if !self.protection_events.is_empty() {
                         ui.add_space(theme::item_gap(self.ui_metrics.scale_factor));
-                        ui.label("Recent protection events");
+                        theme::section_title(
+                            ui,
+                            "Recent protection events",
+                            self.ui_metrics.scale_factor,
+                        );
                         for event in self.protection_events.iter().rev().take(5) {
                             theme::subtle_frame().show(ui, |ui| {
                                 ui.label(format!(
@@ -208,8 +213,9 @@ impl MyApp {
                 let snapshot = self.job.lock().map(|job| job.clone()).unwrap_or_default();
                 theme::card_frame().show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    ui.label(egui::RichText::new("Live job status").strong());
+                    theme::card_title(ui, "Live job status", self.ui_metrics.scale_factor);
                     ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = theme::badge_spacing(self.ui_metrics.scale_factor);
                         stat_chip(
                             ui,
                             "Queued",
@@ -267,7 +273,7 @@ impl MyApp {
                     }
 
                     ui.add_space(theme::item_gap(self.ui_metrics.scale_factor));
-                    ui.label("Current file progress");
+                    theme::section_title(ui, "Current file progress", self.ui_metrics.scale_factor);
                     ui.add_sized(
                         [progress_width, 0.0],
                         ProgressBar::new(snapshot.current_file_progress.clamp(0.0, 1.0))

@@ -18,6 +18,7 @@ impl MyApp {
         ui.separator();
 
         ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = theme::badge_spacing(self.ui_metrics.scale_factor);
             stat_chip(
                 ui,
                 "Version",
@@ -64,9 +65,9 @@ impl MyApp {
     ) {
         theme::card_frame().show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(egui::RichText::new("System overview").strong());
+            theme::card_title(ui, "System overview", self.ui_metrics.scale_factor);
             ui.label("ProjectX is a lightweight, high-performance file scanner built for macOS, Windows, and Linux.");
-            ui.add_space(6.0);
+            ui.add_space(theme::card_row_gap(self.ui_metrics.scale_factor));
             ui.label(format!("Update source status: {}", update_snapshot.status));
             ui.label(format!(
                 "Protection state: {}",
@@ -88,7 +89,7 @@ impl MyApp {
             if !update_snapshot.install_status.is_empty() {
                 ui.label(format!("Install state: {}", update_snapshot.install_status));
             }
-            ui.add_space(6.0);
+            ui.add_space(theme::card_row_gap(self.ui_metrics.scale_factor));
             ui.small("ProjectX focuses on clear passive analysis, safe quarantine handling, and explainable review workflows.");
         });
     }

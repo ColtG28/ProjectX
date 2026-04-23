@@ -1,5 +1,5 @@
 use eframe::egui;
-use egui::{Color32, FontFamily, FontId, Stroke, TextStyle};
+use egui::{Color32, FontFamily, FontId, RichText, Stroke, TextStyle};
 
 pub const CARD_FILL: Color32 = Color32::from_rgb(31, 37, 44);
 pub const CARD_STROKE: Color32 = Color32::from_rgb(57, 66, 76);
@@ -12,6 +12,22 @@ pub fn section_gap(scale: f32) -> f32 {
 
 pub fn item_gap(scale: f32) -> f32 {
     6.0 * scale
+}
+
+pub fn card_header_gap(scale: f32) -> f32 {
+    6.0 * scale
+}
+
+pub fn card_section_gap(scale: f32) -> f32 {
+    8.0 * scale
+}
+
+pub fn card_row_gap(scale: f32) -> f32 {
+    4.0 * scale
+}
+
+pub fn badge_spacing(scale: f32) -> egui::Vec2 {
+    egui::vec2(item_gap(scale), item_gap(scale))
 }
 
 pub fn card_frame() -> egui::Frame {
@@ -28,6 +44,16 @@ pub fn subtle_frame() -> egui::Frame {
         .stroke(Stroke::new(1.0, SUBTLE_STROKE))
         .rounding(6.0)
         .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+}
+
+pub fn card_title(ui: &mut egui::Ui, title: &str, scale: f32) {
+    ui.label(RichText::new(title).strong());
+    ui.add_space(card_header_gap(scale));
+}
+
+pub fn section_title(ui: &mut egui::Ui, title: &str, scale: f32) {
+    ui.label(RichText::new(title).small().strong());
+    ui.add_space(card_row_gap(scale));
 }
 
 pub fn apply_theme(ctx: &egui::Context, scale: f32) {
@@ -79,4 +105,16 @@ pub fn apply_theme(ctx: &egui::Context, scale: f32) {
         FontId::new((13.0 * scale).clamp(12.0, 16.0), FontFamily::Monospace),
     );
     ctx.set_style(style);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_card_rhythm_helpers_preserve_spacing_hierarchy() {
+        assert!(card_section_gap(1.0) > card_header_gap(1.0));
+        assert!(card_header_gap(1.0) > card_row_gap(1.0));
+        assert_eq!(badge_spacing(1.0), egui::vec2(item_gap(1.0), item_gap(1.0)));
+    }
 }
