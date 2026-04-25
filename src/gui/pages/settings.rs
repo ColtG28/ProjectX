@@ -1,19 +1,17 @@
 use eframe::egui;
 
-use crate::gui::app::{format_timestamp_with_relative, home_dir, save_gui_settings};
+use crate::gui::app::{home_dir, save_gui_settings};
 use crate::gui::state::{FeedbackScope, FeedbackSeverity, MyApp, SettingsPanel};
 use crate::gui::theme;
-use crate::update::UpdateStatusKind;
 
 impl MyApp {
     pub fn render_settings(&mut self, ui: &mut egui::Ui) {
         let mut settings_changed = false;
 
         ui.heading("Scanner Settings");
-        ui.label("Tune scan scope, protection, and update behavior without leaving the current workflow.");
+        ui.label("Tune scan scope and protection behavior without leaving the current workflow.");
         ui.separator();
         self.render_feedback_banner(ui, FeedbackScope::Settings);
-        self.render_feedback_banner(ui, FeedbackScope::Updater);
         ui.add_space(theme::item_gap(self.ui_metrics.scale_factor));
 
         render_settings_panel_picker(ui, &mut self.settings_panel);
@@ -27,9 +25,6 @@ impl MyApp {
                 }
                 SettingsPanel::Protection => {
                     self.render_settings_protection(ui, &mut settings_changed);
-                }
-                SettingsPanel::Updates => {
-                    self.render_settings_updates(ui, &mut settings_changed);
                 }
                 SettingsPanel::Advanced => {
                     self.render_settings_advanced(ui, &mut settings_changed);
@@ -225,320 +220,6 @@ impl MyApp {
         );
     }
 
-    fn render_settings_updates(&mut self, ui: &mut egui::Ui, settings_changed: &mut bool) {
-        settings_section(
-            ui,
-            "Updates",
-            "ProjectX checks GitHub Releases safely. It can optionally pre-download updates, but it never auto-installs them.",
-            self.ui_metrics.scale_factor,
-        );
-        *settings_changed |= ui
-            .checkbox(
-                &mut self.settings.enable_automatic_updates,
-                "Enable automatic update checks",
-            )
-            .changed();
-        *settings_changed |= ui
-            .checkbox(
-                &mut self.settings.enable_automatic_update_downloads,
-                "Automatically download updates after a successful background check (do not install)",
-            )
-            .changed();
-
-        let update_snapshot = self
-            .update_state
-            .lock()
-            .map(|state| state.clone())
-            .unwrap_or_default();
-        let recent_update_logs = crate::update::recent_update_log_lines(8);
-        let status_color = update_status_color(update_snapshot.status_kind);
-
-        theme::card_frame().show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                settings_pill(ui, "Current", &update_snapshot.current_version);
-                settings_pill(
-                    ui,
-                    "Latest",
-                    update_snapshot
-                        .latest_release
-                        .as_ref()
-                        .map(|release| release.version.as_str())
-                        .unwrap_or("Unknown"),
-                );
-                settings_pill(ui, "Source", &update_snapshot.repo_label);
-                if update_snapshot.test_mode_active {
-                    settings_pill(
-                        ui,
-                        "Test mode",
-                        update_snapshot
-                            .test_mode_scenario
-                            .as_deref()
-                            .unwrap_or("active"),
-                    );
-                }
-            });
-            ui.add_space(4.0);
-            ui.colored_label(
-                status_color,
-                egui::RichText::new(update_snapshot.status_kind.user_label()).strong(),
-            );
-            ui.small(update_snapshot.status_kind.user_summary());
-            if !update_snapshot.status.is_empty() {
-                ui.label(&update_snapshot.status);
-            }
-            if update_snapshot.last_checked_epoch > 0 {
-                ui.small(format!(
-                    "Last checked: {}",
-                    format_timestamp_with_relative(update_snapshot.last_checked_epoch)
-                ));
-            }
-            if update_snapshot.last_successful_check_epoch > 0 {
-                ui.small(format!(
-                    "Last successful lookup: {}",
-                    format_timestamp_with_relative(update_snapshot.last_successful_check_epoch)
-                ));
-            }
-            if let Some(error) = &update_snapshot.last_error {
-                ui.colored_label(
-                    egui::Color32::from_rgb(198, 114, 114),
-                    format!("Last check detail: {error}"),
-                );
-            }
-            if let Some(note) = &update_snapshot.cache_validation_note {
-                ui.small(format!("Cache note: {note}"));
-            }
-            if update_snapshot.last_automatic_check_epoch > 0 {
-                ui.small(format!(
-                    "Last automatic check: {}",
-                    format_timestamp_with_relative(update_snapshot.last_automatic_check_epoch)
-                ));
-            }
-            if update_snapshot.next_scheduled_check_epoch > 0 {
-                ui.small(format!(
-                    "Next scheduled check: {}",
-                    format_timestamp_with_relative(update_snapshot.next_scheduled_check_epoch)
-                ));
-            }
-        });
-
-        ui.add_space(theme::item_gap(self.ui_metrics.scale_factor));
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .add_enabled(!update_snapshot.checking, egui::Button::new("Check now"))
-                .clicked()
-            {
-                self.start_update_check(true);
-            }
-
-            if ui
-                .add_enabled(
-                    update_snapshot.available_update.is_some(),
-                    egui::Button::new("Download latest update"),
-                )
-                .clicked()
-            {
-                self.open_available_update();
-            }
-
-            if ui.button("Open release page").clicked() {
-                self.open_release_notes();
-            }
-            if ui
-                .add_enabled(
-                    update_snapshot.download_path.is_some(),
-                    egui::Button::new("Reveal downloaded update"),
-                )
-                .clicked()
-            {
-                self.open_downloaded_update_folder();
-            }
-            if crate::update::updater_debug_actions_enabled() {
-                if ui
-                    .add_enabled(
-                        !update_snapshot.checking,
-                        egui::Button::new("Force check update"),
-                    )
-                    .clicked()
-                {
-                    self.start_update_check(true);
-                }
-                if ui
-                    .add_enabled(
-                        update_snapshot.latest_release.is_some(),
-                        egui::Button::new("Force re-download latest"),
-                    )
-                    .clicked()
-                {
-                    self.force_redownload_latest_update();
-                }
-                if ui
-                    .add_enabled(
-                        update_snapshot.download_path.is_some()
-                            && update_snapshot
-                                .latest_release
-                                .as_ref()
-                                .and_then(|release| release.expected_sha256.as_ref())
-                                .is_some(),
-                        egui::Button::new("Re-run checksum verification"),
-                    )
-                    .clicked()
-                {
-                    self.rerun_checksum_verification();
-                }
-                if ui.button("Clear update cache").clicked() {
-                    self.clear_update_cache_debug();
-                }
-            }
-        });
-
-        theme::subtle_frame().show(ui, |ui| {
-            ui.label(egui::RichText::new("Download state").strong());
-            ui.small(&update_snapshot.download_status);
-            if let Some(progress) = update_snapshot.download_progress_fraction {
-                ui.add(
-                    egui::ProgressBar::new(progress)
-                        .desired_width(ui.available_width().min(320.0))
-                        .show_percentage(),
-                );
-            }
-            if let Some(path) = update_snapshot.download_path.as_deref() {
-                ui.small(format!("Downloaded file: {path}"));
-            }
-            if let Some(version) = update_snapshot.downloaded_version.as_deref() {
-                ui.small(format!("Downloaded version: {version}"));
-            }
-            if update_snapshot.last_download_epoch > 0 {
-                ui.small(format!(
-                    "Last download update: {}",
-                    format_timestamp_with_relative(update_snapshot.last_download_epoch)
-                ));
-            }
-        });
-
-        ui.add_space(theme::item_gap(self.ui_metrics.scale_factor));
-        let install_plan = crate::gui::app::build_guided_install_plan(
-            update_snapshot.latest_release.as_ref(),
-            update_snapshot.download_path.as_deref(),
-            update_snapshot.verification_status.as_deref(),
-        );
-        theme::subtle_frame().show(ui, |ui| {
-            ui.label(egui::RichText::new("Install state").strong());
-            ui.small(&update_snapshot.install_status);
-            if !update_snapshot.install_guidance.is_empty() {
-                ui.small(&update_snapshot.install_guidance);
-            } else {
-                ui.small(&install_plan.instructions);
-            }
-            ui.horizontal_wrapped(|ui| {
-                if ui
-                    .add_enabled(
-                        update_snapshot.install_ready,
-                        egui::Button::new(install_plan.action_label),
-                    )
-                    .clicked()
-                {
-                    self.install_downloaded_update();
-                }
-                if update_snapshot.restart_required_after_install {
-                    ui.small("Restart ProjectX after the installer or replacement flow completes.");
-                }
-            });
-            if update_snapshot.last_install_attempt_epoch > 0 {
-                ui.small(format!(
-                    "Last install attempt: {}",
-                    format_timestamp_with_relative(update_snapshot.last_install_attempt_epoch)
-                ));
-            }
-        });
-
-        if let Some(update) = &update_snapshot.latest_release {
-            ui.add_space(theme::section_gap(self.ui_metrics.scale_factor));
-            theme::card_frame().show(ui, |ui| {
-                ui.label(egui::RichText::new("Package verification").strong());
-                ui.small(if update.expected_sha256.is_some() {
-                    "A matching SHA-256 checksum is available for this release."
-                } else {
-                    "This release does not expose a matching SHA-256 checksum asset, so in-app verification is unavailable."
-                });
-                ui.add_space(4.0);
-                ui.label(format!("Package: {}", update.asset_name));
-                if !update.checksum_status.is_empty() {
-                    ui.label(format!("Checksum status: {}", update.checksum_status));
-                }
-                if let Some(hash) = update_snapshot.verification_expected_sha256.as_deref().or(update.expected_sha256.as_deref()) {
-                    ui.small(format!("Expected SHA-256: {hash}"));
-                }
-                if let Some(actual) = update_snapshot.verification_actual_sha256.as_deref() {
-                    ui.small(format!("Actual SHA-256: {actual}"));
-                }
-                if let Some(detail) = update.checksum_debug_detail.as_deref() {
-                    ui.small(format!("Checksum detail: {detail}"));
-                }
-                if update_snapshot.last_verification_epoch > 0 {
-                    ui.small(format!(
-                        "Last verification: {}",
-                        format_timestamp_with_relative(update_snapshot.last_verification_epoch)
-                    ));
-                }
-                if ui
-                    .add_enabled(
-                        update.expected_sha256.is_some(),
-                        egui::Button::new("Verify downloaded update"),
-                    )
-                    .clicked()
-                {
-                    self.verify_downloaded_update();
-                }
-                if let Some(message) = update_snapshot.verification_status.as_deref() {
-                    ui.colored_label(verification_color(Some(message)), message);
-                }
-            });
-        }
-
-        if crate::update::updater_debug_actions_enabled() {
-            ui.add_space(theme::section_gap(self.ui_metrics.scale_factor));
-            theme::card_frame().show(ui, |ui| {
-                ui.label(egui::RichText::new("Updater diagnostics").strong());
-                ui.small("These controls and traces are intended for reliability testing and support work.");
-                if let Some(snapshot) = update_snapshot.debug_snapshot.as_ref() {
-                    ui.separator();
-                    ui.small(format!("Snapshot status: {}", snapshot.status_label));
-                    ui.small(format!(
-                        "Snapshot latest version: {}",
-                        snapshot.latest_version.as_deref().unwrap_or("Unknown")
-                    ));
-                    ui.small(format!(
-                        "Snapshot asset: {}",
-                        snapshot.selected_asset_name.as_deref().unwrap_or("Unknown")
-                    ));
-                    ui.small(format!(
-                        "Install ready: {}",
-                        if snapshot.install_ready { "Yes" } else { "No" }
-                    ));
-                    if let Some(error) = snapshot.last_error.as_deref() {
-                        ui.small(format!("Snapshot error: {error}"));
-                    }
-                }
-                ui.separator();
-                ui.label(egui::RichText::new("Recent updater log").strong());
-                if recent_update_logs.is_empty() {
-                    ui.small("No updater log entries yet.");
-                } else {
-                    for line in recent_update_logs {
-                        ui.monospace(line);
-                    }
-                }
-            });
-        }
-
-        self.render_notification_center(
-            ui,
-            "Recent updater activity",
-            &[FeedbackScope::Updater],
-            8,
-        );
-    }
-
     fn render_settings_advanced(&mut self, ui: &mut egui::Ui, settings_changed: &mut bool) {
         settings_section(
             ui,
@@ -627,7 +308,6 @@ fn render_settings_panel_picker(ui: &mut egui::Ui, active_panel: &mut SettingsPa
         for panel in [
             SettingsPanel::General,
             SettingsPanel::Protection,
-            SettingsPanel::Updates,
             SettingsPanel::Advanced,
         ] {
             let selected = *active_panel == panel;
@@ -660,29 +340,4 @@ fn settings_pill(ui: &mut egui::Ui, label: &str, value: &str) {
             ui.label(value);
         });
     });
-}
-
-fn update_status_color(kind: UpdateStatusKind) -> egui::Color32 {
-    match kind {
-        UpdateStatusKind::UpToDate => egui::Color32::from_rgb(104, 181, 124),
-        UpdateStatusKind::UpdateAvailable => egui::Color32::from_rgb(224, 185, 105),
-        UpdateStatusKind::Unknown => egui::Color32::from_rgb(176, 221, 255),
-        UpdateStatusKind::Error => egui::Color32::from_rgb(198, 114, 114),
-        UpdateStatusKind::Offline => egui::Color32::from_rgb(170, 170, 180),
-        UpdateStatusKind::RateLimited => egui::Color32::from_rgb(214, 160, 95),
-    }
-}
-
-fn verification_color(message: Option<&str>) -> egui::Color32 {
-    let Some(message) = message else {
-        return egui::Color32::from_rgb(176, 221, 255);
-    };
-    let lowered = message.to_ascii_lowercase();
-    if lowered.contains("verified successfully") {
-        egui::Color32::from_rgb(104, 181, 124)
-    } else if lowered.contains("failed") || lowered.contains("malformed") {
-        egui::Color32::from_rgb(198, 114, 114)
-    } else {
-        egui::Color32::from_rgb(224, 185, 105)
-    }
 }

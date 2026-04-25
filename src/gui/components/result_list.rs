@@ -1,10 +1,8 @@
 use eframe::egui;
 use egui::{Color32, RichText};
 
-use crate::gui::app::{format_elapsed_ms, format_timestamp_compact};
-use crate::gui::components::status_bar::{
-    badge, count_badge, severity_color, signal_badge, storage_badge, verdict_color,
-};
+use crate::gui::app::format_timestamp_compact;
+use crate::gui::components::status_bar::{badge, severity_color, verdict_color};
 use crate::gui::state::ScanRecord;
 use crate::gui::theme;
 
@@ -152,16 +150,6 @@ fn report_row_width(ui: &egui::Ui) -> f32 {
     (ui.available_width().min(clip_width_from_cursor) - ROW_RIGHT_GUARD).max(1.0)
 }
 
-fn signal_limit_for_width(width: f32) -> usize {
-    if width >= 220.0 {
-        4
-    } else if width >= 140.0 {
-        2
-    } else {
-        1
-    }
-}
-
 fn result_name_hover_text(record: &ScanRecord) -> String {
     if record.display_name() == record.path {
         record.path.clone()
@@ -170,92 +158,24 @@ fn result_name_hover_text(record: &ScanRecord) -> String {
     }
 }
 
-fn render_secondary_badges(
-    ui: &mut egui::Ui,
-    record: &ScanRecord,
-    include_severity: bool,
-    signal_limit: usize,
-) {
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = theme::badge_spacing(1.0);
-        if include_severity {
-            badge(ui, record.severity.label(), severity_color(record.severity));
-        }
-        for source in record.signal_sources.iter().take(signal_limit) {
-            signal_badge(ui, source);
-        }
-        storage_badge(ui, record.resolved_storage_state());
-        if record.warning_count > 0 {
-            count_badge(
-                ui,
-                "W",
-                record.warning_count,
-                Color32::from_rgb(224, 185, 105),
-            );
-        }
-        if record.error_count > 0 {
-            count_badge(
-                ui,
-                "E",
-                record.error_count,
-                Color32::from_rgb(170, 170, 180),
-            );
-        }
-        badge(
-            ui,
-            &format_elapsed_ms(record.duration_ms),
-            Color32::from_rgb(115, 132, 150),
-        );
-        if let Some(risk) = record.risk_score {
-            badge(
-                ui,
-                &format!("risk {:.2}", risk),
-                Color32::from_rgb(138, 158, 180),
-            );
-        }
-    });
-}
-
 fn render_action_rows(
     ui: &mut egui::Ui,
-    record: &ScanRecord,
-    in_quarantine: bool,
+    _record: &ScanRecord,
+    _in_quarantine: bool,
 ) -> ResultCardActions {
     let mut actions = ResultCardActions::default();
 
     ui.separator();
     ui.add_space(theme::card_row_gap(1.0));
 
-    theme::section_title(ui, "Actions", 1.0);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = theme::badge_spacing(1.0);
         actions.inspect = ui.small_button("Inspect").clicked();
         actions.copy_path = ui.small_button("Copy path").clicked();
-        if record.sha256.is_some() {
-            actions.copy_hash = ui.small_button("Copy hash").clicked();
-        }
-        actions.reveal_file = ui.small_button("Reveal file").clicked();
-        if record.report_path.is_some() {
-            actions.reveal_report = ui.small_button("Reveal report").clicked();
-        }
-    });
-
-    ui.add_space(theme::card_row_gap(1.0));
-    theme::section_title(ui, "Stored items", 1.0);
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = theme::badge_spacing(1.0);
-        actions.restore = ui
-            .add_enabled(in_quarantine, egui::Button::new("Restore from quarantine"))
-            .clicked();
-        actions.delete_quarantined_copy = ui
-            .add_enabled(in_quarantine, egui::Button::new("Delete quarantined copy"))
-            .clicked();
-        actions.keep_in_quarantine = ui
-            .add_enabled(in_quarantine, egui::Button::new("Keep in quarantine"))
-            .clicked();
+        actions.restore = ui.small_button("Restore").clicked();
+        actions.delete_quarantined_copy = ui.small_button("Delete").clicked();
         actions.remove_report = ui.small_button("Remove report").clicked();
     });
-
     actions
 }
 
@@ -368,7 +288,6 @@ pub fn render_result_card(
                         .on_hover_text(result_name_hover_text(record));
                     });
                     ui.add_space(theme::card_row_gap(1.0));
-                    render_secondary_badges(ui, record, true, 3);
                     actions = render_action_rows(ui, record, in_quarantine);
                     return;
                 }
@@ -430,12 +349,6 @@ pub fn render_result_card(
                     );
                 });
                 ui.add_space(theme::card_row_gap(1.0));
-                render_secondary_badges(
-                    ui,
-                    record,
-                    false,
-                    signal_limit_for_width(layout.content_width),
-                );
                 actions = render_action_rows(ui, record, in_quarantine);
             });
         },
@@ -474,13 +387,6 @@ mod tests {
         assert!(!layout.show_type);
         assert!(!layout.show_size);
         assert!(!layout.show_time);
-    }
-
-    #[test]
-    fn signal_badge_limit_scales_with_available_width() {
-        assert_eq!(signal_limit_for_width(120.0), 1);
-        assert_eq!(signal_limit_for_width(160.0), 2);
-        assert_eq!(signal_limit_for_width(260.0), 4);
     }
 
     #[test]

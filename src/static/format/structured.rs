@@ -5,6 +5,7 @@ use serde_json::Value;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StructuredDataKind {
     BrowserExtensionManifest,
+    ExtensionLocaleJson,
     PackageMetadata,
     JsonLockfile,
     JsonConfig,
@@ -17,6 +18,7 @@ impl StructuredDataKind {
     pub fn label(self) -> &'static str {
         match self {
             Self::BrowserExtensionManifest => "Browser Extension Manifest",
+            Self::ExtensionLocaleJson => "Extension Locale JSON",
             Self::PackageMetadata => "Package Metadata",
             Self::JsonLockfile => "JSON Lockfile",
             Self::JsonConfig => "JSON Config",
@@ -45,6 +47,9 @@ pub fn detect(
     if is_browser_extension_manifest(&file_name, &path_text, &value) {
         return Some(StructuredDataKind::BrowserExtensionManifest);
     }
+    if is_extension_locale_json(&file_name, &path_text, &value) {
+        return Some(StructuredDataKind::ExtensionLocaleJson);
+    }
     if is_json_lockfile(&file_name, &value) {
         return Some(StructuredDataKind::JsonLockfile);
     }
@@ -64,12 +69,98 @@ pub fn detect(
     Some(StructuredDataKind::JsonData)
 }
 
+pub fn detect_from_metadata(
+    path: &Path,
+    file_name: &str,
+    extension: &str,
+    sniffed_mime: &str,
+) -> Option<StructuredDataKind> {
+    if !looks_json_like_metadata(extension, sniffed_mime) {
+        return None;
+    }
+
+    let file_name = file_name.to_ascii_lowercase();
+    let path_text = path.to_string_lossy().to_ascii_lowercase();
+
+    if is_extension_locale_json_path(&file_name, &path_text) {
+        return Some(StructuredDataKind::ExtensionLocaleJson);
+    }
+    if matches!(file_name.as_str(), "manifest.json" | "manifest.webmanifest")
+        && path_contains_any(
+            &path_text,
+            &[
+                "/extensions/",
+                "/chrome/",
+                "/firefox/",
+                "/mozilla/",
+                "/browser-extension/",
+                "/web-ext/",
+            ],
+        )
+    {
+        return Some(StructuredDataKind::BrowserExtensionManifest);
+    }
+    if matches!(
+        file_name.as_str(),
+        "package-lock.json" | "npm-shrinkwrap.json" | "composer.lock"
+    ) {
+        return Some(StructuredDataKind::JsonLockfile);
+    }
+    if matches!(
+        file_name.as_str(),
+        "package.json"
+            | "composer.json"
+            | "deno.json"
+            | "deno.jsonc"
+            | "bun.lock"
+            | "package-lock.json"
+            | "npm-shrinkwrap.json"
+    ) {
+        return Some(StructuredDataKind::PackageMetadata);
+    }
+    if file_name.contains("config")
+        || file_name.contains("settings")
+        || matches!(
+            file_name.as_str(),
+            "tsconfig.json"
+                | "jsconfig.json"
+                | "launch.json"
+                | "tasks.json"
+                | ".babelrc"
+                | ".eslintrc"
+                | ".prettierrc"
+        )
+    {
+        return Some(StructuredDataKind::JsonConfig);
+    }
+    if file_name.contains("manifest")
+        || matches!(file_name.as_str(), "appxmanifest.json" | "site.webmanifest")
+    {
+        return Some(StructuredDataKind::ManifestData);
+    }
+    if matches!(
+        file_name.as_str(),
+        "asset-manifest.json" | "metadata.json" | "modinfo.json" | "resource.json" | "locale.json"
+    ) {
+        return Some(StructuredDataKind::ResourceConfigData);
+    }
+
+    Some(StructuredDataKind::JsonData)
+}
+
 fn looks_json_like(extension: &str, sniffed_mime: &str, bytes: &[u8]) -> bool {
     matches!(
         extension.to_ascii_lowercase().as_str(),
         "json" | "json5" | "har" | "webmanifest" | "lock"
     ) || sniffed_mime.contains("json")
         || parse_json(bytes).is_some()
+}
+
+fn looks_json_like_metadata(extension: &str, sniffed_mime: &str) -> bool {
+    matches!(
+        extension.to_ascii_lowercase().as_str(),
+        "json" | "json5" | "har" | "webmanifest" | "lock"
+    ) || sniffed_mime.contains("json")
 }
 
 fn parse_json(bytes: &[u8]) -> Option<Value> {
@@ -132,6 +223,33 @@ fn is_package_metadata(file_name: &str, value: &Value) -> bool {
             "lockfileVersion",
         ],
     )
+}
+
+fn is_extension_locale_json(file_name: &str, path_text: &str, value: &Value) -> bool {
+    if !is_extension_locale_json_path(file_name, path_text) {
+        return false;
+    }
+
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    let looks_like_locale_messages = object.values().any(|entry| {
+        entry.as_object().is_some_and(|message| {
+            message.contains_key("message")
+                || message.contains_key("description")
+                || message.contains_key("placeholders")
+        })
+    });
+
+    looks_like_locale_messages
+}
+
+fn is_extension_locale_json_path(file_name: &str, path_text: &str) -> bool {
+    file_name == "messages.json"
+        && path_contains_any(
+            path_text,
+            &["/_locales/", "\\_locales\\", "/locales/", "\\locales\\"],
+        )
 }
 
 fn is_json_lockfile(file_name: &str, value: &Value) -> bool {
@@ -271,5 +389,48 @@ mod tests {
         );
 
         assert_eq!(kind, Some(StructuredDataKind::JsonConfig));
+    }
+
+    #[test]
+    fn detects_extension_locale_json_for_messages_file() {
+        let bytes = br#"{
+            "extension_name": {"message":"Example"},
+            "extension_description": {"message":"Demo"}
+        }"#;
+        let kind = detect(
+            Path::new("/tmp/ext/_locales/cs/messages.json"),
+            "messages.json",
+            "json",
+            "application/json",
+            bytes,
+        );
+
+        assert_eq!(kind, Some(StructuredDataKind::ExtensionLocaleJson));
+    }
+
+    #[test]
+    fn falls_back_to_json_data_for_generic_json() {
+        let bytes = br#"{"hello":"world"}"#;
+        let kind = detect(
+            Path::new("/tmp/data/messages.json"),
+            "messages.json",
+            "json",
+            "application/json",
+            bytes,
+        );
+
+        assert_eq!(kind, Some(StructuredDataKind::JsonData));
+    }
+
+    #[test]
+    fn metadata_only_detection_keeps_json_from_falling_back_to_unknown() {
+        let kind = detect_from_metadata(
+            Path::new("/tmp/data/messages.json"),
+            "messages.json",
+            "json",
+            "application/json",
+        );
+
+        assert_eq!(kind, Some(StructuredDataKind::JsonData));
     }
 }

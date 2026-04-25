@@ -3,6 +3,9 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
+
 pub const APP_DIR_NAME: &str = "ProjectX";
 const ENV_DATA_DIR: &str = "PROJECTX_DATA_DIR";
 const ENV_CONFIG_DIR: &str = "PROJECTX_CONFIG_DIR";
@@ -63,18 +66,6 @@ pub fn protection_backlog_path() -> PathBuf {
     data_root().join("gui_protection_backlog.json")
 }
 
-pub fn update_cache_path() -> PathBuf {
-    config_root().join("update_check_cache.json")
-}
-
-pub fn update_log_path() -> PathBuf {
-    data_root().join("update_events.log")
-}
-
-pub fn update_download_dir() -> PathBuf {
-    data_root().join("updates")
-}
-
 pub fn intelligence_dir() -> PathBuf {
     data_root().join("intelligence")
 }
@@ -128,7 +119,6 @@ pub fn ensure_app_dirs() -> Result<(), String> {
         reports_dir(),
         intelligence_dir(),
         download_monitor_dir(),
-        update_download_dir(),
         cache_dir(),
     ];
 
@@ -231,6 +221,12 @@ fn fallback_root() -> PathBuf {
     env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
         .join(".projectx")
+}
+
+#[cfg(test)]
+pub(crate) fn app_test_env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 #[cfg(test)]

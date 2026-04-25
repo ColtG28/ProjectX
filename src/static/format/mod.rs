@@ -5,6 +5,7 @@ pub mod macho;
 pub mod office;
 pub mod pdf;
 pub mod pe;
+pub mod structured;
 pub mod zip;
 
 use super::context::ScanContext;
@@ -21,6 +22,33 @@ pub fn run(ctx: &mut ScanContext) {
             "format",
             "Detected format kind AppleBundleResource".to_string(),
         );
+        return;
+    }
+
+    if let Some(kind) = structured::detect(
+        &ctx.input_path,
+        &ctx.file_name,
+        &ctx.extension,
+        &ctx.sniffed_mime,
+        &ctx.bytes,
+    ) {
+        let label = kind.label().to_string();
+        ctx.detected_format = Some(label.clone());
+        ctx.push_view(super::types::View::new("format.kind", label.clone()));
+        ctx.log_event("format", format!("Detected format kind {label}"));
+        return;
+    }
+
+    if let Some(kind) = structured::detect_from_metadata(
+        &ctx.input_path,
+        &ctx.file_name,
+        &ctx.extension,
+        &ctx.sniffed_mime,
+    ) {
+        let label = kind.label().to_string();
+        ctx.detected_format = Some(label.clone());
+        ctx.push_view(super::types::View::new("format.kind", label.clone()));
+        ctx.log_event("format", format!("Detected format kind {label}"));
         return;
     }
 
@@ -157,4 +185,86 @@ fn apple_bundle_resource_format(path: &std::path::Path, file_name: &str, extensi
                 file_name.as_str(),
                 "coderesources" | ".localized" | "assets"
             ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::r#static::config::ScanConfig;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_test_root(label: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "projectx_format_test_{}_{}_{}",
+            label,
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = fs::remove_dir_all(&root);
+        root
+    }
+
+    #[test]
+    fn run_labels_generic_json_as_json_data() {
+        let root = unique_test_root("json_data");
+        fs::create_dir_all(&root).expect("root");
+        let sample = root.join("messages.json");
+        fs::write(&sample, br#"{"hello":"world"}"#).expect("sample");
+
+        let mut ctx = ScanContext::from_path(&sample, ScanConfig::default()).expect("context");
+        run(&mut ctx);
+
+        assert_eq!(ctx.detected_format.as_deref(), Some("JSON Data"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn run_labels_extension_locale_json_clearly() {
+        let root = unique_test_root("locale_json");
+        let locale_dir = root.join("ext").join("_locales").join("cs");
+        fs::create_dir_all(&locale_dir).expect("locale dir");
+        let sample = locale_dir.join("messages.json");
+        fs::write(
+            &sample,
+            br#"{
+                "extension_name":{"message":"Example"},
+                "extension_description":{"message":"Demo"}
+            }"#,
+        )
+        .expect("sample");
+
+        let mut ctx = ScanContext::from_path(&sample, ScanConfig::default()).expect("context");
+        run(&mut ctx);
+
+        assert_eq!(
+            ctx.detected_format.as_deref(),
+            Some("Extension Locale JSON")
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn run_keeps_json_label_for_decoded_like_content() {
+        let root = unique_test_root("json_signal");
+        fs::create_dir_all(&root).expect("root");
+        let sample = root.join("payload.json");
+        fs::write(
+            &sample,
+            br#"{"script":"javascript:alert('demo')","encoded":"ZXZhbChhbGVydCgxKSk="}"#,
+        )
+        .expect("sample");
+
+        let mut ctx = ScanContext::from_path(&sample, ScanConfig::default()).expect("context");
+        run(&mut ctx);
+
+        assert_eq!(ctx.detected_format.as_deref(), Some("JSON Data"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
 }

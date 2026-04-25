@@ -24,7 +24,8 @@ impl MyApp {
                     .collect::<Vec<_>>();
                 let metrics = summarize_record_refs(&filtered_records);
                 ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = theme::badge_spacing(self.ui_metrics.scale_factor);
+                    ui.spacing_mut().item_spacing =
+                        theme::badge_spacing(self.ui_metrics.scale_factor);
                     stat_chip(
                         ui,
                         "Visible results",
@@ -67,7 +68,8 @@ impl MyApp {
                     );
                     ui.add_space(theme::card_row_gap(self.ui_metrics.scale_factor));
                     ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing = theme::badge_spacing(self.ui_metrics.scale_factor);
+                        ui.spacing_mut().item_spacing =
+                            theme::badge_spacing(self.ui_metrics.scale_factor);
                         for (label, filter) in [
                             ("All", crate::gui::state::ReportVerdictFilter::All),
                             ("Clean", crate::gui::state::ReportVerdictFilter::Clean),
@@ -108,7 +110,8 @@ impl MyApp {
                             }))
                             .clicked()
                         {
-                            self.report_verdict_filter = crate::gui::state::ReportVerdictFilter::All;
+                            self.report_verdict_filter =
+                                crate::gui::state::ReportVerdictFilter::All;
                             self.report_storage_filter =
                                 crate::gui::state::ReportStorageFilter::InQuarantine;
                         }
@@ -123,7 +126,6 @@ impl MyApp {
                     &indices,
                     "No matching results",
                     "Try clearing filters or run a new scan to populate the results explorer.",
-                    "Results focuses on the current working set. Use Operations for long-running audit history and protection events.",
                 );
             });
     }

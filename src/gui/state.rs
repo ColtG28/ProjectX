@@ -12,7 +12,6 @@ pub use crate::r#static::report::{
     ReportSummary as ScanRecord, SummaryVerdict as Verdict,
 };
 pub use crate::r#static::{PreservedPermissions, QueueStage};
-pub use crate::update::{ReleaseInfo as AvailableUpdate, UpdateStatusKind};
 
 pub const SCAN_RECORD_LIMIT: usize = 500;
 pub const TIMING_SAMPLE_LIMIT: usize = 2048;
@@ -555,16 +554,8 @@ pub struct SettingsState {
     pub enable_external_intelligence: bool,
     pub enable_real_time_protection: bool,
     pub enable_download_monitoring: bool,
-    #[serde(default = "default_enable_automatic_updates")]
-    pub enable_automatic_updates: bool,
-    #[serde(default)]
-    pub enable_automatic_update_downloads: bool,
     #[serde(default)]
     pub watched_paths: Vec<WatchedPathConfig>,
-}
-
-fn default_enable_automatic_updates() -> bool {
-    true
 }
 
 impl Default for SettingsState {
@@ -587,146 +578,7 @@ impl Default for SettingsState {
             enable_external_intelligence: false,
             enable_real_time_protection: false,
             enable_download_monitoring: false,
-            enable_automatic_updates: true,
-            enable_automatic_update_downloads: false,
             watched_paths: Vec::new(),
-        }
-    }
-}
-
-#[cfg(test)]
-mod settings_tests {
-    use super::SettingsState;
-
-    #[test]
-    fn automatic_update_downloads_are_opt_in() {
-        let settings = SettingsState::default();
-        assert!(settings.enable_automatic_updates);
-        assert!(!settings.enable_automatic_update_downloads);
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct UpdateCheckState {
-    pub checking: bool,
-    pub current_version: String,
-    pub status: String,
-    pub status_kind: UpdateStatusKind,
-    pub last_checked_epoch: u64,
-    pub last_successful_check_epoch: u64,
-    pub latest_release: Option<AvailableUpdate>,
-    pub available_update: Option<AvailableUpdate>,
-    pub last_error: Option<String>,
-    pub repo_label: String,
-    pub release_page_url: String,
-    pub used_cached_release: bool,
-    pub verification_status: Option<String>,
-    pub verification_expected_sha256: Option<String>,
-    pub verification_actual_sha256: Option<String>,
-    pub last_verification_epoch: u64,
-    pub last_automatic_check_epoch: u64,
-    pub next_scheduled_check_epoch: u64,
-    pub download_status: String,
-    pub download_path: Option<String>,
-    pub downloaded_version: Option<String>,
-    pub download_in_progress: bool,
-    pub download_progress_fraction: Option<f32>,
-    pub last_download_epoch: u64,
-    pub install_status: String,
-    pub last_install_attempt_epoch: u64,
-    pub install_ready: bool,
-    pub install_guidance: String,
-    pub restart_required_after_install: bool,
-    pub cache_validation_note: Option<String>,
-    pub test_mode_active: bool,
-    pub test_mode_scenario: Option<String>,
-    pub debug_snapshot: Option<crate::update::UpdateStateSnapshot>,
-}
-
-impl Default for UpdateCheckState {
-    fn default() -> Self {
-        let cached = crate::update::load_cached_update_ui_state();
-        Self {
-            checking: false,
-            current_version: env!("CARGO_PKG_VERSION").to_string(),
-            status: "Update checks have not run yet.".to_string(),
-            status_kind: UpdateStatusKind::Unknown,
-            last_checked_epoch: 0,
-            last_successful_check_epoch: 0,
-            latest_release: None,
-            available_update: None,
-            last_error: None,
-            repo_label: format!(
-                "{}/{}",
-                crate::update::github_release_config().owner,
-                crate::update::github_release_config().repo
-            ),
-            release_page_url: crate::update::releases_page_url(
-                &crate::update::github_release_config().owner,
-                &crate::update::github_release_config().repo,
-            ),
-            used_cached_release: false,
-            verification_status: cached
-                .as_ref()
-                .and_then(|state| state.last_verification_status.clone()),
-            verification_expected_sha256: cached
-                .as_ref()
-                .and_then(|state| state.last_verification_expected_sha256.clone()),
-            verification_actual_sha256: cached
-                .as_ref()
-                .and_then(|state| state.last_verification_actual_sha256.clone()),
-            last_verification_epoch: cached
-                .as_ref()
-                .map(|state| state.last_verification_epoch)
-                .unwrap_or(0),
-            last_automatic_check_epoch: cached
-                .as_ref()
-                .map(|state| state.last_automatic_check_epoch)
-                .unwrap_or(0),
-            next_scheduled_check_epoch: 0,
-            download_status: cached
-                .as_ref()
-                .and_then(|state| state.last_download_status.clone())
-                .unwrap_or_else(|| "No update download has started yet.".to_string()),
-            download_path: cached
-                .as_ref()
-                .and_then(|state| state.last_downloaded_asset_path.clone()),
-            downloaded_version: cached
-                .as_ref()
-                .and_then(|state| state.last_downloaded_version.clone()),
-            download_in_progress: false,
-            download_progress_fraction: None,
-            last_download_epoch: cached
-                .as_ref()
-                .map(|state| state.last_download_epoch)
-                .unwrap_or(0),
-            install_status: cached
-                .as_ref()
-                .and_then(|state| state.last_install_status.clone())
-                .unwrap_or_else(|| "No install attempt has started yet.".to_string()),
-            last_install_attempt_epoch: cached
-                .as_ref()
-                .map(|state| state.last_install_attempt_epoch)
-                .unwrap_or(0),
-            install_ready: false,
-            install_guidance: String::new(),
-            restart_required_after_install: cached
-                .as_ref()
-                .map(|state| state.restart_required_after_install)
-                .unwrap_or(false),
-            cache_validation_note: cached
-                .as_ref()
-                .and_then(|state| state.cache_validation_note.clone()),
-            test_mode_active: crate::update::update_test_config().enabled,
-            test_mode_scenario: crate::update::update_test_config().enabled.then(|| {
-                crate::update::update_test_config()
-                    .scenario
-                    .label()
-                    .to_string()
-            }),
-            debug_snapshot: cached
-                .as_ref()
-                .and_then(|state| state.last_snapshot.clone()),
         }
     }
 }
@@ -743,7 +595,6 @@ pub enum RecordAction {
 pub enum FeedbackScope {
     Scan,
     FileAction,
-    Updater,
     Settings,
     Protection,
 }
@@ -767,7 +618,6 @@ pub struct UiFeedback {
 pub enum SettingsPanel {
     General,
     Protection,
-    Updates,
     Advanced,
 }
 
@@ -776,7 +626,6 @@ impl SettingsPanel {
         match self {
             Self::General => "General / Scope",
             Self::Protection => "Protection",
-            Self::Updates => "Updates",
             Self::Advanced => "Advanced",
         }
     }
@@ -1083,7 +932,6 @@ pub struct MyApp {
     pub pending_confirmation: Option<PendingConfirmation>,
     pub scan_feedback: Option<UiFeedback>,
     pub file_feedback: Option<UiFeedback>,
-    pub updater_feedback: Option<UiFeedback>,
     pub settings_feedback: Option<UiFeedback>,
     pub protection_feedback: Option<UiFeedback>,
     pub base_pixels_per_point: Option<f32>,
@@ -1099,8 +947,6 @@ pub struct MyApp {
     pub last_download_poll: Instant,
     pub download_watch: HashMap<String, DownloadWatchEntry>,
     pub download_status: String,
-    pub last_update_poll: Instant,
-    pub update_state: std::sync::Arc<std::sync::Mutex<UpdateCheckState>>,
     pub notifications: VecDeque<NotificationEntry>,
     pub ui_context: Option<eframe::egui::Context>,
 }

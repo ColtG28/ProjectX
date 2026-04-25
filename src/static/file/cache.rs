@@ -36,7 +36,7 @@ pub struct CachedScan {
 pub fn cache_key(sha256: &str, config: &ScanConfig, rules_version: &str) -> String {
     let config_json = serde_json::to_string(config).unwrap_or_default();
     crate::r#static::file::hash::sha256_hex(
-        format!("projectx-static-v16|{sha256}|{rules_version}|{config_json}").as_bytes(),
+        format!("projectx-static-v17|{sha256}|{rules_version}|{config_json}").as_bytes(),
     )
 }
 

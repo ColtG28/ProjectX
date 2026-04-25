@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
@@ -11,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use super::config::ScanConfig;
 use super::context::ScanContext;
 use super::file::{bundle, cache, discovery};
+use super::format::structured;
 use super::heuristics;
 use super::report;
 use super::report::{NormalizedSeverity, ReportReason, SummaryVerdict};
@@ -123,6 +125,13 @@ fn run_pipeline_with_progress<F>(
 where
     F: FnMut(ScanProgress),
 {
+    if bundle::is_app_bundle(Path::new(path)) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "macOS app bundle directories must be resolved to a readable executable before raw file analysis",
+        ));
+    }
+
     let mut ctx = ScanContext::from_path(path, config.unwrap_or_default())?;
     if ctx.input_truncated {
         ctx.log_event(
@@ -359,7 +368,7 @@ pub fn stage_path_for_scan(path: &Path) -> Result<StagedScanPath, String> {
         analysis_path,
         preserved_permissions,
         queue_stage: QueueStage::QuarantinedWaiting,
-        note: "File was moved into ProjectX quarantine immediately when it entered the queue. Scanning will operate on the quarantined copy.".to_string(),
+        note: "File was temporarily staged in ProjectX quarantine for safe analysis. Scanning will operate on the staged copy.".to_string(),
     })
 }
 
@@ -395,6 +404,15 @@ pub fn scan_staged_path_with_progress<F>(
 where
     F: FnMut(ScanProgress),
 {
+    if bundle::is_app_bundle(source) || bundle::is_app_bundle(staged_path) {
+        let bundle_path = if bundle::is_app_bundle(source) {
+            source
+        } else {
+            staged_path
+        };
+        return scan_app_bundle_with_progress(bundle_path, config, progress);
+    }
+
     progress(ScanProgress {
         fraction: 0.0,
         stage: "Preparing scan",
@@ -428,6 +446,8 @@ where
             return Err(format!("Static analysis failed: {}", error));
         }
     };
+
+    refine_detected_format_for_source(&mut ctx, source);
 
     let findings = ctx
         .findings
@@ -937,17 +957,67 @@ fn tighten_permissions(path: &Path) -> Result<(), std::io::Error> {
 }
 
 fn unique_quarantine_path(file_name: &std::ffi::OsStr) -> PathBuf {
+    static QUARANTINE_PATH_COUNTER: AtomicU64 = AtomicU64::new(0);
+
     let name = file_name.to_string_lossy();
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or(0);
+    let pid = std::process::id();
 
-    crate::app_paths::quarantine_dir().join(format!("{timestamp}_{name}"))
+    loop {
+        let counter = QUARANTINE_PATH_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let candidate =
+            crate::app_paths::quarantine_dir().join(format!("{timestamp}_{pid}_{counter}_{name}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
 }
 
 fn is_in_quarantine(path: &Path) -> bool {
     path.starts_with(crate::app_paths::quarantine_dir())
+}
+
+fn refine_detected_format_for_source(ctx: &mut ScanContext, source: &Path) {
+    let source_file_name = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(&ctx.file_name);
+    let source_extension = source
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or(&ctx.extension);
+    let candidate = structured::detect(
+        source,
+        source_file_name,
+        source_extension,
+        &ctx.sniffed_mime,
+        &ctx.bytes,
+    )
+    .or_else(|| {
+        structured::detect_from_metadata(
+            source,
+            source_file_name,
+            source_extension,
+            &ctx.sniffed_mime,
+        )
+    });
+
+    let Some(candidate) = candidate else {
+        return;
+    };
+    let candidate_label = candidate.label();
+    let should_replace = match ctx.detected_format.as_deref().map(str::trim) {
+        None | Some("") | Some("Unknown") => true,
+        Some("JSON Data") if candidate_label != "JSON Data" => true,
+        _ => false,
+    };
+
+    if should_replace {
+        ctx.detected_format = Some(candidate_label.to_string());
+    }
 }
 
 fn pipeline_step_count(config: &ScanConfig) -> usize {
@@ -1033,15 +1103,12 @@ fn structured_reason_from_finding(finding: &Finding) -> ReportReason {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
-
-    fn app_path_test_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
+    use std::panic::{self, AssertUnwindSafe};
 
     fn with_test_app_dirs<T>(root: &Path, run: impl FnOnce() -> T) -> T {
-        let _guard = app_path_test_lock().lock().expect("lock");
+        let _guard = crate::app_paths::app_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let previous_data = std::env::var("PROJECTX_DATA_DIR").ok();
         let previous_config = std::env::var("PROJECTX_CONFIG_DIR").ok();
         let previous_cache = std::env::var("PROJECTX_CACHE_DIR").ok();
@@ -1050,7 +1117,7 @@ mod tests {
         std::env::set_var("PROJECTX_CONFIG_DIR", root.join("config"));
         std::env::set_var("PROJECTX_CACHE_DIR", root.join("cache"));
 
-        let result = run();
+        let result = panic::catch_unwind(AssertUnwindSafe(run));
 
         if let Some(value) = previous_data {
             std::env::set_var("PROJECTX_DATA_DIR", value);
@@ -1068,7 +1135,10 @@ mod tests {
             std::env::remove_var("PROJECTX_CACHE_DIR");
         }
 
-        result
+        match result {
+            Ok(result) => result,
+            Err(panic) => panic::resume_unwind(panic),
+        }
     }
 
     #[test]
@@ -1138,6 +1208,240 @@ mod tests {
             assert_eq!(staged.original_path, bundle);
             assert_eq!(staged.analysis_path, staged.original_path);
         });
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn stage_path_for_scan_reuses_existing_quarantined_file() {
+        let root = unique_test_root("quarantine_reuse");
+
+        with_test_app_dirs(&root, || {
+            let quarantine_dir = crate::app_paths::quarantine_dir();
+            std::fs::create_dir_all(&quarantine_dir).expect("quarantine dir");
+            let quarantined = quarantine_dir.join("existing.bin");
+            std::fs::write(&quarantined, b"hello").expect("quarantined file");
+
+            let staged = stage_path_for_scan(&quarantined).expect("staged");
+
+            assert_eq!(staged.queue_stage, QueueStage::QuarantinedWaiting);
+            assert_eq!(staged.original_path, quarantined);
+            assert_eq!(staged.analysis_path, staged.original_path);
+            assert!(staged.analysis_path.is_file());
+            assert!(staged
+                .note
+                .contains("already in ProjectX quarantine before it entered the queue"));
+        });
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn stage_path_for_scan_uses_distinct_quarantine_paths_for_same_file_name() {
+        let root = unique_test_root("same_name_stage");
+        let first = root
+            .join("ext")
+            .join("_locales")
+            .join("ar")
+            .join("messages.json");
+        let second = root
+            .join("ext")
+            .join("_locales")
+            .join("pa")
+            .join("messages.json");
+        std::fs::create_dir_all(first.parent().expect("first parent")).expect("first parent");
+        std::fs::create_dir_all(second.parent().expect("second parent")).expect("second parent");
+        std::fs::write(&first, br#"{"hello":"ar"}"#).expect("first");
+        std::fs::write(&second, br#"{"hello":"pa"}"#).expect("second");
+
+        with_test_app_dirs(&root, || {
+            let first_staged = stage_path_for_scan(&first).expect("first staged");
+            let second_staged = stage_path_for_scan(&second).expect("second staged");
+
+            assert_ne!(first_staged.analysis_path, second_staged.analysis_path);
+            assert!(first_staged.analysis_path.is_file());
+            assert!(second_staged.analysis_path.is_file());
+
+            std::fs::remove_file(first_staged.analysis_path).ok();
+            std::fs::remove_file(second_staged.analysis_path).ok();
+        });
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn staged_app_bundle_scan_uses_resolved_executable_for_system_style_layout() {
+        let root = unique_test_root("system_bundle_stage");
+        let bundle = create_mock_bundle(&root.join("System").join("Applications"), "Books");
+
+        with_test_app_dirs(&root, || {
+            let outcome = scan_staged_path_with_progress(
+                &bundle,
+                &bundle,
+                None,
+                Some(ScanConfig::default()),
+                |_| {},
+            )
+            .expect("bundle scan outcome");
+
+            assert_eq!(outcome.original_path, bundle);
+            assert_eq!(outcome.quarantine_path, outcome.original_path);
+            assert_eq!(outcome.file_name, "Books.app");
+            assert_eq!(outcome.extension, "app");
+            assert!(outcome.file_size_bytes > 0);
+            assert!(outcome.summary.contains("app bundle"));
+        });
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn staged_json_scan_keeps_original_locale_context_for_format_label() {
+        let root = unique_test_root("locale_json_stage");
+        let source = root
+            .join("ext")
+            .join("_locales")
+            .join("cs")
+            .join("messages.json");
+        std::fs::create_dir_all(source.parent().expect("parent")).expect("parent dir");
+        std::fs::write(
+            &source,
+            br#"{
+                "extension_name":{"message":"Example"},
+                "decoded":{"message":"javascript:alert('demo')"}
+            }"#,
+        )
+        .expect("json");
+
+        with_test_app_dirs(&root, || {
+            let staged = stage_path_for_scan(&source).expect("staged");
+            let outcome = scan_staged_path_with_progress(
+                &staged.original_path,
+                &staged.analysis_path,
+                staged.preserved_permissions.as_ref(),
+                Some(ScanConfig::default()),
+                |_| {},
+            )
+            .expect("json scan outcome");
+
+            assert_eq!(
+                outcome.detected_format.as_deref(),
+                Some("Extension Locale JSON")
+            );
+            assert_eq!(outcome.sniffed_mime, "application/json");
+        });
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn same_named_locale_json_files_do_not_collide_during_scan() {
+        let root = unique_test_root("same_name_scan");
+        let first = root
+            .join("ext")
+            .join("_locales")
+            .join("ar")
+            .join("messages.json");
+        let second = root
+            .join("ext")
+            .join("_locales")
+            .join("pa")
+            .join("messages.json");
+        std::fs::create_dir_all(first.parent().expect("first parent")).expect("first parent");
+        std::fs::create_dir_all(second.parent().expect("second parent")).expect("second parent");
+        std::fs::write(
+            &first,
+            br#"{"extension_name":{"message":"Arabic"},"decoded":{"message":"javascript:1"}}"#,
+        )
+        .expect("first");
+        std::fs::write(
+            &second,
+            br#"{"extension_name":{"message":"Punjabi"},"decoded":{"message":"javascript:1"}}"#,
+        )
+        .expect("second");
+
+        with_test_app_dirs(&root, || {
+            let first_staged = stage_path_for_scan(&first).expect("first staged");
+            let second_staged = stage_path_for_scan(&second).expect("second staged");
+
+            let first_outcome = scan_staged_path_with_progress(
+                &first_staged.original_path,
+                &first_staged.analysis_path,
+                first_staged.preserved_permissions.as_ref(),
+                Some(ScanConfig::default()),
+                |_| {},
+            )
+            .expect("first outcome");
+            let second_outcome = scan_staged_path_with_progress(
+                &second_staged.original_path,
+                &second_staged.analysis_path,
+                second_staged.preserved_permissions.as_ref(),
+                Some(ScanConfig::default()),
+                |_| {},
+            )
+            .expect("second outcome");
+
+            assert_eq!(
+                first_outcome.detected_format.as_deref(),
+                Some("Extension Locale JSON")
+            );
+            assert_eq!(
+                second_outcome.detected_format.as_deref(),
+                Some("Extension Locale JSON")
+            );
+            assert!(first_outcome.verdict != SummaryVerdict::Error);
+            assert!(second_outcome.verdict != SummaryVerdict::Error);
+        });
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn unresolved_staged_app_bundle_returns_bundle_specific_error() {
+        let root = unique_test_root("bundle_error");
+        let bundle = root.join("System").join("Applications").join("Books.app");
+        let contents = bundle.join("Contents");
+        std::fs::create_dir_all(&contents).expect("contents");
+        std::fs::write(
+            contents.join("Info.plist"),
+            r#"<plist><dict><key>CFBundleExecutable</key><string>Books</string></dict></plist>"#,
+        )
+        .expect("plist");
+
+        with_test_app_dirs(&root, || {
+            let error = scan_staged_path_with_progress(
+                &bundle,
+                &bundle,
+                None,
+                Some(ScanConfig::default()),
+                |_| {},
+            )
+            .expect_err("bundle scan should fail");
+
+            assert!(error.contains("app bundle"));
+            assert!(error.contains("readable app bundle executable"));
+            assert!(!error.contains("Is a directory"));
+            assert!(!error.contains("os error 21"));
+        });
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn raw_pipeline_rejects_app_bundle_directories() {
+        let root = unique_test_root("bundle_pipeline_guard");
+        let bundle = create_mock_bundle(&root, "Books");
+
+        let error = run_pipeline(
+            bundle.to_str().expect("utf8 bundle"),
+            Some(ScanConfig::default()),
+        )
+        .expect_err("bundle directories should not reach raw file analysis");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error
+            .to_string()
+            .contains("must be resolved to a readable executable"));
 
         std::fs::remove_dir_all(root).ok();
     }

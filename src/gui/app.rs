@@ -15,38 +15,10 @@ use notify::{
 use rfd::FileDialog;
 
 use super::components::empty_state::empty_state;
-use super::components::result_detail::render_result_detail;
+use super::components::result_detail::{copy_result_detail_text, render_result_detail};
 use super::components::result_list::{render_result_card, render_result_header};
 use super::state::*;
 use super::theme;
-
-const AUTO_UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
-const AUTO_UPDATE_CHECK_INTERVAL_SECS: u64 = 6 * 60 * 60;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) struct DiagnosticCount {
-    pub label: String,
-    pub count: usize,
-}
-
-#[derive(Debug, Clone, Default)]
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) struct SuspiciousDiagnosticsSummary {
-    pub suspicious_total: usize,
-    pub retained_total: usize,
-    pub by_extension: Vec<DiagnosticCount>,
-    pub by_format: Vec<DiagnosticCount>,
-    pub by_severity: Vec<DiagnosticCount>,
-    pub by_reason_name: Vec<DiagnosticCount>,
-    pub by_reason_source: Vec<DiagnosticCount>,
-    pub by_workflow_origin: Vec<DiagnosticCount>,
-    pub by_disposition: Vec<DiagnosticCount>,
-    pub by_reason_combination: Vec<DiagnosticCount>,
-    pub weak_reason_combinations: Vec<DiagnosticCount>,
-    pub retained_by_extension: Vec<DiagnosticCount>,
-    pub retained_by_reason_name: Vec<DiagnosticCount>,
-}
 pub fn gui() -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -99,7 +71,6 @@ impl MyApp {
             pending_confirmation: None,
             scan_feedback: None,
             file_feedback: None,
-            updater_feedback: None,
             settings_feedback: None,
             protection_feedback: None,
             base_pixels_per_point: None,
@@ -115,13 +86,10 @@ impl MyApp {
             last_download_poll: Instant::now(),
             download_watch: HashMap::new(),
             download_status: String::new(),
-            last_update_poll: Instant::now() - AUTO_UPDATE_CHECK_INTERVAL,
-            update_state: Arc::new(Mutex::new(UpdateCheckState::default())),
             notifications: VecDeque::new(),
             ui_context: None,
         };
         app.refresh_protection_summary();
-        app.refresh_update_install_state();
         app
     }
 
@@ -135,7 +103,6 @@ impl MyApp {
         let slot = match scope {
             FeedbackScope::Scan => &mut self.scan_feedback,
             FeedbackScope::FileAction => &mut self.file_feedback,
-            FeedbackScope::Updater => &mut self.updater_feedback,
             FeedbackScope::Settings => &mut self.settings_feedback,
             FeedbackScope::Protection => &mut self.protection_feedback,
         };
@@ -162,7 +129,6 @@ impl MyApp {
         let slot = match scope {
             FeedbackScope::Scan => &mut self.scan_feedback,
             FeedbackScope::FileAction => &mut self.file_feedback,
-            FeedbackScope::Updater => &mut self.updater_feedback,
             FeedbackScope::Settings => &mut self.settings_feedback,
             FeedbackScope::Protection => &mut self.protection_feedback,
         };
@@ -173,7 +139,6 @@ impl MyApp {
         match scope {
             FeedbackScope::Scan => self.scan_feedback.as_ref(),
             FeedbackScope::FileAction => self.file_feedback.as_ref(),
-            FeedbackScope::Updater => self.updater_feedback.as_ref(),
             FeedbackScope::Settings => self.settings_feedback.as_ref(),
             FeedbackScope::Protection => self.protection_feedback.as_ref(),
         }
@@ -251,70 +216,6 @@ impl MyApp {
                 ui.add_space(4.0);
             }
         });
-    }
-
-    pub(crate) fn latest_scan_epoch(&self) -> Option<u64> {
-        self.records
-            .iter()
-            .map(|record| record.scanned_at_epoch)
-            .max()
-    }
-
-    pub(crate) fn protection_status_label(&self) -> &'static str {
-        if !self.settings.enable_real_time_protection {
-            "Protection disabled"
-        } else if self.protection_summary.backlog_count > 0 {
-            "Protection active with backlog"
-        } else if self.protection_summary.monitor_state == "Active" {
-            "Protection active"
-        } else {
-            "Protection idle"
-        }
-    }
-
-    pub(crate) fn refresh_update_install_state(&mut self) {
-        if let Ok(mut state) = self.update_state.lock() {
-            let plan = build_guided_install_plan(
-                state.latest_release.as_ref(),
-                state.download_path.as_deref(),
-                state.verification_status.as_deref(),
-            );
-            state.install_ready = plan.ready;
-            state.install_guidance = plan.instructions;
-            Self::sync_update_snapshot_locked(&mut state);
-        }
-    }
-
-    pub(crate) fn sync_update_snapshot_locked(state: &mut UpdateCheckState) {
-        state.debug_snapshot = Some(crate::update::UpdateStateSnapshot {
-            current_version: state.current_version.clone(),
-            latest_version: state
-                .latest_release
-                .as_ref()
-                .map(|release| release.version.clone()),
-            selected_release_tag: state
-                .latest_release
-                .as_ref()
-                .map(|release| release.tag_name.clone()),
-            selected_asset_name: state
-                .latest_release
-                .as_ref()
-                .map(|release| release.asset_name.clone()),
-            status_kind: state.status_kind,
-            status_label: state.status.clone(),
-            download_status: Some(state.download_status.clone()),
-            verification_status: state.verification_status.clone(),
-            install_status: Some(state.install_status.clone()),
-            install_ready: state.install_ready,
-            last_error: state.last_error.clone(),
-            last_successful_check_epoch: state.last_successful_check_epoch,
-            downloaded_path: state.download_path.clone(),
-            test_mode_active: state.test_mode_active,
-            test_mode_scenario: state.test_mode_scenario.clone(),
-        });
-        if let Some(snapshot) = state.debug_snapshot.clone() {
-            let _ = crate::update::persist_update_state_snapshot(snapshot);
-        }
     }
 
     pub fn is_booting(&self) -> bool {
@@ -903,7 +804,7 @@ impl MyApp {
             });
     }
 
-    pub(crate) fn render_record_detail(&mut self, ui: &mut egui::Ui) {
+    fn selected_record_detail(&mut self) -> Option<(ScanRecord, Option<ProtectionEvent>)> {
         self.hydrate_focused_record_from_report();
         let selected = self
             .focused_report_id
@@ -912,32 +813,58 @@ impl MyApp {
             .cloned()
             .or_else(|| self.records.last().cloned());
 
-        let Some(record) = selected else {
-            empty_state(
-                ui,
-                self.ui_metrics.scale_factor,
-                "No result selected",
-                "Pick Inspect on any result row to keep it pinned here.",
-            );
-            return;
-        };
+        let record = selected?;
+        let protection_event = self
+            .protection_events
+            .iter()
+            .rev()
+            .find(|event| {
+                event.scan_id.as_deref() == Some(record.record_id().as_str())
+                    || (!event.path.is_empty()
+                        && event.path == record.path
+                        && event.workflow_source
+                            == record.workflow_origin.clone().unwrap_or_default())
+            })
+            .cloned();
 
-        let protection_event = self.protection_events.iter().rev().find(|event| {
-            event.scan_id.as_deref() == Some(record.record_id().as_str())
-                || (!event.path.is_empty()
-                    && event.path == record.path
-                    && event.workflow_source == record.workflow_origin.clone().unwrap_or_default())
-        });
+        Some((record, protection_event))
+    }
 
-        render_result_detail(ui, self.ui_metrics.scale_factor, &record, protection_event);
+    fn render_record_detail_contents(
+        &self,
+        ui: &mut egui::Ui,
+        record: &ScanRecord,
+        protection_event: Option<&ProtectionEvent>,
+    ) {
+        render_result_detail(ui, self.ui_metrics.scale_factor, record, protection_event);
     }
 
     pub(crate) fn render_report_detail_page(&mut self, ui: &mut egui::Ui) {
+        let detail = self.selected_record_detail();
         ui.horizontal(|ui| {
             ui.heading("Detailed Report");
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.button(RichText::new("X").strong()).clicked() {
                     self.current_page = self.detail_return_page;
+                }
+                if ui
+                    .add_enabled(
+                        detail.is_some(),
+                        egui::Button::new(RichText::new("Copy").strong()),
+                    )
+                    .clicked()
+                {
+                    if let Some((record, protection_event)) = detail.as_ref() {
+                        ui.output_mut(|output| {
+                            output.copied_text =
+                                copy_result_detail_text(record, protection_event.as_ref())
+                        });
+                        self.set_feedback(
+                            FeedbackScope::FileAction,
+                            FeedbackSeverity::Success,
+                            "Copied inspect details.",
+                        );
+                    }
                 }
             });
         });
@@ -946,7 +873,18 @@ impl MyApp {
         egui::ScrollArea::vertical()
             .id_source("report_detail_page")
             .auto_shrink([false, false])
-            .show(ui, |ui| self.render_record_detail(ui));
+            .show(ui, |ui| {
+                if let Some((record, protection_event)) = detail.as_ref() {
+                    self.render_record_detail_contents(ui, record, protection_event.as_ref());
+                } else {
+                    empty_state(
+                        ui,
+                        self.ui_metrics.scale_factor,
+                        "No result selected",
+                        "Pick Inspect on any result row to keep it pinned here.",
+                    );
+                }
+            });
     }
 
     fn hydrate_focused_record_from_report(&mut self) {
@@ -1008,7 +946,7 @@ impl MyApp {
             .filter(|&index| {
                 let record = &self.records[index];
                 record_matches_query(record, query)
-                    && self.report_verdict_filter.matches(record.verdict)
+                    && report_matches_verdict_filter(record, self.report_verdict_filter)
                     && self
                         .report_storage_filter
                         .matches(record.resolved_storage_state())
@@ -1037,158 +975,6 @@ impl MyApp {
                 .sort_by_key(|&index| self.records[index].display_name().to_ascii_lowercase()),
         }
 
-        indices.into_iter().take(limit).collect()
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn suspicious_diagnostics_summary(&self) -> SuspiciousDiagnosticsSummary {
-        let mut summary = SuspiciousDiagnosticsSummary::default();
-        let mut by_extension = HashMap::new();
-        let mut by_format = HashMap::new();
-        let mut by_severity = HashMap::new();
-        let mut by_reason_name = HashMap::new();
-        let mut by_reason_source = HashMap::new();
-        let mut by_workflow_origin = HashMap::new();
-        let mut by_disposition = HashMap::new();
-        let mut by_reason_combination = HashMap::new();
-        let mut weak_reason_combinations = HashMap::new();
-        let mut retained_by_extension = HashMap::new();
-        let mut retained_by_reason_name = HashMap::new();
-
-        for record in self
-            .records
-            .iter()
-            .filter(|record| matches!(record.verdict, Verdict::Suspicious | Verdict::Malicious))
-        {
-            summary.suspicious_total += 1;
-            increment_count(&mut by_extension, suspicious_extension_label(record));
-            increment_count(
-                &mut by_format,
-                record
-                    .detected_format
-                    .clone()
-                    .or_else(|| record.sniffed_mime.clone())
-                    .unwrap_or_else(|| "Unknown".to_string()),
-            );
-            increment_count(&mut by_severity, record.severity.label().to_string());
-            increment_count(
-                &mut by_workflow_origin,
-                record
-                    .workflow_origin
-                    .clone()
-                    .unwrap_or_else(|| "Unknown".to_string()),
-            );
-            increment_count(
-                &mut by_disposition,
-                record.resolved_storage_state().label().to_string(),
-            );
-
-            let reason_combo = record_reason_combination_label(record);
-            increment_count(&mut by_reason_combination, reason_combo.clone());
-            if record
-                .detection_reasons
-                .iter()
-                .all(|reason| reason.weight < 0.7)
-            {
-                increment_count(&mut weak_reason_combinations, reason_combo.clone());
-            }
-            if record.detection_reasons.is_empty() {
-                increment_count(&mut by_reason_name, "No structured reason".to_string());
-            } else {
-                let mut seen_names = HashSet::new();
-                let mut seen_sources = HashSet::new();
-                for reason in &record.detection_reasons {
-                    let name = primary_reason_label(reason);
-                    if seen_names.insert(name.clone()) {
-                        increment_count(&mut by_reason_name, name);
-                    }
-                    let source = if reason.source.is_empty() {
-                        "Unknown".to_string()
-                    } else {
-                        reason.source.clone()
-                    };
-                    if seen_sources.insert(source.clone()) {
-                        increment_count(&mut by_reason_source, source);
-                    }
-                }
-            }
-
-            if record.resolved_storage_state() == RecordStorageState::InQuarantine {
-                summary.retained_total += 1;
-                increment_count(
-                    &mut retained_by_extension,
-                    suspicious_extension_label(record),
-                );
-                if record.detection_reasons.is_empty() {
-                    increment_count(
-                        &mut retained_by_reason_name,
-                        "No structured reason".to_string(),
-                    );
-                } else {
-                    let mut seen_names = HashSet::new();
-                    for reason in &record.detection_reasons {
-                        let name = primary_reason_label(reason);
-                        if seen_names.insert(name.clone()) {
-                            increment_count(&mut retained_by_reason_name, name);
-                        }
-                    }
-                }
-            }
-        }
-
-        summary.by_extension = finalize_diagnostic_counts(by_extension);
-        summary.by_format = finalize_diagnostic_counts(by_format);
-        summary.by_severity = finalize_diagnostic_counts(by_severity);
-        summary.by_reason_name = finalize_diagnostic_counts(by_reason_name);
-        summary.by_reason_source = finalize_diagnostic_counts(by_reason_source);
-        summary.by_workflow_origin = finalize_diagnostic_counts(by_workflow_origin);
-        summary.by_disposition = finalize_diagnostic_counts(by_disposition);
-        summary.by_reason_combination = finalize_diagnostic_counts(by_reason_combination);
-        summary.weak_reason_combinations = finalize_diagnostic_counts(weak_reason_combinations);
-        summary.retained_by_extension = finalize_diagnostic_counts(retained_by_extension);
-        summary.retained_by_reason_name = finalize_diagnostic_counts(retained_by_reason_name);
-        summary
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn filtered_protection_event_indices(&self, limit: usize) -> Vec<usize> {
-        let query = self.protection_event_search.trim().to_ascii_lowercase();
-        let mut indices = (0..self.protection_events.len())
-            .filter(|&index| {
-                let event = &self.protection_events[index];
-                self.protection_kind_filter.matches(&event.kind)
-                    && self.protection_file_filter.matches(event.file_class)
-                    && self.protection_priority_filter.matches(event.priority)
-                    && self
-                        .protection_origin_filter
-                        .matches(&event.workflow_source)
-                    && self
-                        .protection_verdict_filter
-                        .matches(event.verdict.as_deref())
-                    && self
-                        .protection_action_filter
-                        .matches(event.storage_state.as_deref())
-                    && (query.is_empty()
-                        || event.path.to_ascii_lowercase().contains(&query)
-                        || event.note.to_ascii_lowercase().contains(&query)
-                        || event.workflow_source.to_ascii_lowercase().contains(&query)
-                        || event.kind.to_ascii_lowercase().contains(&query)
-                        || event
-                            .verdict
-                            .as_deref()
-                            .unwrap_or_default()
-                            .to_ascii_lowercase()
-                            .contains(&query)
-                        || event
-                            .storage_state
-                            .as_deref()
-                            .unwrap_or_default()
-                            .to_ascii_lowercase()
-                            .contains(&query))
-            })
-            .collect::<Vec<_>>();
-        indices
-            .sort_by_key(|&index| std::cmp::Reverse(self.protection_events[index].timestamp_epoch));
         indices.into_iter().take(limit).collect()
     }
 
@@ -1330,617 +1116,6 @@ impl MyApp {
             format!("Watching {} active download(s).", seen.len())
         };
         Self::request_ui_refresh(self.ui_context.as_ref());
-    }
-
-    fn poll_update_checker(&mut self) {
-        if !self.settings.enable_automatic_updates {
-            if let Ok(mut state) = self.update_state.lock() {
-                state.next_scheduled_check_epoch = 0;
-            }
-            return;
-        }
-
-        if let Ok(mut state) = self.update_state.lock() {
-            let base_epoch = state
-                .last_automatic_check_epoch
-                .max(state.last_checked_epoch);
-            state.next_scheduled_check_epoch = next_update_check_epoch(base_epoch);
-        }
-
-        if self.last_update_poll.elapsed() < AUTO_UPDATE_CHECK_INTERVAL {
-            return;
-        }
-
-        self.start_update_check(false);
-    }
-
-    pub(crate) fn start_update_check(&mut self, manual: bool) {
-        self.last_update_poll = Instant::now();
-        let refresh_ctx = self.ui_context.clone();
-
-        let Ok(mut state) = self.update_state.lock() else {
-            return;
-        };
-        if state.checking {
-            return;
-        }
-        state.checking = true;
-        state.last_error = None;
-        if manual {
-            state.verification_status = None;
-        }
-        state.status = if manual {
-            "Checking for updates...".to_string()
-        } else {
-            "Running automatic update check...".to_string()
-        };
-        state.test_mode_active = crate::update::update_test_config().enabled;
-        state.test_mode_scenario = state.test_mode_active.then(|| {
-            crate::update::update_test_config()
-                .scenario
-                .label()
-                .to_string()
-        });
-        crate::update::log_update_event(
-            "check",
-            if manual { "manual" } else { "automatic" },
-            if manual {
-                "Manual update check started."
-            } else {
-                "Automatic update check started."
-            },
-            None,
-        );
-        drop(state);
-
-        let update_state = Arc::clone(&self.update_state);
-        let auto_download = self.settings.enable_automatic_update_downloads && !manual;
-        thread::spawn(move || {
-            let outcome = crate::update::check_for_updates(now_epoch());
-            let last_checked_epoch = outcome.last_checked_epoch;
-            if let Ok(mut state) = update_state.lock() {
-                state.checking = false;
-                state.current_version = outcome.current_version;
-                state.status = outcome.status_label;
-                state.status_kind = outcome.status_kind;
-                state.last_checked_epoch = last_checked_epoch;
-                state.last_successful_check_epoch = outcome.last_successful_check_epoch;
-                state.latest_release = outcome.latest_release;
-                state.available_update = outcome.available_update;
-                state.last_error = outcome.last_error;
-                state.repo_label = outcome.repo_label;
-                state.release_page_url = outcome.release_page_url;
-                state.used_cached_release = outcome.used_cached_release;
-                if !manual {
-                    state.last_automatic_check_epoch = last_checked_epoch;
-                    state.next_scheduled_check_epoch = next_update_check_epoch(last_checked_epoch);
-                }
-                if let Some(release) = state.latest_release.as_ref() {
-                    state.verification_expected_sha256 = release.expected_sha256.clone();
-                }
-                let plan = build_guided_install_plan(
-                    state.latest_release.as_ref(),
-                    state.download_path.as_deref(),
-                    state.verification_status.as_deref(),
-                );
-                state.install_ready = plan.ready;
-                state.install_guidance = plan.instructions;
-                MyApp::sync_update_snapshot_locked(&mut state);
-            }
-            MyApp::request_ui_refresh(refresh_ctx.as_ref());
-            if !manual {
-                let _ = crate::update::persist_automatic_check_epoch(last_checked_epoch);
-            }
-            if auto_download {
-                maybe_auto_download_update(&update_state, refresh_ctx.clone());
-            }
-        });
-    }
-
-    pub(crate) fn open_available_update(&mut self) {
-        let available_update = self
-            .update_state
-            .lock()
-            .ok()
-            .and_then(|state| state.available_update.clone());
-        let Some(update) = available_update else {
-            self.set_feedback(
-                FeedbackScope::Updater,
-                FeedbackSeverity::Info,
-                "No newer update is available right now.",
-            );
-            return;
-        };
-
-        match open_external_target(&update.asset_url) {
-            Ok(()) => self.set_feedback(
-                FeedbackScope::Updater,
-                FeedbackSeverity::Success,
-                format!("Opened {} for download.", update.asset_name),
-            ),
-            Err(error) => self.set_feedback(
-                FeedbackScope::Updater,
-                FeedbackSeverity::Error,
-                format!("Failed to open update download: {error}"),
-            ),
-        };
-    }
-
-    pub(crate) fn verify_downloaded_update(&mut self) {
-        let latest_release = self
-            .update_state
-            .lock()
-            .ok()
-            .and_then(|state| state.latest_release.clone());
-        let Some(release) = latest_release else {
-            self.set_feedback(
-                FeedbackScope::Updater,
-                FeedbackSeverity::Warning,
-                "No release metadata is available to verify against yet.",
-            );
-            return;
-        };
-        let Some(expected_sha256) = release.expected_sha256.as_deref() else {
-            let message = release.checksum_status.clone();
-            if let Ok(mut state) = self.update_state.lock() {
-                state.verification_status = Some(message.clone());
-            }
-            self.set_feedback(FeedbackScope::Updater, FeedbackSeverity::Warning, message);
-            return;
-        };
-
-        let Some(path) = FileDialog::new()
-            .set_title("Select downloaded update to verify")
-            .pick_file()
-        else {
-            return;
-        };
-
-        let diagnostics =
-            crate::update::verify_downloaded_asset_diagnostics(&path, expected_sha256);
-        let now = now_epoch();
-        let _ = crate::update::persist_verification_result(
-            diagnostics.expected_sha256.as_deref(),
-            diagnostics.actual_sha256.as_deref(),
-            &diagnostics.status,
-            now,
-        );
-        crate::update::log_update_event(
-            "verify",
-            if diagnostics.verified {
-                "matched"
-            } else {
-                "failed"
-            },
-            &diagnostics.status,
-            Some(&format!(
-                "path={} expected={} actual={}",
-                path.display(),
-                diagnostics
-                    .expected_sha256
-                    .as_deref()
-                    .unwrap_or("unavailable"),
-                diagnostics
-                    .actual_sha256
-                    .as_deref()
-                    .unwrap_or("unavailable")
-            )),
-        );
-        match diagnostics.verified {
-            true => {
-                let message = diagnostics.status.clone();
-                let _ = crate::update::persist_download_result(
-                    Some(&release.version),
-                    Some(&release.asset_name),
-                    Some(&path),
-                    &message,
-                    now,
-                );
-                if let Ok(mut state) = self.update_state.lock() {
-                    state.verification_status = Some(message.clone());
-                    state.verification_expected_sha256 = diagnostics.expected_sha256.clone();
-                    state.verification_actual_sha256 = diagnostics.actual_sha256.clone();
-                    state.last_verification_epoch = now;
-                    state.download_path = Some(path.to_string_lossy().to_string());
-                    state.downloaded_version = Some(release.version.clone());
-                    state.download_status = format!("Verified {}.", release.asset_name);
-                    state.last_download_epoch = now;
-                    let plan = build_guided_install_plan(
-                        state.latest_release.as_ref(),
-                        state.download_path.as_deref(),
-                        state.verification_status.as_deref(),
-                    );
-                    state.install_ready = plan.ready;
-                    state.install_guidance = plan.instructions;
-                    MyApp::sync_update_snapshot_locked(&mut state);
-                }
-                self.set_feedback(FeedbackScope::Updater, FeedbackSeverity::Success, message);
-            }
-            false => {
-                let error = diagnostics.status.clone();
-                let _ = crate::update::persist_download_result(
-                    Some(&release.version),
-                    Some(&release.asset_name),
-                    Some(&path),
-                    &error,
-                    now,
-                );
-                if let Ok(mut state) = self.update_state.lock() {
-                    state.verification_status = Some(error.clone());
-                    state.verification_expected_sha256 = diagnostics.expected_sha256.clone();
-                    state.verification_actual_sha256 = diagnostics.actual_sha256.clone();
-                    state.last_verification_epoch = now;
-                    state.download_path = Some(path.to_string_lossy().to_string());
-                    state.downloaded_version = Some(release.version.clone());
-                    state.download_status = error.clone();
-                    state.last_download_epoch = now;
-                    let plan = build_guided_install_plan(
-                        state.latest_release.as_ref(),
-                        state.download_path.as_deref(),
-                        state.verification_status.as_deref(),
-                    );
-                    state.install_ready = plan.ready;
-                    state.install_guidance = plan.instructions;
-                    MyApp::sync_update_snapshot_locked(&mut state);
-                }
-                self.set_feedback(FeedbackScope::Updater, FeedbackSeverity::Error, error);
-            }
-        }
-    }
-
-    pub(crate) fn open_downloaded_update_folder(&mut self) {
-        let path = self
-            .update_state
-            .lock()
-            .ok()
-            .and_then(|state| state.download_path.clone());
-        let Some(path) = path else {
-            self.set_feedback(
-                FeedbackScope::Updater,
-                FeedbackSeverity::Info,
-                "No downloaded update is available yet.",
-            );
-            return;
-        };
-        match reveal_in_file_manager(Path::new(&path)) {
-            Ok(()) => self.set_feedback(
-                FeedbackScope::Updater,
-                FeedbackSeverity::Success,
-                "Opened the downloaded update in the file manager.",
-            ),
-            Err(error) => self.set_feedback(
-                FeedbackScope::Updater,
-                FeedbackSeverity::Error,
-                format!("Failed to reveal the downloaded update: {error}"),
-            ),
-        }
-    }
-
-    pub(crate) fn force_redownload_latest_update(&mut self) {
-        let latest = self
-            .update_state
-            .lock()
-            .ok()
-            .and_then(|state| state.latest_release.clone());
-        let Some(release) = latest else {
-            self.set_feedback(
-                FeedbackScope::Updater,
-                FeedbackSeverity::Warning,
-                "No release metadata is available to re-download yet.",
-            );
-            return;
-        };
-
-        let update_state = Arc::clone(&self.update_state);
-        if let Ok(mut state) = update_state.lock() {
-            state.download_in_progress = true;
-            state.download_progress_fraction = Some(0.0);
-            state.download_status = format!("Force re-downloading {}...", release.asset_name);
-            MyApp::sync_update_snapshot_locked(&mut state);
-        }
-        crate::update::log_update_event(
-            "download",
-            "forced",
-            "Force re-download requested from debug controls.",
-            Some(&release.asset_name),
-        );
-
-        thread::spawn(move || {
-            let result = crate::update::download_release_asset(
-                &release.asset_url,
-                &release.asset_name,
-                |downloaded, total| {
-                    if let Ok(mut state) = update_state.lock() {
-                        state.download_progress_fraction = total.map(|total_bytes| {
-                            if total_bytes == 0 {
-                                0.0
-                            } else {
-                                (downloaded as f32 / total_bytes as f32).clamp(0.0, 1.0)
-                            }
-                        });
-                        state.download_status = format!(
-                            "Force re-downloading {} ({})",
-                            release.asset_name,
-                            format_bytes(downloaded)
-                        );
-                    }
-                },
-            );
-
-            match result {
-                Ok(path) => {
-                    let verification = release.expected_sha256.as_deref().map(|expected| {
-                        crate::update::verify_downloaded_asset_diagnostics(&path, expected)
-                    });
-                    if let Some(diagnostics) = verification.as_ref() {
-                        let _ = crate::update::persist_verification_result(
-                            diagnostics.expected_sha256.as_deref(),
-                            diagnostics.actual_sha256.as_deref(),
-                            &diagnostics.status,
-                            now_epoch(),
-                        );
-                    }
-                    let status = verification
-                        .as_ref()
-                        .map(|diag| diag.status.clone())
-                        .unwrap_or_else(|| format!("Downloaded {}.", release.asset_name));
-                    let _ = crate::update::persist_download_result(
-                        Some(&release.version),
-                        Some(&release.asset_name),
-                        Some(&path),
-                        &status,
-                        now_epoch(),
-                    );
-                    if let Ok(mut state) = update_state.lock() {
-                        state.download_in_progress = false;
-                        state.download_progress_fraction = Some(1.0);
-                        state.download_status = status;
-                        state.download_path = Some(path.to_string_lossy().to_string());
-                        state.downloaded_version = Some(release.version.clone());
-                        state.last_download_epoch = now_epoch();
-                        if let Some(diagnostics) = verification {
-                            state.verification_status = Some(diagnostics.status);
-                            state.verification_expected_sha256 = diagnostics.expected_sha256;
-                            state.verification_actual_sha256 = diagnostics.actual_sha256;
-                            state.last_verification_epoch = now_epoch();
-                        }
-                        let plan = build_guided_install_plan(
-                            state.latest_release.as_ref(),
-                            state.download_path.as_deref(),
-                            state.verification_status.as_deref(),
-                        );
-                        state.install_ready = plan.ready;
-                        state.install_guidance = plan.instructions;
-                        MyApp::sync_update_snapshot_locked(&mut state);
-                    }
-                }
-                Err(error) => {
-                    let _ = crate::update::persist_download_result(
-                        None,
-                        None,
-                        None,
-                        &error,
-                        now_epoch(),
-                    );
-                    if let Ok(mut state) = update_state.lock() {
-                        state.download_in_progress = false;
-                        state.download_progress_fraction = None;
-                        state.download_status = error.clone();
-                        state.last_error = Some(error);
-                        MyApp::sync_update_snapshot_locked(&mut state);
-                    }
-                }
-            }
-        });
-    }
-
-    pub(crate) fn clear_update_cache_debug(&mut self) {
-        match crate::update::clear_update_cache() {
-            Ok(()) => {
-                if let Ok(mut state) = self.update_state.lock() {
-                    *state = UpdateCheckState::default();
-                    MyApp::sync_update_snapshot_locked(&mut state);
-                }
-                self.set_feedback(
-                    FeedbackScope::Updater,
-                    FeedbackSeverity::Success,
-                    "Cleared updater cache and reloaded the updater state.",
-                );
-            }
-            Err(error) => self.set_feedback(
-                FeedbackScope::Updater,
-                FeedbackSeverity::Error,
-                format!("Failed to clear updater cache: {error}"),
-            ),
-        }
-    }
-
-    pub(crate) fn rerun_checksum_verification(&mut self) {
-        let snapshot = self.update_state.lock().ok().map(|state| state.clone());
-        let Some(state) = snapshot else {
-            return;
-        };
-        let Some(release) = state.latest_release.as_ref() else {
-            self.set_feedback(
-                FeedbackScope::Updater,
-                FeedbackSeverity::Warning,
-                "No release metadata is available to verify against.",
-            );
-            return;
-        };
-        let Some(expected) = release.expected_sha256.as_deref() else {
-            self.set_feedback(
-                FeedbackScope::Updater,
-                FeedbackSeverity::Warning,
-                "No checksum metadata is available for the current release.",
-            );
-            return;
-        };
-        let Some(path) = state.download_path.as_deref() else {
-            self.set_feedback(
-                FeedbackScope::Updater,
-                FeedbackSeverity::Warning,
-                "No downloaded update is available to verify yet.",
-            );
-            return;
-        };
-        let diagnostics =
-            crate::update::verify_downloaded_asset_diagnostics(Path::new(path), expected);
-        let now = now_epoch();
-        let _ = crate::update::persist_verification_result(
-            diagnostics.expected_sha256.as_deref(),
-            diagnostics.actual_sha256.as_deref(),
-            &diagnostics.status,
-            now,
-        );
-        crate::update::log_update_event(
-            "verify",
-            if diagnostics.verified {
-                "matched"
-            } else {
-                "failed"
-            },
-            "Checksum verification re-run from updater debug controls.",
-            Some(&diagnostics.status),
-        );
-        if let Ok(mut state) = self.update_state.lock() {
-            state.verification_status = Some(diagnostics.status.clone());
-            state.verification_expected_sha256 = diagnostics.expected_sha256.clone();
-            state.verification_actual_sha256 = diagnostics.actual_sha256.clone();
-            state.last_verification_epoch = now;
-            state.download_status = diagnostics.status.clone();
-            let plan = build_guided_install_plan(
-                state.latest_release.as_ref(),
-                state.download_path.as_deref(),
-                state.verification_status.as_deref(),
-            );
-            state.install_ready = plan.ready;
-            state.install_guidance = plan.instructions;
-            MyApp::sync_update_snapshot_locked(&mut state);
-        }
-        self.set_feedback(
-            FeedbackScope::Updater,
-            if diagnostics.verified {
-                FeedbackSeverity::Success
-            } else {
-                FeedbackSeverity::Error
-            },
-            diagnostics.status,
-        );
-    }
-
-    pub(crate) fn install_downloaded_update(&mut self) {
-        let state_snapshot = self.update_state.lock().ok().map(|state| state.clone());
-        let Some(state_snapshot) = state_snapshot else {
-            return;
-        };
-        let plan = build_guided_install_plan(
-            state_snapshot.latest_release.as_ref(),
-            state_snapshot.download_path.as_deref(),
-            state_snapshot.verification_status.as_deref(),
-        );
-        let Some(path) = state_snapshot.download_path.as_deref() else {
-            self.set_feedback(
-                FeedbackScope::Updater,
-                FeedbackSeverity::Warning,
-                "Download or verify an update package before starting the install flow.",
-            );
-            return;
-        };
-        if !plan.ready {
-            if let Ok(mut state) = self.update_state.lock() {
-                state.install_status = plan.instructions.clone();
-                state.install_ready = false;
-                state.install_guidance = plan.instructions.clone();
-            }
-            self.set_feedback(
-                FeedbackScope::Updater,
-                FeedbackSeverity::Warning,
-                plan.instructions,
-            );
-            return;
-        }
-
-        let result = if let Some(message) = crate::update::simulated_install_failure_message(path) {
-            Err(message)
-        } else if plan.launch_installer {
-            open_external_target(path)
-        } else {
-            reveal_in_file_manager(Path::new(path))
-        };
-        crate::update::log_update_event(
-            "install",
-            "started",
-            "Guided install flow started from the GUI.",
-            Some(&format!("path={} action={}", path, plan.action_label)),
-        );
-
-        match result {
-            Ok(()) => {
-                let status = if plan.launch_installer {
-                    "Install flow started. Follow the platform installer/replacement steps, then relaunch ProjectX."
-                } else {
-                    "Update package revealed. Follow the guided install steps shown in Settings, then relaunch ProjectX."
-                };
-                let _ = crate::update::persist_install_result(
-                    status,
-                    now_epoch(),
-                    plan.restart_required_after_install,
-                );
-                if let Ok(mut state) = self.update_state.lock() {
-                    state.install_status = status.to_string();
-                    state.last_install_attempt_epoch = now_epoch();
-                    state.restart_required_after_install = plan.restart_required_after_install;
-                    state.install_guidance = plan.instructions.clone();
-                    MyApp::sync_update_snapshot_locked(&mut state);
-                }
-                crate::update::log_update_event("install", "completed", status, None);
-                self.set_feedback(FeedbackScope::Updater, FeedbackSeverity::Success, status);
-            }
-            Err(error) => {
-                let status = format!("Install flow could not be started: {error}");
-                let _ = crate::update::persist_install_result(&status, now_epoch(), false);
-                if let Ok(mut state) = self.update_state.lock() {
-                    state.install_status = status.clone();
-                    state.last_install_attempt_epoch = now_epoch();
-                    state.restart_required_after_install = false;
-                    MyApp::sync_update_snapshot_locked(&mut state);
-                }
-                crate::update::log_update_event("install", "failed", &status, None);
-                self.set_feedback(FeedbackScope::Updater, FeedbackSeverity::Error, status);
-            }
-        }
-    }
-
-    pub(crate) fn open_release_notes(&mut self) {
-        let release_url = self
-            .update_state
-            .lock()
-            .ok()
-            .map(|state| {
-                state
-                    .latest_release
-                    .as_ref()
-                    .map(|update| update.html_url.clone())
-                    .unwrap_or_else(|| state.release_page_url.clone())
-            })
-            .unwrap_or_else(|| {
-                let config = crate::update::github_release_config();
-                crate::update::releases_page_url(&config.owner, &config.repo)
-            });
-
-        match open_external_target(&release_url) {
-            Ok(()) => self.set_feedback(
-                FeedbackScope::Updater,
-                FeedbackSeverity::Success,
-                "Opened the latest ProjectX release page.",
-            ),
-            Err(error) => self.set_feedback(
-                FeedbackScope::Updater,
-                FeedbackSeverity::Error,
-                format!("Failed to open release page: {error}"),
-            ),
-        };
     }
 
     fn ensure_protection_monitor(&mut self) {
@@ -2796,7 +1971,6 @@ impl MyApp {
         indices: &[usize],
         empty_title: &str,
         empty_body: &str,
-        note: &str,
     ) {
         if indices.is_empty() {
             empty_state(ui, self.ui_metrics.scale_factor, empty_title, empty_body);
@@ -2808,14 +1982,6 @@ impl MyApp {
             .auto_shrink([false, false])
             .show(ui, |ui| self.render_record_list(ui, indices, false));
         ui.add_space(8.0);
-        self.render_workspace_note(ui, note);
-    }
-
-    fn render_workspace_note(&self, ui: &mut egui::Ui, note: &str) {
-        theme::card_frame().show(ui, |ui| {
-            theme::card_title(ui, "Operational notes", self.ui_metrics.scale_factor);
-            ui.label(note);
-        });
     }
 
     pub(crate) fn add_watched_path(&mut self, path: PathBuf, recursive: bool) {
@@ -3293,7 +2459,6 @@ impl eframe::App for MyApp {
         self.drain_protection_backlog();
         self.process_protection_monitor();
         self.poll_download_monitor();
-        self.poll_update_checker();
 
         if self.is_booting() {
             self.render_boot_screen(ctx);
@@ -3327,15 +2492,6 @@ impl MyApp {
     fn next_repaint_interval(&self) -> Option<Duration> {
         if self.is_loading() {
             return Some(Duration::from_millis(120));
-        }
-
-        let update_check_active = self
-            .update_state
-            .lock()
-            .map(|state| state.checking || state.download_in_progress)
-            .unwrap_or(false);
-        if update_check_active {
-            return Some(Duration::from_millis(180));
         }
 
         if self.settings.enable_download_monitoring && !self.download_watch.is_empty() {
@@ -3697,6 +2853,13 @@ fn reused_cached_record(
         )
     };
     record.workflow_origin = Some(origin.label().to_string());
+    record.detected_format = normalize_detected_format_label(
+        &record.path,
+        &record.file_name,
+        record.extension.as_deref(),
+        record.sniffed_mime.as_deref(),
+        record.detected_format.as_deref(),
+    );
     record
 }
 
@@ -3857,12 +3020,12 @@ fn disposition_note_for_outcome(outcome: &crate::r#static::ScanOutcome) -> Strin
         }
     } else if outcome.restored_to_original_path {
         format!(
-            "Copied into ProjectX quarantine for analysis, then restored to the original path after scanning finished. Original: {} | Temporary analysis copy: {}",
+            "Temporarily staged in ProjectX quarantine for safe analysis, then restored to the original path after scanning finished. No retained quarantine copy remains. Original: {} | Temporary quarantine path: {}",
             original, quarantine
         )
     } else {
         format!(
-            "Copied into ProjectX quarantine for analysis and retained there because the outcome was not clean. Original: {} | Quarantine: {}",
+            "Moved into ProjectX quarantine for analysis and retained there because the outcome was not clean. Original: {} | Quarantine: {}",
             original, quarantine
         )
     }
@@ -3888,6 +3051,32 @@ fn latest_record_map(records: &[ScanRecord]) -> HashMap<String, ScanRecord> {
         }
     }
     latest_by_path
+}
+
+fn normalize_detected_format_label(
+    path: &str,
+    file_name: &str,
+    extension: Option<&str>,
+    sniffed_mime: Option<&str>,
+    current: Option<&str>,
+) -> Option<String> {
+    let candidate = crate::r#static::format::structured::detect_from_metadata(
+        Path::new(path),
+        file_name,
+        extension.unwrap_or_default(),
+        sniffed_mime.unwrap_or_default(),
+    )
+    .map(|kind| kind.label().to_string());
+
+    match (
+        current.map(str::trim).filter(|value| !value.is_empty()),
+        candidate,
+    ) {
+        (Some("Unknown"), Some(candidate)) => Some(candidate),
+        (Some("JSON Data"), Some(candidate)) if candidate != "JSON Data" => Some(candidate),
+        (Some(current), _) => Some(current.to_string()),
+        (None, candidate) => candidate,
+    }
 }
 
 #[derive(Debug)]
@@ -4298,68 +3487,6 @@ fn record_matches_query(record: &ScanRecord, query: &str) -> bool {
     haystacks.iter().any(|value| value.contains(&query))
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
-fn increment_count(map: &mut HashMap<String, usize>, label: String) {
-    *map.entry(label).or_insert(0) += 1;
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-fn finalize_diagnostic_counts(counts: HashMap<String, usize>) -> Vec<DiagnosticCount> {
-    let mut items = counts
-        .into_iter()
-        .map(|(label, count)| DiagnosticCount { label, count })
-        .collect::<Vec<_>>();
-    items.sort_by(|left, right| {
-        right
-            .count
-            .cmp(&left.count)
-            .then_with(|| left.label.cmp(&right.label))
-    });
-    items
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-fn suspicious_extension_label(record: &ScanRecord) -> String {
-    record
-        .extension
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .map(|value| value.to_ascii_lowercase())
-        .or_else(|| {
-            Path::new(&record.path)
-                .extension()
-                .map(|value| value.to_string_lossy().to_ascii_lowercase())
-        })
-        .unwrap_or_else(|| "(none)".to_string())
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-fn primary_reason_label(reason: &DetectionReason) -> String {
-    if !reason.name.trim().is_empty() {
-        reason.name.trim().to_string()
-    } else if !reason.reason_type.trim().is_empty() {
-        reason.reason_type.trim().to_string()
-    } else {
-        "Unknown reason".to_string()
-    }
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-fn record_reason_combination_label(record: &ScanRecord) -> String {
-    if record.detection_reasons.is_empty() {
-        return "No structured reason".to_string();
-    }
-
-    let mut labels = record
-        .detection_reasons
-        .iter()
-        .map(primary_reason_label)
-        .collect::<Vec<_>>();
-    labels.sort();
-    labels.dedup();
-    labels.join(" + ")
-}
-
 pub(crate) fn home_dir() -> Option<PathBuf> {
     std::env::var("HOME").ok().map(PathBuf::from)
 }
@@ -4546,31 +3673,6 @@ fn draw_x(
                 set_pixel(rgba, width, x + xx, y + yy, color);
             }
         }
-    }
-}
-
-fn open_external_target(target: &str) -> Result<(), String> {
-    let status = if cfg!(target_os = "macos") {
-        Command::new("open")
-            .arg(target)
-            .status()
-            .map_err(|error| format!("Failed to run open: {error}"))?
-    } else if cfg!(target_os = "windows") {
-        Command::new("cmd")
-            .args(["/C", "start", "", target])
-            .status()
-            .map_err(|error| format!("Failed to run start: {error}"))?
-    } else {
-        Command::new("xdg-open")
-            .arg(target)
-            .status()
-            .map_err(|error| format!("Failed to run xdg-open: {error}"))?
-    };
-
-    if status.success() {
-        Ok(())
-    } else {
-        Err("The OS open command did not succeed.".to_string())
     }
 }
 
@@ -5033,257 +4135,11 @@ pub(crate) fn format_elapsed_ms(duration_ms: u64) -> String {
     }
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct GuidedInstallPlan {
-    pub(crate) ready: bool,
-    pub(crate) launch_installer: bool,
-    pub(crate) restart_required_after_install: bool,
-    pub(crate) action_label: &'static str,
-    pub(crate) instructions: String,
-}
-
-pub(crate) fn build_guided_install_plan(
-    release: Option<&AvailableUpdate>,
-    download_path: Option<&str>,
-    verification_status: Option<&str>,
-) -> GuidedInstallPlan {
-    let Some(download_path) = download_path else {
-        return GuidedInstallPlan {
-            ready: false,
-            launch_installer: false,
-            restart_required_after_install: false,
-            action_label: "Install update",
-            instructions: "Download or verify an update package before starting the install flow."
-                .to_string(),
-        };
-    };
-
-    let release = release.cloned().unwrap_or_default();
-    let checksum_required = release.expected_sha256.is_some();
-    let checksum_verified = verification_status
-        .map(|message| {
-            message
-                .to_ascii_lowercase()
-                .contains("verified successfully")
-        })
-        .unwrap_or(false);
-    if checksum_required && !checksum_verified {
-        return GuidedInstallPlan {
-            ready: false,
-            launch_installer: false,
-            restart_required_after_install: false,
-            action_label: "Install update",
-            instructions: "Verify the downloaded update package before starting the install flow."
-                .to_string(),
-        };
-    }
-
-    let lower = download_path.to_ascii_lowercase();
-    if cfg!(target_os = "macos") {
-        if lower.ends_with(".dmg") {
-            return GuidedInstallPlan {
-                ready: true,
-                launch_installer: true,
-                restart_required_after_install: true,
-                action_label: "Install update",
-                instructions: "ProjectX will open the DMG. Drag the new ProjectX.app into Applications, replace the existing copy if prompted, then relaunch ProjectX.".to_string(),
-            };
-        }
-        if lower.ends_with(".zip") {
-            return GuidedInstallPlan {
-                ready: true,
-                launch_installer: false,
-                restart_required_after_install: true,
-                action_label: "Reveal install package",
-                instructions: "ProjectX will reveal the downloaded archive. Extract the app bundle, move it into Applications, replace the existing copy if prompted, then relaunch ProjectX.".to_string(),
-            };
-        }
-    } else if cfg!(target_os = "windows") {
-        if lower.ends_with(".exe") || lower.ends_with(".msi") {
-            return GuidedInstallPlan {
-                ready: true,
-                launch_installer: true,
-                restart_required_after_install: true,
-                action_label: "Install update",
-                instructions: "ProjectX will launch the Windows installer package. Complete the install prompts, then restart ProjectX when the installer finishes.".to_string(),
-            };
-        }
-        if lower.ends_with(".zip") {
-            return GuidedInstallPlan {
-                ready: true,
-                launch_installer: false,
-                restart_required_after_install: true,
-                action_label: "Reveal install package",
-                instructions: "ProjectX will reveal the portable update archive. Extract it, replace the current app files with the new build, then restart ProjectX.".to_string(),
-            };
-        }
-    } else {
-        if lower.ends_with(".appimage") || lower.ends_with(".deb") || lower.ends_with(".rpm") {
-            return GuidedInstallPlan {
-                ready: true,
-                launch_installer: false,
-                restart_required_after_install: true,
-                action_label: "Reveal install package",
-                instructions: "ProjectX will reveal the downloaded Linux package. Use your normal platform install flow for this package, then relaunch ProjectX.".to_string(),
-            };
-        }
-    }
-
-    GuidedInstallPlan {
-        ready: true,
-        launch_installer: false,
-        restart_required_after_install: true,
-        action_label: "Reveal install package",
-        instructions: if checksum_required {
-            "ProjectX will reveal the verified update package. Follow the platform-specific replacement or installer steps for that package, then relaunch ProjectX.".to_string()
-        } else {
-            "ProjectX will reveal the downloaded update package. No matching checksum metadata was published for this release, so review the package carefully before installing, then relaunch ProjectX.".to_string()
-        },
-    }
-}
-
 pub(crate) fn now_epoch() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0)
-}
-
-fn next_update_check_epoch(last_check_epoch: u64) -> u64 {
-    if last_check_epoch == 0 {
-        0
-    } else {
-        last_check_epoch.saturating_add(AUTO_UPDATE_CHECK_INTERVAL_SECS)
-    }
-}
-
-fn maybe_auto_download_update(
-    update_state: &Arc<Mutex<UpdateCheckState>>,
-    refresh_ctx: Option<egui::Context>,
-) {
-    let release = update_state.lock().ok().and_then(|state| {
-        if state.download_in_progress {
-            return None;
-        }
-        state
-            .available_update
-            .clone()
-            .filter(|release| state.downloaded_version.as_deref() != Some(release.version.as_str()))
-    });
-    let Some(release) = release else {
-        return;
-    };
-
-    if let Ok(mut state) = update_state.lock() {
-        state.download_in_progress = true;
-        state.download_progress_fraction = Some(0.0);
-        state.download_status = format!("Downloading {} in the background...", release.asset_name);
-        MyApp::sync_update_snapshot_locked(&mut state);
-    }
-    MyApp::request_ui_refresh(refresh_ctx.as_ref());
-
-    let update_state = Arc::clone(update_state);
-    thread::spawn(move || {
-        let result = crate::update::download_release_asset(
-            &release.asset_url,
-            &release.asset_name,
-            |downloaded, total| {
-                if let Ok(mut state) = update_state.lock() {
-                    state.download_progress_fraction = total.map(|total_bytes| {
-                        if total_bytes == 0 {
-                            0.0
-                        } else {
-                            (downloaded as f32 / total_bytes as f32).clamp(0.0, 1.0)
-                        }
-                    });
-                    state.download_status = if let Some(total_bytes) = total {
-                        format!(
-                            "Downloading {} ({}/{})",
-                            release.asset_name,
-                            format_bytes(downloaded),
-                            format_bytes(total_bytes)
-                        )
-                    } else {
-                        format!(
-                            "Downloading {} ({})",
-                            release.asset_name,
-                            format_bytes(downloaded)
-                        )
-                    };
-                }
-                MyApp::request_ui_refresh(refresh_ctx.as_ref());
-            },
-        );
-
-        match result {
-            Ok(path) => {
-                let verification = release.expected_sha256.as_deref().map(|expected| {
-                    crate::update::verify_downloaded_asset_diagnostics(&path, expected)
-                });
-                if let Some(diagnostics) = verification.as_ref() {
-                    let _ = crate::update::persist_verification_result(
-                        diagnostics.expected_sha256.as_deref(),
-                        diagnostics.actual_sha256.as_deref(),
-                        &diagnostics.status,
-                        now_epoch(),
-                    );
-                }
-                let verification_message = verification.as_ref().map(|diag| diag.status.clone());
-                let status = verification_message
-                    .clone()
-                    .unwrap_or_else(|| format!("Downloaded {}.", release.asset_name));
-                let _ = crate::update::persist_download_result(
-                    Some(&release.version),
-                    Some(&release.asset_name),
-                    Some(&path),
-                    &status,
-                    now_epoch(),
-                );
-                if let Ok(mut state) = update_state.lock() {
-                    state.download_in_progress = false;
-                    state.download_progress_fraction = Some(1.0);
-                    state.download_status = status;
-                    state.download_path = Some(path.to_string_lossy().to_string());
-                    state.downloaded_version = Some(release.version.clone());
-                    state.last_download_epoch = now_epoch();
-                    if let Some(diagnostics) = verification {
-                        state.verification_status = Some(diagnostics.status);
-                        state.verification_expected_sha256 = diagnostics.expected_sha256;
-                        state.verification_actual_sha256 = diagnostics.actual_sha256;
-                        state.last_verification_epoch = now_epoch();
-                    }
-                    let plan = build_guided_install_plan(
-                        state.latest_release.as_ref(),
-                        state.download_path.as_deref(),
-                        state.verification_status.as_deref(),
-                    );
-                    state.install_ready = plan.ready;
-                    state.install_guidance = plan.instructions;
-                    MyApp::sync_update_snapshot_locked(&mut state);
-                }
-                MyApp::request_ui_refresh(refresh_ctx.as_ref());
-            }
-            Err(error) => {
-                let _ =
-                    crate::update::persist_download_result(None, None, None, &error, now_epoch());
-                if let Ok(mut state) = update_state.lock() {
-                    state.download_in_progress = false;
-                    state.download_progress_fraction = None;
-                    state.download_status = error.clone();
-                    state.last_error = Some(error);
-                    let plan = build_guided_install_plan(
-                        state.latest_release.as_ref(),
-                        state.download_path.as_deref(),
-                        state.verification_status.as_deref(),
-                    );
-                    state.install_ready = plan.ready;
-                    state.install_guidance = plan.instructions;
-                    MyApp::sync_update_snapshot_locked(&mut state);
-                }
-                MyApp::request_ui_refresh(refresh_ctx.as_ref());
-            }
-        }
-    });
 }
 
 pub(crate) fn format_timestamp_compact(epoch: u64) -> String {
@@ -5344,11 +4200,11 @@ pub(crate) fn summarize_record_refs(records: &[&ScanRecord]) -> RecordMetrics {
         ..RecordMetrics::default()
     };
     for record in records {
-        match record.verdict {
-            Verdict::Clean => metrics.clean += 1,
-            Verdict::Malicious => metrics.malicious += 1,
-            Verdict::Suspicious => metrics.suspicious += 1,
-            Verdict::Error => metrics.errors += 1,
+        match effective_report_category(record) {
+            EffectiveReportCategory::Clean => metrics.clean += 1,
+            EffectiveReportCategory::Malicious => metrics.malicious += 1,
+            EffectiveReportCategory::Suspicious => metrics.suspicious += 1,
+            EffectiveReportCategory::Error => metrics.errors += 1,
         }
         match record.resolved_storage_state() {
             RecordStorageState::InQuarantine => metrics.in_quarantine += 1,
@@ -5367,6 +4223,51 @@ pub(crate) fn summarize_record_refs(records: &[&ScanRecord]) -> RecordMetrics {
     metrics
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EffectiveReportCategory {
+    Clean,
+    Suspicious,
+    Malicious,
+    Error,
+}
+
+fn report_has_actual_error(record: &ScanRecord) -> bool {
+    matches!(record.verdict, Verdict::Error)
+        || matches!(record.severity, SeverityLevel::Error)
+        || record.error_count > 0
+}
+
+fn effective_report_category(record: &ScanRecord) -> EffectiveReportCategory {
+    if report_has_actual_error(record) {
+        return EffectiveReportCategory::Error;
+    }
+
+    match record.verdict {
+        Verdict::Clean => EffectiveReportCategory::Clean,
+        Verdict::Suspicious => EffectiveReportCategory::Suspicious,
+        Verdict::Malicious => EffectiveReportCategory::Malicious,
+        Verdict::Error => EffectiveReportCategory::Error,
+    }
+}
+
+fn report_matches_verdict_filter(record: &ScanRecord, filter: ReportVerdictFilter) -> bool {
+    match filter {
+        ReportVerdictFilter::All => true,
+        ReportVerdictFilter::Clean => {
+            effective_report_category(record) == EffectiveReportCategory::Clean
+        }
+        ReportVerdictFilter::Suspicious => {
+            effective_report_category(record) == EffectiveReportCategory::Suspicious
+        }
+        ReportVerdictFilter::Malicious => {
+            effective_report_category(record) == EffectiveReportCategory::Malicious
+        }
+        ReportVerdictFilter::Error => {
+            effective_report_category(record) == EffectiveReportCategory::Error
+        }
+    }
+}
+
 fn load_history() -> PersistedHistory {
     let index_path = index_path();
     let Ok(text) = fs::read_to_string(&index_path) else {
@@ -5375,6 +4276,7 @@ fn load_history() -> PersistedHistory {
 
     if let Ok(mut history) = serde_json::from_str::<PersistedHistory>(&text) {
         trim_records(&mut history.records);
+        hydrate_records_from_reports(&mut history.records);
         trim_timing_samples(&mut history.timing_samples);
         return history;
     }
@@ -5383,6 +4285,7 @@ fn load_history() -> PersistedHistory {
         .map(|index| index.entries)
         .unwrap_or_default();
     trim_records(&mut records);
+    hydrate_records_from_reports(&mut records);
 
     PersistedHistory {
         records,
@@ -5515,6 +4418,21 @@ fn remove_stale_report_files(all_records: &[ScanRecord], retained_records: &[Sca
     }
 }
 
+fn hydrate_records_from_reports(records: &mut [ScanRecord]) {
+    for record in records.iter_mut() {
+        let Some(report_path) = record.report_path.clone() else {
+            continue;
+        };
+        let path = Path::new(&report_path);
+        if !path.is_file() {
+            continue;
+        }
+        if let Some(updated) = hydrate_record_from_report(record, path) {
+            *record = updated;
+        }
+    }
+}
+
 fn hydrate_record_from_report(record: &ScanRecord, report_path: &Path) -> Option<ScanRecord> {
     let text = fs::read_to_string(report_path).ok()?;
     let value = serde_json::from_str::<serde_json::Value>(&text).ok()?;
@@ -5538,6 +4456,17 @@ fn hydrate_record_from_report(record: &ScanRecord, report_path: &Path) -> Option
     } else {
         updated.file_name
     };
+    updated.detected_format = normalize_detected_format_label(
+        &updated.path,
+        &updated.file_name,
+        updated.extension.as_deref(),
+        updated.sniffed_mime.as_deref(),
+        updated.detected_format.as_deref(),
+    );
+    updated.verdict = value["verdict"]["severity"]
+        .as_str()
+        .and_then(verdict_from_label)
+        .unwrap_or(updated.verdict);
     updated.severity = value["verdict"]["normalized_severity"]
         .as_str()
         .map(severity_level_from_label)
@@ -5594,11 +4523,24 @@ fn severity_level_from_label(label: &str) -> SeverityLevel {
     }
 }
 
+fn verdict_from_label(label: &str) -> Option<Verdict> {
+    if label.eq_ignore_ascii_case("clean") {
+        Some(Verdict::Clean)
+    } else if label.eq_ignore_ascii_case("suspicious") {
+        Some(Verdict::Suspicious)
+    } else if label.eq_ignore_ascii_case("malicious") {
+        Some(Verdict::Malicious)
+    } else if label.eq_ignore_ascii_case("error") {
+        Some(Verdict::Error)
+    } else {
+        None
+    }
+}
+
 fn feedback_scope_label(scope: FeedbackScope) -> &'static str {
     match scope {
         FeedbackScope::Scan => "Scan",
         FeedbackScope::FileAction => "File action",
-        FeedbackScope::Updater => "Updater",
         FeedbackScope::Settings => "Settings",
         FeedbackScope::Protection => "Protection",
     }
@@ -5612,15 +4554,12 @@ mod tests {
         QuarantineMetadata, QuarantineStatus, ReportReason, ReportSummary,
     };
     use std::fs;
-    use std::sync::{Mutex, OnceLock};
-
-    fn app_path_test_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
+    use std::panic::{self, AssertUnwindSafe};
 
     fn with_test_app_dirs<T>(root: &Path, run: impl FnOnce() -> T) -> T {
-        let _guard = app_path_test_lock().lock().expect("lock");
+        let _guard = crate::app_paths::app_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let previous_data = std::env::var("PROJECTX_DATA_DIR").ok();
         let previous_config = std::env::var("PROJECTX_CONFIG_DIR").ok();
         let previous_cache = std::env::var("PROJECTX_CACHE_DIR").ok();
@@ -5629,7 +4568,7 @@ mod tests {
         std::env::set_var("PROJECTX_CONFIG_DIR", root.join("config"));
         std::env::set_var("PROJECTX_CACHE_DIR", root.join("cache"));
 
-        let result = run();
+        let result = panic::catch_unwind(AssertUnwindSafe(run));
 
         if let Some(value) = previous_data {
             std::env::set_var("PROJECTX_DATA_DIR", value);
@@ -5647,7 +4586,10 @@ mod tests {
             std::env::remove_var("PROJECTX_CACHE_DIR");
         }
 
-        result
+        match result {
+            Ok(result) => result,
+            Err(panic) => panic::resume_unwind(panic),
+        }
     }
 
     fn test_scan_outcome() -> crate::r#static::ScanOutcome {
@@ -5731,7 +4673,7 @@ mod tests {
     fn scoped_feedback_does_not_overwrite_other_channels() {
         let mut app = MyApp::default();
         app.set_feedback(FeedbackScope::Scan, FeedbackSeverity::Info, "scan");
-        app.set_feedback(FeedbackScope::Updater, FeedbackSeverity::Error, "update");
+        app.set_feedback(FeedbackScope::Settings, FeedbackSeverity::Error, "settings");
 
         assert_eq!(
             app.feedback(FeedbackScope::Scan)
@@ -5739,9 +4681,9 @@ mod tests {
             Some("scan")
         );
         assert_eq!(
-            app.feedback(FeedbackScope::Updater)
+            app.feedback(FeedbackScope::Settings)
                 .map(|feedback| feedback.message.as_str()),
-            Some("update")
+            Some("settings")
         );
     }
 
@@ -5781,7 +4723,7 @@ mod tests {
     #[test]
     fn notifications_capture_recent_feedback() {
         let mut app = MyApp::default();
-        app.set_feedback(FeedbackScope::Updater, FeedbackSeverity::Success, "checked");
+        app.set_feedback(FeedbackScope::Settings, FeedbackSeverity::Success, "saved");
         app.set_feedback(
             FeedbackScope::FileAction,
             FeedbackSeverity::Warning,
@@ -5804,87 +4746,206 @@ mod tests {
     }
 
     #[test]
-    fn suspicious_diagnostics_summary_groups_live_patterns() {
-        let root =
-            std::env::temp_dir().join(format!("projectx_suspicious_summary_{}", now_epoch()));
+    fn clean_report_with_observed_signal_does_not_match_error_filter() {
+        let mut record = test_record(
+            "/tmp/ext/_locales/cs/messages.json",
+            SummaryVerdict::Clean,
+            QuarantineStatus::Restored,
+            None,
+            vec![ReportReason {
+                name: "Decoded Active Content".to_string(),
+                source: "heuristic".to_string(),
+                weight: 1.5,
+                ..ReportReason::default()
+            }],
+        );
+        record.severity = NormalizedSeverity::Clean;
+        record.warning_count = 1;
+        record.error_count = 0;
+
+        assert_eq!(
+            effective_report_category(&record),
+            EffectiveReportCategory::Clean
+        );
+        assert!(!report_matches_verdict_filter(
+            &record,
+            ReportVerdictFilter::Error
+        ));
+        assert!(report_matches_verdict_filter(
+            &record,
+            ReportVerdictFilter::Clean
+        ));
+    }
+
+    #[test]
+    fn warning_only_report_does_not_enter_error_category() {
+        let mut record = test_record(
+            "/tmp/config.json",
+            SummaryVerdict::Clean,
+            QuarantineStatus::Restored,
+            None,
+            vec![ReportReason {
+                name: "Observed setting".to_string(),
+                source: "heuristic".to_string(),
+                weight: 0.4,
+                ..ReportReason::default()
+            }],
+        );
+        record.warning_count = 2;
+        record.error_count = 0;
+
+        assert_eq!(
+            effective_report_category(&record),
+            EffectiveReportCategory::Clean
+        );
+    }
+
+    #[test]
+    fn explicit_error_count_enters_error_category() {
+        let mut record = test_record(
+            "/tmp/clean.txt",
+            SummaryVerdict::Clean,
+            QuarantineStatus::Restored,
+            None,
+            Vec::new(),
+        );
+        record.severity = NormalizedSeverity::Clean;
+        record.error_count = 1;
+
+        assert_eq!(
+            effective_report_category(&record),
+            EffectiveReportCategory::Error
+        );
+        assert!(report_matches_verdict_filter(
+            &record,
+            ReportVerdictFilter::Error
+        ));
+    }
+
+    #[test]
+    fn suspicious_report_without_actual_error_stays_out_of_error_filter() {
+        let mut record = test_record(
+            "/tmp/suspicious.bin",
+            SummaryVerdict::Suspicious,
+            QuarantineStatus::InQuarantine,
+            Some("/tmp/quarantine/suspicious.bin".to_string()),
+            vec![ReportReason {
+                name: "Known bad marker".to_string(),
+                source: "rule".to_string(),
+                weight: 1.2,
+                ..ReportReason::default()
+            }],
+        );
+        record.severity = NormalizedSeverity::Medium;
+        record.error_count = 0;
+
+        assert_eq!(
+            effective_report_category(&record),
+            EffectiveReportCategory::Suspicious
+        );
+        assert!(!report_matches_verdict_filter(
+            &record,
+            ReportVerdictFilter::Error
+        ));
+    }
+
+    #[test]
+    fn hydrate_record_from_report_refreshes_stale_error_verdict() {
+        let root = std::env::temp_dir().join(format!("projectx_hydrate_report_{}", now_epoch()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).expect("root");
-        with_test_app_dirs(&root, || {
-            let quarantine_dir = crate::app_paths::quarantine_dir();
-            fs::create_dir_all(&quarantine_dir).expect("quarantine dir");
-            let retained_path = quarantine_dir.join("package-lock.json");
-            fs::write(&retained_path, b"{}").expect("retained");
 
-            let mut app = MyApp::default();
-            app.records = vec![
-                test_record(
-                    "/tmp/package-lock.json",
-                    SummaryVerdict::Suspicious,
-                    QuarantineStatus::InQuarantine,
-                    Some(retained_path.to_string_lossy().to_string()),
-                    vec![ReportReason {
-                        name: "Decoded Active Content".to_string(),
-                        source: "heuristic".to_string(),
-                        weight: 0.5,
-                        ..ReportReason::default()
-                    }],
-                ),
-                test_record(
-                    "/tmp/notes.txt",
-                    SummaryVerdict::Suspicious,
-                    QuarantineStatus::Restored,
-                    None,
-                    vec![ReportReason {
-                        name: "Decoded Active Content".to_string(),
-                        source: "heuristic".to_string(),
-                        weight: 0.5,
-                        ..ReportReason::default()
-                    }],
-                ),
-            ];
+        let report_path = root.join("report.json");
+        fs::write(
+            &report_path,
+            serde_json::json!({
+                "file": {
+                    "name": "messages.json",
+                    "sha256": "a".repeat(64),
+                    "sniffed_mime": "application/json",
+                    "detected_format": "Extension Locale JSON"
+                },
+                "verdict": {
+                    "severity": "Clean",
+                    "normalized_severity": "clean"
+                },
+                "summary": {
+                    "signal_sources": ["heuristic"],
+                    "warning_count": 1,
+                    "error_count": 0
+                },
+                "reasons": [{
+                    "reason_type": "heuristic",
+                    "source": "heuristic",
+                    "name": "Decoded Active Content",
+                    "description": "Observed but suppressed.",
+                    "weight": 1.5
+                }]
+            })
+            .to_string(),
+        )
+        .expect("report");
 
-            let summary = app.suspicious_diagnostics_summary();
-            assert_eq!(summary.suspicious_total, 2);
-            assert_eq!(summary.retained_total, 1);
-            assert_eq!(
-                summary
-                    .by_reason_name
-                    .first()
-                    .map(|entry| entry.label.as_str()),
-                Some("Decoded Active Content")
-            );
-            assert_eq!(
-                summary
-                    .by_extension
-                    .first()
-                    .map(|entry| entry.label.as_str()),
-                Some("json")
-            );
-            assert_eq!(
-                summary
-                    .weak_reason_combinations
-                    .first()
-                    .map(|entry| entry.label.as_str()),
-                Some("Decoded Active Content")
-            );
-        });
+        let mut stale = test_record(
+            "/tmp/ext/_locales/cs/messages.json",
+            SummaryVerdict::Error,
+            QuarantineStatus::Restored,
+            None,
+            Vec::new(),
+        );
+        stale.file_name = "messages.json".to_string();
+        stale.extension = Some("json".to_string());
+        stale.sniffed_mime = Some("application/json".to_string());
+        stale.report_path = Some(report_path.to_string_lossy().to_string());
+        stale.severity = NormalizedSeverity::Error;
+        stale.error_count = 1;
+
+        let hydrated = hydrate_record_from_report(&stale, &report_path).expect("hydrated record");
+        assert_eq!(hydrated.verdict, SummaryVerdict::Clean);
+        assert_eq!(hydrated.severity, NormalizedSeverity::Clean);
+        assert_eq!(hydrated.error_count, 0);
+        assert_eq!(
+            effective_report_category(&hydrated),
+            EffectiveReportCategory::Clean
+        );
+
         let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
-    fn latest_scan_epoch_is_none_without_records() {
-        let mut app = MyApp::default();
-        app.records.clear();
-        assert_eq!(app.latest_scan_epoch(), None);
+    fn summarize_record_refs_counts_clean_observed_signal_as_clean_not_error() {
+        let mut clean = test_record(
+            "/tmp/ext/_locales/cs/messages.json",
+            SummaryVerdict::Clean,
+            QuarantineStatus::Restored,
+            None,
+            vec![ReportReason {
+                name: "Decoded Active Content".to_string(),
+                source: "heuristic".to_string(),
+                weight: 1.5,
+                ..ReportReason::default()
+            }],
+        );
+        clean.severity = NormalizedSeverity::Clean;
+        clean.warning_count = 1;
+        clean.error_count = 0;
+
+        let metrics = summarize_record_refs(&[&clean]);
+        assert_eq!(metrics.clean, 1);
+        assert_eq!(metrics.errors, 0);
     }
 
     #[test]
-    fn next_update_check_epoch_uses_fixed_interval() {
-        assert_eq!(
-            next_update_check_epoch(100),
-            100 + AUTO_UPDATE_CHECK_INTERVAL_SECS
+    fn normalize_detected_format_replaces_unknown_for_json_locale_path() {
+        let label = normalize_detected_format_label(
+            "/tmp/ext/_locales/cs/messages.json",
+            "messages.json",
+            Some("json"),
+            Some("application/json"),
+            Some("Unknown"),
         );
-        assert_eq!(next_update_check_epoch(0), 0);
+
+        assert_eq!(label.as_deref(), Some("Extension Locale JSON"));
     }
 
     #[test]
@@ -5972,82 +5033,6 @@ mod tests {
     }
 
     #[test]
-    fn guided_install_requires_verification_when_checksum_exists() {
-        let release = AvailableUpdate {
-            asset_name: "ProjectX-macos.dmg".to_string(),
-            expected_sha256: Some("a".repeat(64)),
-            ..AvailableUpdate::default()
-        };
-        let plan = build_guided_install_plan(
-            Some(&release),
-            Some("/tmp/ProjectX-macos.dmg"),
-            Some("waiting"),
-        );
-        assert!(!plan.ready);
-    }
-
-    #[test]
-    fn guided_install_plan_allows_verified_macos_dmg() {
-        let release = AvailableUpdate {
-            asset_name: "ProjectX-macos.dmg".to_string(),
-            expected_sha256: Some("a".repeat(64)),
-            ..AvailableUpdate::default()
-        };
-        let plan = build_guided_install_plan(
-            Some(&release),
-            Some("/tmp/ProjectX-macos.dmg"),
-            Some("SHA-256 verified successfully for ProjectX-macos.dmg."),
-        );
-        assert!(plan.ready);
-    }
-
-    #[test]
-    fn update_snapshot_tracks_latest_release_and_install_state() {
-        let mut state = UpdateCheckState::default();
-        state.current_version = "1.0.0".to_string();
-        state.status = "Update available.".to_string();
-        state.status_kind = UpdateStatusKind::UpdateAvailable;
-        state.latest_release = Some(AvailableUpdate {
-            version: "1.1.0".to_string(),
-            tag_name: "v1.1.0".to_string(),
-            asset_name: "ProjectX-macos.dmg".to_string(),
-            ..AvailableUpdate::default()
-        });
-        state.download_status = "Downloaded ProjectX-macos.dmg.".to_string();
-        state.install_status = "Ready to install.".to_string();
-        state.install_ready = true;
-
-        MyApp::sync_update_snapshot_locked(&mut state);
-
-        let snapshot = state.debug_snapshot.expect("snapshot");
-        assert_eq!(snapshot.current_version, "1.0.0");
-        assert_eq!(snapshot.latest_version.as_deref(), Some("1.1.0"));
-        assert_eq!(
-            snapshot.selected_asset_name.as_deref(),
-            Some("ProjectX-macos.dmg")
-        );
-        assert!(snapshot.install_ready);
-    }
-
-    #[test]
-    fn rerun_checksum_verification_requires_downloaded_path() {
-        let mut app = MyApp::default();
-        if let Ok(mut state) = app.update_state.lock() {
-            state.latest_release = Some(AvailableUpdate {
-                version: "1.1.0".to_string(),
-                asset_name: "ProjectX-macos.dmg".to_string(),
-                expected_sha256: Some("a".repeat(64)),
-                ..AvailableUpdate::default()
-            });
-        }
-        app.rerun_checksum_verification();
-        assert!(app
-            .feedback(FeedbackScope::Updater)
-            .map(|feedback| feedback.message.contains("No downloaded update"))
-            .unwrap_or(false));
-    }
-
-    #[test]
     fn prepare_targets_for_queue_stages_multiple_files() {
         let root = std::env::temp_dir().join(format!(
             "projectx_queue_stage_{}_{}",
@@ -6126,6 +5111,21 @@ mod tests {
         let note = disposition_note_for_outcome(&outcome);
         assert!(note.contains("Scanned in place"));
         assert!(note.contains("read-only"));
+    }
+
+    #[test]
+    fn disposition_note_explains_temporary_staging_for_clean_restored_file() {
+        let outcome = crate::r#static::ScanOutcome {
+            original_path: PathBuf::from("/Users/test/_locales/cs/messages.json"),
+            quarantine_path: PathBuf::from("/tmp/projectx/quarantine/messages.json"),
+            restored_to_original_path: true,
+            ..test_scan_outcome()
+        };
+
+        let note = disposition_note_for_outcome(&outcome);
+        assert!(note.contains("Temporarily staged"));
+        assert!(note.contains("No retained quarantine copy remains"));
+        assert!(!note.contains("Moved into ProjectX quarantine for analysis"));
     }
 
     #[test]

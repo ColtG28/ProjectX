@@ -151,7 +151,7 @@ fn resolve_primary_executable(
         })
         .ok_or_else(|| {
             format!(
-                "No readable executable file was found under {}",
+                "Could not resolve a readable app bundle executable under {}",
                 macos_dir.display()
             )
         })

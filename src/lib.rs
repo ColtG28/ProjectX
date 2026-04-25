@@ -4,4 +4,3 @@ pub mod emulation;
 pub mod gui;
 pub mod ml;
 pub mod r#static;
-pub mod update;

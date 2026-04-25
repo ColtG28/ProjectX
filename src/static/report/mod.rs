@@ -291,7 +291,7 @@ pub fn normalize_reason_name(code: &str) -> String {
 pub fn normalize_reason_description(message: &str) -> String {
     let trimmed = message.trim();
     if trimmed.is_empty() {
-        "Passive analysis flagged a suspicious signal.".to_string()
+        "Passive analysis observed a notable signal.".to_string()
     } else if trimmed == trimmed.to_ascii_uppercase() && trimmed.contains('_') {
         normalize_reason_name(trimmed)
     } else {

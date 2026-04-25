@@ -24,10 +24,13 @@ pub fn calculate(ctx: &ScanContext) -> f64 {
         )
     });
     let trust_signal_strength = applicable_trust_strength(ctx);
+    let has_app_bundle_trust_context = has_app_bundle_trust_context(ctx);
+    let installed_app_bundle_context = is_installed_app_bundle_executable(&path_text);
     let has_decode_or_emulation = ctx.findings.iter().any(|finding| {
         matches!(normalize_reason_source(&finding.code), "emulation")
             || finding.code.starts_with("DECODED_")
     });
+    let has_macho_runtime_corroboration = has_macho_runtime_corroboration(ctx);
     let has_strong_structural_signal = ctx.findings.iter().any(|finding| {
         matches!(
             finding.code.as_str(),
@@ -179,8 +182,11 @@ pub fn calculate(ctx: &ScanContext) -> f64 {
                 json_data_context,
                 archive_context,
                 media_container_context,
+                installed_app_bundle_context,
+                has_app_bundle_trust_context,
                 has_rule_match,
                 has_decode_or_emulation,
+                has_macho_runtime_corroboration,
                 has_strong_structural_signal,
                 has_bad_reputation,
             );
@@ -295,8 +301,11 @@ fn adjusted_weight(
     json_data_context: bool,
     archive_context: bool,
     media_container_context: bool,
+    installed_app_bundle_context: bool,
+    has_app_bundle_trust_context: bool,
     has_rule_match: bool,
     has_decode_or_emulation: bool,
+    has_macho_runtime_corroboration: bool,
     has_strong_structural_signal: bool,
     has_bad_reputation: bool,
 ) -> f64 {
@@ -330,9 +339,30 @@ fn adjusted_weight(
         "ELF_SHELL_DOWNLOADER" | "ELF_SHELL_NETWORK_CHAIN" => weight *= 1.15,
         "MACHO_PACKED_SECTION_LAYOUT" => weight *= 0.95,
         "MACHO_EXECUTABLE_WRITABLE_SEGMENT" => weight *= 1.1,
-        "MACHO_DYNAMIC_LOADER_CHAIN"
-        | "MACHO_EXEC_NETWORK_CHAIN"
-        | "MACHO_RELATIVE_LOADER_PATH_CHAIN" => weight *= 1.15,
+        "MACHO_DYNAMIC_LOADER_CHAIN" | "MACHO_EXEC_NETWORK_CHAIN" => {
+            if installed_app_bundle_context
+                && has_app_bundle_trust_context
+                && !has_macho_runtime_corroboration
+                && !has_bad_reputation
+            {
+                weight *= 0.32;
+            } else if has_macho_runtime_corroboration || !has_app_bundle_trust_context {
+                weight *= 0.95;
+            } else {
+                weight *= 0.7;
+            }
+        }
+        "MACHO_RELATIVE_LOADER_PATH_CHAIN" => {
+            if installed_app_bundle_context
+                && has_app_bundle_trust_context
+                && !has_macho_runtime_corroboration
+                && !has_bad_reputation
+            {
+                weight *= 0.45;
+            } else {
+                weight *= 1.15;
+            }
+        }
         "PSH_DOWNLOADER_CHAIN" | "JS_DOWNLOADER_CHAIN" | "VBA_AUTORUN_DOWNLOAD_CHAIN" => {
             weight *= 1.15
         }
@@ -639,6 +669,8 @@ fn trust_scope_matches(scope: &str, source: &str, finding: &Finding) -> bool {
                 | "ELF_DYNAMIC_LOADER_CHAIN"
                 | "ELF_DYNAMIC_SYMBOL_CHAIN"
                 | "MACHO_DYNAMIC_LOADER_CHAIN"
+                | "MACHO_EXEC_NETWORK_CHAIN"
+                | "MACHO_RELATIVE_LOADER_PATH_CHAIN"
         ),
         _ => false,
     }
@@ -646,6 +678,53 @@ fn trust_scope_matches(scope: &str, source: &str, finding: &Finding) -> bool {
 
 fn path_matches(path: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| path.contains(needle))
+}
+
+fn is_installed_app_bundle_executable(path_text: &str) -> bool {
+    (path_text.starts_with("/applications/") || path_text.starts_with("/system/applications/"))
+        && path_text.contains(".app/contents/macos/")
+}
+
+fn has_app_bundle_trust_context(ctx: &ScanContext) -> bool {
+    ctx.intelligence
+        .as_ref()
+        .map(|summary| {
+            summary.records.iter().any(|record| {
+                is_trust_record(record)
+                    && record.package_source.as_deref().is_some_and(|source| {
+                        matches!(source, "application_bundle" | "system_applications")
+                    })
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn is_macho_common_runtime_signal(code: &str) -> bool {
+    matches!(
+        code,
+        "MACHO_DYNAMIC_LOADER_CHAIN"
+            | "MACHO_EXEC_NETWORK_CHAIN"
+            | "MACHO_RELATIVE_LOADER_PATH_CHAIN"
+    )
+}
+
+fn is_macho_anomaly_signal(code: &str) -> bool {
+    matches!(
+        code,
+        "MACHO_PACKED_SECTION_LAYOUT" | "MACHO_EXECUTABLE_WRITABLE_SEGMENT"
+    )
+}
+
+fn has_macho_runtime_corroboration(ctx: &ScanContext) -> bool {
+    ctx.findings.iter().any(|finding| {
+        if finding.weight <= 0.0 || is_intelligence_finding(finding) {
+            return false;
+        }
+        matches!(normalize_reason_source(&finding.code), "rule" | "emulation")
+            || finding.code.starts_with("DECODED_")
+            || is_macho_anomaly_signal(&finding.code)
+            || !is_macho_common_runtime_signal(&finding.code)
+    })
 }
 
 fn has_structural_content_corroboration(ctx: &ScanContext) -> bool {
@@ -887,6 +966,190 @@ mod tests {
         let verdict = decision::classify(&script, risk, &script.config.thresholds);
 
         assert!(risk >= script.config.thresholds.suspicious_min);
+        assert_ne!(verdict, Severity::Clean);
+    }
+
+    fn add_installed_app_bundle_trust(ctx: &mut ScanContext) {
+        ctx.intelligence = Some(crate::r#static::types::IntelligenceSummary {
+            records: vec![crate::r#static::types::IntelligenceRecord {
+                kind: "trusted_vendor_context".to_string(),
+                category: "platform_trust".to_string(),
+                source: "runtime_path_context".to_string(),
+                confidence: "medium".to_string(),
+                trust_level: Some("medium".to_string()),
+                note: "Recognized installed macOS app-bundle path context.".to_string(),
+                platform: Some("macos".to_string()),
+                allowed_dampen: vec!["binary_loader_noise".to_string()],
+                package_source: Some("application_bundle".to_string()),
+                distribution_channel: Some("user_installed_app".to_string()),
+                confidence_weight: Some(1.1),
+                trust_scope: vec!["binary_loader_noise".to_string()],
+                confidence_score: Some(1.05),
+                source_quality: Some(1.0),
+                ..Default::default()
+            }],
+            trust_reasons: vec!["installed app bundle".to_string()],
+            trust_ecosystems: vec!["macos".to_string()],
+            trust_categories: vec!["platform_trust".to_string()],
+            trust_vendors: vec!["macOS application bundle".to_string()],
+            ..Default::default()
+        });
+        ctx.findings.push(Finding::new(
+            "TRUST_BENIGN_TOOLING_CONTEXT",
+            "Runtime path context recognized an installed macOS app bundle [medium_trust]",
+            0.0,
+        ));
+    }
+
+    fn add_macho_runtime_pair(ctx: &mut ScanContext) {
+        ctx.findings.push(Finding::new(
+            "MACHO_DYNAMIC_LOADER_CHAIN",
+            "dynamic loader runtime behavior",
+            2.4,
+        ));
+        ctx.findings.push(Finding::new(
+            "MACHO_EXEC_NETWORK_CHAIN",
+            "execution and network runtime behavior",
+            2.1,
+        ));
+    }
+
+    fn add_macho_dynamic_relative_pair(ctx: &mut ScanContext) {
+        ctx.findings.push(Finding::new(
+            "MACHO_DYNAMIC_LOADER_CHAIN",
+            "dynamic loader runtime behavior",
+            2.4,
+        ));
+        ctx.findings.push(Finding::new(
+            "MACHO_RELATIVE_LOADER_PATH_CHAIN",
+            "relative loader path runtime behavior",
+            2.0,
+        ));
+    }
+
+    #[test]
+    fn projectx_app_runtime_macho_pair_stays_clean_with_bundle_trust() {
+        let mut app = test_ctx(
+            "/Applications/ProjectX.app/Contents/MacOS/ProjectX",
+            "",
+            "application/octet-stream",
+            Some("Mach-O"),
+        );
+        add_installed_app_bundle_trust(&mut app);
+        add_macho_runtime_pair(&mut app);
+
+        let risk = calculate(&app);
+        let verdict = decision::classify(&app, risk, &app.config.thresholds);
+
+        assert!(risk < app.config.thresholds.suspicious_min);
+        assert_eq!(verdict, Severity::Clean);
+    }
+
+    #[test]
+    fn tor_browser_app_runtime_macho_pair_stays_clean_with_bundle_trust() {
+        let mut app = test_ctx(
+            "/Applications/Tor Browser.app/Contents/MacOS/firefox",
+            "",
+            "application/octet-stream",
+            Some("Mach-O"),
+        );
+        add_installed_app_bundle_trust(&mut app);
+        add_macho_runtime_pair(&mut app);
+
+        let risk = calculate(&app);
+        let verdict = decision::classify(&app, risk, &app.config.thresholds);
+
+        assert!(risk < app.config.thresholds.suspicious_min);
+        assert_eq!(verdict, Severity::Clean);
+    }
+
+    #[test]
+    fn tor_browser_app_dynamic_relative_macho_pair_stays_clean_with_bundle_trust() {
+        let mut app = test_ctx(
+            "/Applications/Tor Browser.app/Contents/MacOS/firefox",
+            "",
+            "application/octet-stream",
+            Some("Mach-O"),
+        );
+        add_installed_app_bundle_trust(&mut app);
+        add_macho_dynamic_relative_pair(&mut app);
+
+        let risk = calculate(&app);
+        let verdict = decision::classify(&app, risk, &app.config.thresholds);
+
+        assert!(risk < app.config.thresholds.suspicious_min);
+        assert_eq!(verdict, Severity::Clean);
+    }
+
+    #[test]
+    fn simple_app_bundle_runtime_macho_pair_stays_clean_with_bundle_trust() {
+        let mut app = test_ctx(
+            "/Applications/Simple.app/Contents/MacOS/Simple",
+            "",
+            "application/octet-stream",
+            Some("Mach-O"),
+        );
+        add_installed_app_bundle_trust(&mut app);
+        add_macho_runtime_pair(&mut app);
+
+        let risk = calculate(&app);
+        let verdict = decision::classify(&app, risk, &app.config.thresholds);
+
+        assert!(risk < app.config.thresholds.suspicious_min);
+        assert_eq!(verdict, Severity::Clean);
+    }
+
+    #[test]
+    fn same_macho_runtime_pair_outside_app_bundle_can_still_escalate() {
+        let mut binary = test_ctx(
+            "/tmp/staged/macho_dropper",
+            "",
+            "application/octet-stream",
+            Some("Mach-O"),
+        );
+        add_macho_runtime_pair(&mut binary);
+
+        let risk = calculate(&binary);
+        let verdict = decision::classify(&binary, risk, &binary.config.thresholds);
+
+        assert!(risk >= binary.config.thresholds.suspicious_min);
+        assert_eq!(verdict, Severity::Suspicious);
+    }
+
+    #[test]
+    fn dynamic_relative_macho_pair_outside_app_bundle_can_still_escalate() {
+        let mut binary = test_ctx(
+            "/tmp/staged/macho_dropper",
+            "",
+            "application/octet-stream",
+            Some("Mach-O"),
+        );
+        add_macho_dynamic_relative_pair(&mut binary);
+
+        let risk = calculate(&binary);
+        let verdict = decision::classify(&binary, risk, &binary.config.thresholds);
+
+        assert!(risk >= binary.config.thresholds.suspicious_min);
+        assert_eq!(verdict, Severity::Suspicious);
+    }
+
+    #[test]
+    fn app_bundle_macho_runtime_pair_escalates_with_rule_corroboration() {
+        let mut app = test_ctx(
+            "/Applications/Simple.app/Contents/MacOS/Simple",
+            "",
+            "application/octet-stream",
+            Some("Mach-O"),
+        );
+        add_installed_app_bundle_trust(&mut app);
+        add_macho_runtime_pair(&mut app);
+        app.findings
+            .push(Finding::new("YARA_MATCH", "suspicious rule hit", 2.5));
+
+        let risk = calculate(&app);
+        let verdict = decision::classify(&app, risk, &app.config.thresholds);
+
+        assert!(risk >= app.config.thresholds.suspicious_min);
         assert_ne!(verdict, Severity::Clean);
     }
 }

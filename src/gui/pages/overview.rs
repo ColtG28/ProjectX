@@ -104,14 +104,6 @@ impl MyApp {
                 draw_segment_bar(ui, &segments);
                 ui.add_space(theme::card_section_gap(self.ui_metrics.scale_factor));
                 render_chart_legend(ui, &segments);
-                ui.add_space(theme::card_section_gap(self.ui_metrics.scale_factor));
-                ui.label(format!(
-                    "Severity: high={} medium={} | warning total={} | error total={}",
-                    metrics.high_severity,
-                    metrics.medium_severity,
-                    metrics.warning_total,
-                    metrics.error_total
-                ));
                 ui.with_layout(Layout::right_to_left(egui::Align::Min), |ui| {
                     egui::ComboBox::from_id_source("analytics_period")
                         .selected_text(self.period.label())

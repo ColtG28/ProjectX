@@ -471,21 +471,21 @@ fn runtime_provenance_signals(path_text: &str, file_name: &str) -> Vec<RuntimePr
             kind: "trusted_vendor_context".to_string(),
             category: "platform_trust".to_string(),
             source: "runtime_path_context".to_string(),
-            confidence: "low".to_string(),
-            trust_level: "low".to_string(),
+            confidence: "medium".to_string(),
+            trust_level: "medium".to_string(),
             note: "Recognized installed macOS app-bundle path context.".to_string(),
-            message: "Runtime path context recognized an installed macOS app bundle [low_trust] (/Applications bundle path)".to_string(),
+            message: "Runtime path context recognized an installed macOS app bundle [medium_trust] (/Applications bundle path)".to_string(),
             platform: Some("macos".to_string()),
             vendor: "macOS application bundle".to_string(),
             ecosystem: "macos".to_string(),
-            rationale: "Installed app bundles under /Applications are a common benign software layout, but path alone is not a strong trust signal.".to_string(),
+            rationale: "Installed app bundles under /Applications with a resolved Contents/MacOS entrypoint are a common benign software layout.".to_string(),
             package_source: Some("application_bundle".to_string()),
             distribution_channel: Some("user_installed_app".to_string()),
-            signer_hint: Some("Bundle path only; no signer verification".to_string()),
+            signer_hint: Some("Installed app bundle path with resolved executable; no signer verification".to_string()),
             allowed_dampen: vec!["binary_loader_noise".to_string(), "file_profile_noise".to_string()],
             trust_scope: vec!["binary_loader_noise".to_string(), "file_profile_noise".to_string()],
             matched_markers: vec!["/Applications".to_string(), ".app".to_string()],
-            policy_effect: "Installed app-bundle provenance dampened only weak unsupported loader/profile noise.".to_string(),
+            policy_effect: "Installed app-bundle provenance treats common Mach-O loader/network runtime observations as baseline unless corroborated by stronger suspicious signals.".to_string(),
         });
     }
 
@@ -1213,6 +1213,25 @@ mod tests {
             "index.js",
         );
         assert!(signals.iter().any(|signal| signal.ecosystem == "npm"));
+    }
+
+    #[test]
+    fn runtime_provenance_upgrades_installed_macos_app_bundle_to_medium_trust() {
+        let signals = runtime_provenance_signals(
+            "/applications/projectx.app/contents/macos/projectx",
+            "projectx",
+        );
+        let app_signal = signals
+            .iter()
+            .find(|signal| signal.package_source.as_deref() == Some("application_bundle"))
+            .expect("installed app bundle trust signal");
+
+        assert_eq!(app_signal.trust_level, "medium");
+        assert_eq!(app_signal.confidence, "medium");
+        assert!(app_signal
+            .allowed_dampen
+            .iter()
+            .any(|scope| scope == "binary_loader_noise"));
     }
 
     #[test]
