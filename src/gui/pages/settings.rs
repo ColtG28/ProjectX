@@ -9,7 +9,6 @@ impl MyApp {
         let mut settings_changed = false;
 
         ui.heading("Scanner Settings");
-        ui.label("Tune scan scope and protection behavior without leaving the current workflow.");
         ui.separator();
         self.render_feedback_banner(ui, FeedbackScope::Settings);
         ui.add_space(theme::item_gap(self.ui_metrics.scale_factor));
