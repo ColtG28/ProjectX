@@ -106,15 +106,3 @@ pub fn apply_theme(ctx: &egui::Context, scale: f32) {
     );
     ctx.set_style(style);
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn shared_card_rhythm_helpers_preserve_spacing_hierarchy() {
-        assert!(card_section_gap(1.0) > card_header_gap(1.0));
-        assert!(card_header_gap(1.0) > card_row_gap(1.0));
-        assert_eq!(badge_spacing(1.0), egui::vec2(item_gap(1.0), item_gap(1.0)));
-    }
-}

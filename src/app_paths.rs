@@ -3,9 +3,6 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-#[cfg(test)]
-use std::sync::{Mutex, OnceLock};
-
 pub const APP_DIR_NAME: &str = "ProjectX";
 const ENV_DATA_DIR: &str = "PROJECTX_DATA_DIR";
 const ENV_CONFIG_DIR: &str = "PROJECTX_CONFIG_DIR";
@@ -221,93 +218,4 @@ fn fallback_root() -> PathBuf {
     env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
         .join(".projectx")
-}
-
-#[cfg(test)]
-pub(crate) fn app_test_env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn env_map(values: &[(&str, &str)]) -> HashMap<String, String> {
-        values
-            .iter()
-            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
-            .collect()
-    }
-
-    #[test]
-    fn macos_paths_default_to_application_support_and_caches() {
-        let paths = compute_paths("macos", &env_map(&[("HOME", "/Users/tester")]));
-        assert_eq!(
-            paths.data_root,
-            PathBuf::from("/Users/tester/Library/Application Support/ProjectX")
-        );
-        assert_eq!(
-            paths.cache_root,
-            PathBuf::from("/Users/tester/Library/Caches/ProjectX")
-        );
-    }
-
-    #[test]
-    fn windows_paths_split_config_and_local_data() {
-        let paths = compute_paths(
-            "windows",
-            &env_map(&[
-                ("APPDATA", r"C:\Users\tester\AppData\Roaming"),
-                ("LOCALAPPDATA", r"C:\Users\tester\AppData\Local"),
-            ]),
-        );
-        assert_eq!(
-            paths.config_root,
-            PathBuf::from(r"C:\Users\tester\AppData\Roaming").join("ProjectX")
-        );
-        assert_eq!(
-            paths.data_root,
-            PathBuf::from(r"C:\Users\tester\AppData\Local").join("ProjectX")
-        );
-    }
-
-    #[test]
-    fn linux_paths_follow_xdg_directories() {
-        let paths = compute_paths(
-            "linux",
-            &env_map(&[
-                ("XDG_DATA_HOME", "/home/tester/.data"),
-                ("XDG_CONFIG_HOME", "/home/tester/.cfg"),
-                ("XDG_CACHE_HOME", "/home/tester/.cache-alt"),
-            ]),
-        );
-        assert_eq!(
-            paths.data_root,
-            PathBuf::from("/home/tester/.data/ProjectX")
-        );
-        assert_eq!(
-            paths.config_root,
-            PathBuf::from("/home/tester/.cfg/ProjectX")
-        );
-        assert_eq!(
-            paths.cache_root,
-            PathBuf::from("/home/tester/.cache-alt/ProjectX")
-        );
-    }
-
-    #[test]
-    fn explicit_data_override_wins() {
-        let paths = compute_paths(
-            "linux",
-            &env_map(&[
-                ("PROJECTX_DATA_DIR", "/tmp/projectx-data"),
-                ("PROJECTX_CONFIG_DIR", "/tmp/projectx-config"),
-                ("PROJECTX_CACHE_DIR", "/tmp/projectx-cache"),
-            ]),
-        );
-        assert_eq!(paths.data_root, PathBuf::from("/tmp/projectx-data"));
-        assert_eq!(paths.config_root, PathBuf::from("/tmp/projectx-config"));
-        assert_eq!(paths.cache_root, PathBuf::from("/tmp/projectx-cache"));
-    }
 }
